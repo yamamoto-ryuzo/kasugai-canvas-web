@@ -1,26 +1,28 @@
 import * as THREE from "three";
-import { initI18n, t, applyI18n, setLanguage, getLanguage, SUPPORTED_LANGUAGES, LANGUAGE_NAMES } from "/shared/i18n.js";
+import { initI18n, t, applyI18n, setLanguage, getLanguage, SUPPORTED_LANGUAGES, LANGUAGE_NAMES } from "../shared/i18n.js";
 import {
   initMcp, listMcpServers, upsertMcpServer, removeMcpServer,
   connectMcpServer, disconnectMcpServer, connectEnabledMcpServers,
   mcpRuntime, mcpDeclarations, callMcpTool,
-} from "/shared/mcp.js";
+} from "../shared/mcp.js";
 import {
   initBoxAuth, handleBoxRedirect,
-} from "/shared/box.js";
+} from "../shared/box.js";
 import {
   initAiChat, executeChatTool, showReportModal,
   listUiControls as sharedListUiControls, controlUi as sharedControlUi,
   updateChatPanelVisibility, updateBridgeProviderOptions, resyncProviderSelect,
   startRemoteCommandLoop, setBackendCapabilities,
-} from "/shared/ai-chat.js";
-import { loadQmlStyle, compileQmlStyle, setLayerVisibilityResolver, markerLayersToCanvas, fillPartsToTile, rgbaToCss } from "/shared/qml-style.js";
+} from "../shared/ai-chat.js";
+import { loadQmlStyle, compileQmlStyle, setLayerVisibilityResolver, markerLayersToCanvas, fillPartsToTile, rgbaToCss } from "../shared/qml-style.js";
 import { applyQmlStyleToDataSource, applyQmlStyleToPrimitive } from "./qml-render.js";
-import { wkbToGeoJsonGeometry, sanitizeVectorPropertyValue, quoteSqlIdent, quoteSqlLiteral } from "/shared/vector-decode.js";
-import { buildWmsTileTemplate, buildWmtsTileTemplate, rewriteKascLineVisibility, themeShowSet, kascTitleInTheme, fillThemeSelect, loadKascBookmarks, parseQgisBookmarksXml, qgisBookmarkToCam, downloadQgisBookmarksXml, downloadKascCamLines, parseKasc } from "/shared/kasc.js";
+import { wkbToGeoJsonGeometry, sanitizeVectorPropertyValue, quoteSqlIdent, quoteSqlLiteral } from "../shared/vector-decode.js";
+import { buildWmsTileTemplate, buildWmtsTileTemplate, rewriteKascLineVisibility, themeShowSet, kascTitleInTheme, fillThemeSelect, loadKascBookmarks, parseQgisBookmarksXml, qgisBookmarkToCam, downloadQgisBookmarksXml, downloadKascCamLines, parseKasc, camToZoomView, zoomToCamHeightView } from "../shared/kasc.js";
+import { mountEngineSwitcher } from "../shared/engine-switch.js";
 
 await initI18n();
 applyI18n();
+mountEngineSwitcher(document.querySelector("#engines"), "cesium");
 
 const Cesium = window.Cesium;
 
@@ -1331,13 +1333,17 @@ function updateUrlFromCamera() {
   const heading = Number(viewer.camera.heading * 180 / Math.PI).toFixed(2);
   const height = Number(c.height).toFixed(1);
   const params = new URLSearchParams(window.location.search);
-  ["latitude", "longitude", "height", "pitch", "heading"].forEach(key => params.delete(key));
+  ["latitude", "longitude", "height", "zoom", "pitch", "heading"].forEach(key => params.delete(key));
   if (currentKascUrl) { params.set("kasc", currentKascUrl); params.delete("project"); }
   else if (currentProjectId) params.set("project", currentProjectId);
   const hashParams = new URLSearchParams();
   hashParams.set("latitude", lat);
   hashParams.set("longitude", lon);
   hashParams.set("height", height);
+  // 実ビューポート換算のズームを併記する（2Dエンジンは zoom 優先で読むため
+  // height だけではスケールがずれる。傾斜時は直下換算の近似）
+  const zoom = camToZoomView({ latitude: Number(lat), height: Number(height) }, viewer.canvas.clientHeight, Cesium.Math.toDegrees(viewer.camera.frustum.fovy));
+  hashParams.set("zoom", zoom.toFixed(3));
   hashParams.set("pitch", pitch);
   hashParams.set("heading", heading);
   const search = params.toString();
@@ -2515,7 +2521,7 @@ let gpkgWorkerReqId = 0;
 const gpkgWorkerPending = new Map();
 function loadGpkgWorker() {
   if (!gpkgWorker) {
-    gpkgWorker = new Worker(new URL("/shared/gpkg-worker.js", location.origin), { type: "module" });
+    gpkgWorker = new Worker(new URL("../shared/gpkg-worker.js", location.origin), { type: "module" });
     gpkgWorker.onmessage = event => {
       const data = event.data || {};
       const pending = gpkgWorkerPending.get(data.reqId);
@@ -8066,10 +8072,18 @@ function parseUrlCamera(source = window.location.search + window.location.hash) 
     const value = Number(raw);
     return Number.isFinite(value) ? value : fallback;
   };
+  const latitude = getNumber("latitude");
+  const zoom = getNumber("zoom");
+  // 2Dエンジンとの往復URLでは zoom が正典。あれば実FOV・実キャンバス高で
+  // 高さへ変換し、無ければ（従来URLやCesium自身のheightのみのURL）は
+  // height をそのまま使う
+  const height = Number.isFinite(zoom)
+    ? zoomToCamHeightView(latitude, zoom, viewer.canvas.clientHeight, Cesium.Math.toDegrees(viewer.camera.frustum.fovy))
+    : getNumber("height", DEFAULT_VIEW.height);
   return {
-    latitude: getNumber("latitude"),
+    latitude,
     longitude: getNumber("longitude"),
-    height: getNumber("height", DEFAULT_VIEW.height),
+    height,
     pitch: getNumber("pitch", DEFAULT_VIEW.pitch),
     heading: getNumber("heading", DEFAULT_VIEW.heading),
   };
@@ -8714,7 +8728,8 @@ window.kasugaiApi = {
     const pitch = Number(viewer.camera.pitch * 180 / Math.PI).toFixed(2);
     const heading = Number(viewer.camera.heading * 180 / Math.PI).toFixed(2);
     const height = Number(c.height).toFixed(1);
-    return `${window.location.origin}${window.location.pathname}?longitude=${lon}&latitude=${lat}&height=${height}&pitch=${pitch}&heading=${heading}&${projectQueryParam()}`;
+    const zoom = camToZoomView({ latitude: Number(lat), height: Number(height) }, viewer.canvas.clientHeight, Cesium.Math.toDegrees(viewer.camera.frustum.fovy)).toFixed(3);
+    return `${window.location.origin}${window.location.pathname}?longitude=${lon}&latitude=${lat}&height=${height}&zoom=${zoom}&pitch=${pitch}&heading=${heading}&${projectQueryParam()}`;
   },
   // 任意の座標・視点の共有URLを組み立てる。省略した引数は現在視点を使う。
   // 資料の各節に視点別パーマリンクを埋め込む用途向け
@@ -8737,7 +8752,10 @@ window.kasugaiApi = {
     const h = pick(height, current.height);
     const p = pick(pitch, current.pitch);
     const hd = pick(heading, current.heading);
-    if (Number.isFinite(h)) params.set("height", h.toFixed(1));
+    if (Number.isFinite(h)) {
+      params.set("height", h.toFixed(1));
+      params.set("zoom", camToZoomView({ latitude: lat, height: h }, viewer.canvas.clientHeight, Cesium.Math.toDegrees(viewer.camera.frustum.fovy)).toFixed(3));
+    }
     if (Number.isFinite(p)) params.set("pitch", p.toFixed(2));
     if (Number.isFinite(hd)) params.set("heading", hd.toFixed(2));
     if (typeof project === "string" && project) params.set("project", project);

@@ -1,13 +1,14 @@
 // KASUGAI Canvas — Leaflet フロント
 // .kasc プレイヤーモード: projects/<id>/ の .kasc+DATA/ を Leaflet で再生する
-import { loadKascProject, parseKasc, resolveKascUrl, camToZoom, zoomToCamHeight, parseUrlView, hasUrlView, writeUrlView, geojsonExtent, splitKascTitle, sanitizeAttributionFragment, layerAttribution, buildWmtsTileTemplate, rewriteKascVisibility, themeShowSet, kascTitleInTheme, fillThemeSelect, loadKascBookmarks, parseQgisBookmarksXml, qgisBookmarkToCam, downloadQgisBookmarksXml, downloadKascCamLines } from "/shared/kasc.js";
-import { loadVectorItem } from "/shared/vector-load.js";
-import { initAiChat, hasBackendFeature } from "/shared/ai-chat.js";
-import { createPlayerApi } from "/shared/player-api.js";
+import { loadKascProject, parseKasc, resolveKascUrl, camToZoom, zoomToCamHeight, parseUrlView, hasUrlView, writeUrlView, geojsonExtent, splitKascTitle, sanitizeAttributionFragment, layerAttribution, buildWmtsTileTemplate, rewriteKascVisibility, themeShowSet, kascTitleInTheme, fillThemeSelect, loadKascBookmarks, parseQgisBookmarksXml, qgisBookmarkToCam, downloadQgisBookmarksXml, downloadKascCamLines } from "../shared/kasc.js";
+import { loadVectorItem } from "../shared/vector-load.js";
+import { initAiChat, hasBackendFeature } from "../shared/ai-chat.js";
+import { createPlayerApi } from "../shared/player-api.js";
+import { mountEngineSwitcher } from "../shared/engine-switch.js";
 
-import { groundDeckTileset } from "/shared/deck-ground.js";
-import { buildDeckDrapeLayers, invalidateDeckTerrainCovers } from "/shared/deck-drape.js";
-import { qmlLegendSwatchDataUrl, specToStyle, loadCompiledQml, compiledScaleToResRange, resToZoom } from "/shared/qml-2d.js";
+import { groundDeckTileset } from "../shared/deck-ground.js";
+import { buildDeckDrapeLayers, invalidateDeckTerrainCovers } from "../shared/deck-drape.js";
+import { qmlLegendSwatchDataUrl, specToStyle, loadCompiledQml, compiledScaleToResRange, resToZoom } from "../shared/qml-2d.js";
 
 const VECTOR_TYPES = new Set(["geojson", "layer", "geoparquet", "parquet", "flatgeobuf", "fgb", "gpkg", "geopackage", "csv", "tsv", "duckdb", "sql"]);
 
@@ -1481,4 +1482,5 @@ window.kasugaiApi = createPlayerApi({
     updateMapAttribution();
   },
 });
+mountEngineSwitcher(document.querySelector("#engines"), "leaflet");
 void initAiChat({ engine: "leaflet", manageBackend: true });

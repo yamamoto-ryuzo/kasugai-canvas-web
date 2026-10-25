@@ -1,13 +1,14 @@
 // KASUGAI Canvas — MapLibre フロント
 // .kasc プレイヤーモード: projects/<id>/ の .kasc+DATA/ を MapLibre GL で再生する
-import { loadKascProject, parseKasc, resolveKascUrl, camToZoom, zoomToCamHeight, parseUrlView, hasUrlView, writeUrlView, geojsonExtent, splitKascTitle, sanitizeAttributionFragment, layerAttribution, buildWmsTileTemplate, buildWmtsTileTemplate, rewriteKascVisibility, themeShowSet, kascTitleInTheme, fillThemeSelect, loadKascBookmarks, parseQgisBookmarksXml, qgisBookmarkToCam, downloadQgisBookmarksXml, downloadKascCamLines } from "/shared/kasc.js";
-import { loadVectorItem } from "/shared/vector-load.js";
-import { initAiChat, hasBackendFeature } from "/shared/ai-chat.js";
-import { createPlayerApi } from "/shared/player-api.js";
+import { loadKascProject, parseKasc, resolveKascUrl, camToZoom, zoomToCamHeight, parseUrlView, hasUrlView, writeUrlView, geojsonExtent, splitKascTitle, sanitizeAttributionFragment, layerAttribution, buildWmsTileTemplate, buildWmtsTileTemplate, rewriteKascVisibility, themeShowSet, kascTitleInTheme, fillThemeSelect, loadKascBookmarks, parseQgisBookmarksXml, qgisBookmarkToCam, downloadQgisBookmarksXml, downloadKascCamLines } from "../shared/kasc.js";
+import { loadVectorItem } from "../shared/vector-load.js";
+import { initAiChat, hasBackendFeature } from "../shared/ai-chat.js";
+import { createPlayerApi } from "../shared/player-api.js";
+import { mountEngineSwitcher } from "../shared/engine-switch.js";
 
-import { groundDeckTileset } from "/shared/deck-ground.js";
-import { buildDeckDrapeLayers, invalidateDeckTerrainCovers } from "/shared/deck-drape.js";
-import { qmlLegendSwatchDataUrl } from "/shared/qml-2d.js";
+import { groundDeckTileset } from "../shared/deck-ground.js";
+import { buildDeckDrapeLayers, invalidateDeckTerrainCovers } from "../shared/deck-drape.js";
+import { qmlLegendSwatchDataUrl } from "../shared/qml-2d.js";
 
 const VECTOR_TYPES = new Set(["geojson", "layer", "geoparquet", "parquet", "flatgeobuf", "fgb", "gpkg", "geopackage", "csv", "tsv", "duckdb", "sql"]);
 
@@ -324,7 +325,7 @@ async function addKascLayer(item, baseUrl, preloaded, beforeIdFn) {
     let zoomRange = null;
     if (item.opts?.style) {
       try {
-        const { loadCompiledQml, maplibreApplyQml, compiledScaleToResRange, resToZoom } = await import("/shared/qml-2d.js");
+        const { loadCompiledQml, maplibreApplyQml, compiledScaleToResRange, resToZoom } = await import("../shared/qml-2d.js");
         const compiled = await loadCompiledQml(item.opts.style, baseUrl);
         item._qml = compiled;
         kinds = maplibreApplyQml(geojson, compiled).kinds;
@@ -1483,4 +1484,5 @@ window.kasugaiApi = createPlayerApi({
     updateMapAttribution();
   },
 });
+mountEngineSwitcher(document.querySelector("#engines"), "maplibre");
 void initAiChat({ engine: "maplibre", manageBackend: true });

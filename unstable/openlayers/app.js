@@ -9,20 +9,21 @@ import TileWMS from "https://esm.sh/ol@10.6.1/source/TileWMS.js";
 import VectorSource from "https://esm.sh/ol@10.6.1/source/Vector.js";
 import GeoJSON from "https://esm.sh/ol@10.6.1/format/GeoJSON.js";
 import { fromLonLat, toLonLat, transformExtent } from "https://esm.sh/ol@10.6.1/proj.js";
-import { loadKascProject, parseKasc, resolveKascUrl, camToZoom, zoomToCamHeight, parseUrlView, hasUrlView, writeUrlView, geojsonExtent, splitKascTitle, sanitizeAttributionFragment, layerAttribution, buildWmtsTileTemplate, rewriteKascVisibility, themeShowSet, kascTitleInTheme, fillThemeSelect, loadKascBookmarks, parseQgisBookmarksXml, qgisBookmarkToCam, downloadQgisBookmarksXml, downloadKascCamLines } from "/shared/kasc.js";
-import { loadVectorItem } from "/shared/vector-load.js";
-import { initAiChat, hasBackendFeature } from "/shared/ai-chat.js";
-import { createPlayerApi } from "/shared/player-api.js";
+import { loadKascProject, parseKasc, resolveKascUrl, camToZoom, zoomToCamHeight, parseUrlView, hasUrlView, writeUrlView, geojsonExtent, splitKascTitle, sanitizeAttributionFragment, layerAttribution, buildWmtsTileTemplate, rewriteKascVisibility, themeShowSet, kascTitleInTheme, fillThemeSelect, loadKascBookmarks, parseQgisBookmarksXml, qgisBookmarkToCam, downloadQgisBookmarksXml, downloadKascCamLines } from "../shared/kasc.js";
+import { loadVectorItem } from "../shared/vector-load.js";
+import { initAiChat, hasBackendFeature } from "../shared/ai-chat.js";
+import { createPlayerApi } from "../shared/player-api.js";
+import { mountEngineSwitcher } from "../shared/engine-switch.js";
 
-import { groundDeckTileset } from "/shared/deck-ground.js";
-import { buildDeckDrapeLayers, invalidateDeckTerrainCovers } from "/shared/deck-drape.js";
-import { qmlLegendSwatchDataUrl } from "/shared/qml-2d.js";
+import { groundDeckTileset } from "../shared/deck-ground.js";
+import { buildDeckDrapeLayers, invalidateDeckTerrainCovers } from "../shared/deck-drape.js";
+import { qmlLegendSwatchDataUrl } from "../shared/qml-2d.js";
 import Style from "https://esm.sh/ol@10.6.1/style/Style.js";
 import Fill from "https://esm.sh/ol@10.6.1/style/Fill.js";
 import Stroke from "https://esm.sh/ol@10.6.1/style/Stroke.js";
 import CircleStyle from "https://esm.sh/ol@10.6.1/style/Circle.js";
 import Icon from "https://esm.sh/ol@10.6.1/style/Icon.js";
-import { loadCompiledQml, olQmlStyleFunction, compiledScaleToResRange } from "/shared/qml-2d.js";
+import { loadCompiledQml, olQmlStyleFunction, compiledScaleToResRange } from "../shared/qml-2d.js";
 import { defaults as defaultControls } from "https://esm.sh/ol@10.6.1/control/defaults.js";
 import ScaleLine from "https://esm.sh/ol@10.6.1/control/ScaleLine.js";
 import MousePosition from "https://esm.sh/ol@10.6.1/control/MousePosition.js";
@@ -1408,4 +1409,5 @@ window.kasugaiApi = createPlayerApi({
   },
   setBaseEntryVisible: (entry, on) => { entry.layer?.setVisible?.(on); updateMapAttribution(); },
 });
+mountEngineSwitcher(document.querySelector("#engines"), "openlayers");
 void initAiChat({ engine: "openlayers", manageBackend: true });

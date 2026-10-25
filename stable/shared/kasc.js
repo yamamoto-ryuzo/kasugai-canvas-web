@@ -443,6 +443,26 @@ export function zoomToCamHeight(latitude, zoom) {
   return 156543.03392 * Math.cos(lat * Math.PI / 180) * 128 / Math.pow(2, zoom);
 }
 
+// 実ビューポートを考慮した高度⇄ズーム変換。
+// camToZoom/zoomToCamHeight は固定近似（画面512px・視野角45°相当）だが、実際の
+// 見え方は垂直FOVとキャンバス高で決まる。3Dエンジン(Cesium)で他エンジンと
+// スケールを揃えるため、実値で相互変換する版。傾斜時は直下換算の近似。
+export function camToZoomView(cam, viewportHeightPx = 512, fovYDeg = 60) {
+  const lat = Math.max(-80, Math.min(80, cam.latitude || 0));
+  const h = Math.max(1, cam.height || 3000);
+  const vh = Math.max(1, viewportHeightPx || 512);
+  const mpp = (2 * h * Math.tan(fovYDeg * Math.PI / 360)) / vh;
+  const zoom = Math.log2((156543.03392 * Math.cos(lat * Math.PI / 180)) / mpp);
+  return Math.max(2, Math.min(20, zoom));
+}
+
+export function zoomToCamHeightView(latitude, zoom, viewportHeightPx = 512, fovYDeg = 60) {
+  const lat = Math.max(-80, Math.min(80, latitude || 0));
+  const vh = Math.max(1, viewportHeightPx || 512);
+  const mpp = 156543.03392 * Math.cos(lat * Math.PI / 180) / Math.pow(2, zoom);
+  return (mpp * vh) / (2 * Math.tan(fovYDeg * Math.PI / 360));
+}
+
 // ---- bookmark: 行（QGIS ブックマークエクスポート XML → カメラプリセット） ----
 
 // qgis_bookmarks XML の sr_id は QGIS 内部 srsid で EPSG とは一致しない。

@@ -1,7 +1,0 @@
-{
-  "version": "5.28.0-dev.3",
-  "channel": "stable",
-  "note": "provisional: seeded from kasugai_canvas develop (multi-engine). replace with first >=5.28.0 release sync",
-  "source_repo": "yamamoto-ryuzo/kasugai_canvas",
-  "source_branch": "develop"
-}
