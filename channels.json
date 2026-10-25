@@ -1,0 +1,5 @@
+{
+  "stable": "5.28.0-dev.3",
+  "unstable": "5.28.0-dev.3",
+  "default": "stable"
+}

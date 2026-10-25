@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>KASUGAI Canvas</title>
+<script>
+  // エンジン選択リダイレクト: ?engine=cesium|maplibre|openlayers|leaflet（既定 cesium）。
+  // engine 以外のクエリとハッシュはそのまま対象エンジンへ引き継ぐ
+  (function () {
+    var ENGINES = { cesium: "cesium/", maplibre: "maplibre/", openlayers: "openlayers/", leaflet: "leaflet/" };
+    var params = new URLSearchParams(location.search);
+    var engine = (params.get("engine") || "cesium").toLowerCase();
+    var target = ENGINES[engine] || ENGINES.cesium;
+    params.delete("engine");
+    var q = params.toString();
+    location.replace(target + (q ? "?" + q : "") + location.hash);
+  })();
+</script>
+</head>
+<body>
+<p>Redirecting to <a href="cesium/">KASUGAI Canvas</a>…</p>
+</body>
+</html>
