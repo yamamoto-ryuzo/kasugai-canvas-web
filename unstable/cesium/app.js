@@ -18,7 +18,7 @@ import { loadQmlStyle, compileQmlStyle, setLayerVisibilityResolver, markerLayers
 import { applyQmlStyleToDataSource, applyQmlStyleToPrimitive } from "./qml-render.js";
 import { wkbToGeoJsonGeometry, sanitizeVectorPropertyValue, quoteSqlIdent, quoteSqlLiteral } from "../shared/vector-decode.js";
 import { buildWmsTileTemplate, buildWmtsTileTemplate, rewriteKascLineVisibility, themeShowSet, kascTitleInTheme, fillThemeSelect, loadKascBookmarks, parseQgisBookmarksXml, qgisBookmarkToCam, downloadQgisBookmarksXml, downloadKascCamLines, parseKasc, camToZoomView, zoomToCamHeightView } from "../shared/kasc.js";
-import { mountEngineSwitcher } from "../shared/engine-switch.js";
+import { mountEngineSwitcher, consumeEngineSwitchState } from "../shared/engine-switch.js";
 
 await initI18n();
 applyI18n();
@@ -909,6 +909,10 @@ async function loadProjects() {
   updateProjectRootPath();
 }
 
+// エンジン切替で引き継がれた状態。loadInspectorConfig で初期テキストへ
+// 反映し、残り(可視性・テーマ)は初回適用後に反映する
+let switchRestore = null;
+
 async function loadInspectorConfig() {
   try {
     const projectId = currentProjectId || "default";
@@ -929,6 +933,8 @@ async function loadInspectorConfig() {
       }
       text = defaultConfig;
     }
+    // エンジン切替の引継ぎ .kasc があれば初期テキストとして使う
+    if (switchRestore?.inspector != null && switchRestore.inspector !== text) text = switchRestore.inspector;
     document.querySelector("#inspector-input").value = text;
     applyInspector(text);
     setInspectorStatus(t("inspector.status.loaded"));
@@ -9063,7 +9069,43 @@ window.addEventListener("pagehide", () => {
   // capabilities 取得後に既定エージェントエンドポイントを反映するため再評価する
   updateChatPanelVisibility();
   try { await loadProjects(); } catch (e) { console.error(e); }
+  try { switchRestore = consumeEngineSwitchState(); } catch (e) {}
   try { await loadInspectorConfig(); } catch (e) { console.error(e); }
+  // 他エンジンからの切替時、同一プロジェクトなら引き継がれたレイヤ状態
+  // (各レイヤの可視性・テーマ選択)を適用する。インスペクタ差分は
+  // loadInspectorConfig の初期テキストへ反映済み
+  try {
+    const st = switchRestore;
+    switchRestore = null;
+    if (st) {
+      if (Array.isArray(st.vis)) {
+        const items = getOrderedLayerItems();
+        const leafOf = t => String(t).split("/").map(s => s.trim()).pop();
+        const exact = new Map(items.map(i => [i.title, i]));
+        const byFull = new Map(), byLeaf = new Map();
+        for (const i of items) {
+          byFull.set(i.sourceTitle || (i.group ? `${i.group}/${i.title}` : i.title), i);
+          const k = leafOf(i.title);
+          byLeaf.set(k, byLeaf.has(k) ? null : i);
+        }
+        let changed = false;
+        for (const { t: title, v } of st.vis) {
+          const item = exact.get(title) || byFull.get(title) || byLeaf.get(leafOf(title));
+          if (!item || !!item.visible === !!v) continue;
+          item.visible = !!v;
+          if (item.visible && item.exclusiveGroup) {
+            for (const other of items) {
+              if (other !== item && other.group === item.group && other.exclusiveGroup) other.visible = false;
+            }
+          }
+          changed = true;
+        }
+        if (changed) { renderLayerList(); refreshLayers(); }
+      }
+      const sel = document.querySelector("#theme-select");
+      if (st.theme && sel && [...sel.options].some(o => o.value === st.theme)) sel.value = st.theme;
+    }
+  } catch (e) { console.error(e); }
   try { await ensureDrawnRouteFlyPath(); } catch (e) { console.error(e); }
   try { await loadUpdateInfo(); } catch (e) { console.error(e); }
   // リモートコマンド経路(local ティアのみ): 外部プロセスが /api/command に POST した
