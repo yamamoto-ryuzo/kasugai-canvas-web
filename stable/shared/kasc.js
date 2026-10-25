@@ -229,7 +229,16 @@ async function loadKascUrl(kascParam) {
     lf.installFetchShim();
   }
   const kascUrl = new URL(kascParam, location.href).href;
-  const res = await fetch(kascUrl, { cache: "no-store" });
+  let res;
+  try {
+    res = await fetch(kascUrl, { cache: "no-store" });
+  } catch (e) {
+    if (/^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])/i.test(kascUrl))
+      throw new Error(
+        ".kasc を読み込めません(ローカルサーバーへの接続がブラウザにブロックされました)。" +
+        "アドレスバー左のサイト設定で「ローカルネットワークアクセス」を許可してください: " + kascUrl);
+    throw e;
+  }
   if (!res.ok) throw new Error(`.kasc を読み込めません: ${kascUrl} (${res.status})`);
   const text = await res.text();
   const baseUrl = new URL("./", kascUrl).href;
