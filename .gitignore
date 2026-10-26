@@ -1,0 +1,22 @@
+# OS 生成物
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# エディタ・ツール
+.vscode/
+.idea/
+
+# ログ・一時ファイル
+*.log
+*.tmp
+~*
+
+# Python キャッシュ（publish_cdn.py 等の実行で生成され得るもの）
+__pycache__/
+*.pyc
+
+# ローカル環境・シークレット
+.env
+.env.*
+!.env.example

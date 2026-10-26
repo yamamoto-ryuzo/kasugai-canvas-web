@@ -20,8 +20,8 @@ KASUGAI Canvas 未インストール環境でもブラウザ再生できるよ�
 
 - **正本は `yamamoto-ryuzo/kasugai_canvas` の `web/`**。このリポジトリは
   発行物のみ置き、直接編集しない
-- `unstable/` は develop の `web/` を同期、`stable/` はリリース時に
-  検証済み unstable の中身をそのままコピーして格上げ(再ビルドしない)
+- `unstable/`・`stable/` はどちらも kasugai_canvas 側の `web/` を直接同期する
+  (`--channel` がコピー先を選ぶだけで、格上げ・再ビルドの概念はない)
 - 同期は kasugai_canvas 側の `python tools/publish_cdn.py` で実行
 
 ## ライセンス

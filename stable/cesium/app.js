@@ -115,6 +115,10 @@ let undergroundTransparency = 0;
 let undergroundDiveEnabled = true;
 let undergroundBackgroundColor = Cesium.Color.BLACK;
 let basemapDrape3DTiles = false;
+// 表示>一般タブ: 透過度スライダ(ベースマップ/レイヤー)の係数と現在のベースマップ ImageryLayer
+let basemapOpacityFactor = 1;
+let layerOpacityFactor = 1;
+let basemapImageryLayer = null;
 let infoRequestId = 0;
 let walkModeActive = false;
 let streetViewPickMode = false;
@@ -3243,7 +3247,9 @@ async function refreshLayersImpl() {
         maximumLevel: selectedBasemap.maximumLevel || DEFAULT_MAXIMUM_LEVEL,
         tileSize: selectedBasemap.tileSize || 256,
       });
-      viewer.imageryLayers.add(new Cesium.ImageryLayer(provider, { alpha: selectedBasemap.opacity ?? 1.0 }));
+      basemapImageryLayer = new Cesium.ImageryLayer(provider, { alpha: (selectedBasemap.opacity ?? 1.0) * basemapOpacityFactor });
+      basemapImageryLayer._baseAlpha = selectedBasemap.opacity ?? 1.0;
+      viewer.imageryLayers.add(basemapImageryLayer);
     } catch (error) {
       console.warn("ベースマップの作成に失敗しました:", error);
     }
@@ -3262,7 +3268,8 @@ async function refreshLayersImpl() {
         bbox: item.bbox,
         tileSize: item.tileSize || 256,
       });
-      const imageryLayer = new Cesium.ImageryLayer(provider, { alpha: item.opacity ?? 0.8 });
+      const imageryLayer = new Cesium.ImageryLayer(provider, { alpha: (item.opacity ?? 0.8) * layerOpacityFactor });
+      imageryLayer._baseAlpha = item.opacity ?? 0.8;
       viewer.imageryLayers.add(imageryLayer);
       layerRuntimeTargets.set(item.id, imageryLayer);
     } catch (error) {
@@ -4941,6 +4948,135 @@ function setupEvents() {
     terrainEnabled = event.target.checked;
     refreshLayers();
   });
+
+  // 地形の誇張（CesiumJS 1.113+ の scene.verticalExaggeration。地形と 3D Tiles に同時に効く）
+  const terrainExaggInput = document.querySelector("#terrain-exaggeration");
+  const terrainExaggValue = document.querySelector("#terrain-exaggeration-value");
+  if (terrainExaggInput) {
+    terrainExaggInput.addEventListener("input", event => {
+      const v = Number(event.target.value);
+      viewer.scene.verticalExaggeration = Number.isFinite(v) ? v : 1;
+      if (terrainExaggValue) terrainExaggValue.textContent = `×${(Number.isFinite(v) ? v : 1).toFixed(1)}`;
+      requestRender();
+    });
+  }
+
+  // ---- 表示>一般タブ: 透過度スライダ・スケールバー・カーソル座標・クリックポップアップ ----
+  const scalebarEl = document.querySelector("#cesium-scalebar");
+  const coordsEl = document.querySelector("#cesium-coords");
+  const attrPopupEl = document.querySelector("#attr-popup");
+
+  const basemapOpacityInput = document.querySelector("#display-basemap-opacity");
+  if (basemapOpacityInput) {
+    basemapOpacityInput.addEventListener("input", event => {
+      basemapOpacityFactor = Number(event.target.value) || 0;
+      if (basemapImageryLayer) basemapImageryLayer.alpha = (basemapImageryLayer._baseAlpha ?? 1) * basemapOpacityFactor;
+      requestRender();
+    });
+  }
+  const layerOpacityInput = document.querySelector("#display-layer-opacity");
+  if (layerOpacityInput) {
+    layerOpacityInput.addEventListener("input", event => {
+      layerOpacityFactor = Number(event.target.value) || 0;
+      const len = viewer.imageryLayers.length;
+      for (let i = 0; i < len; i++) {
+        const l = viewer.imageryLayers.get(i);
+        if (l === basemapImageryLayer) continue;
+        l.alpha = (l._baseAlpha ?? l.alpha) * layerOpacityFactor;
+      }
+      requestRender();
+    });
+  }
+
+  // スケールバー: 画面中心の地表までの距離からメートル/ピクセルを出し、
+  // 概ね110pxになる丸めた距離(1,2,5系)を表示する。camera.changed で更新
+  function updateCesiumScalebar() {
+    if (!scalebarEl) return;
+    if (!document.querySelector("#display-scalebar")?.checked) { scalebarEl.hidden = true; return; }
+    try {
+      const canvas = viewer.canvas;
+      const center = new Cesium.Cartesian2(canvas.clientWidth / 2, canvas.clientHeight / 2);
+      const ray = viewer.camera.getPickRay(center);
+      const ground = ray && (viewer.scene.globe.pick(ray, viewer.scene) || viewer.camera.pickEllipsoid(center));
+      if (!ground) { scalebarEl.hidden = true; return; }
+      const dist = Cesium.Cartesian3.distance(viewer.camera.position, ground);
+      const fovy = viewer.camera.frustum.fovy;
+      const mpp = (2 * dist * Math.tan(fovy / 2)) / canvas.clientHeight;
+      if (!Number.isFinite(mpp) || mpp <= 0) { scalebarEl.hidden = true; return; }
+      const target = mpp * 110;
+      const pow10 = Math.pow(10, Math.floor(Math.log10(target)));
+      let nice = pow10;
+      for (const m of [1, 2, 5, 10]) { if (m * pow10 >= target) { nice = m * pow10; break; } }
+      scalebarEl.style.width = `${Math.max(20, nice / mpp)}px`;
+      scalebarEl.textContent = nice >= 1000 ? `${nice / 1000} km` : `${nice} m`;
+      scalebarEl.hidden = false;
+    } catch (_) { scalebarEl.hidden = true; }
+  }
+  viewer.camera.changed.addEventListener(updateCesiumScalebar);
+  document.querySelector("#display-scalebar")?.addEventListener("change", updateCesiumScalebar);
+  setTimeout(updateCesiumScalebar, 1500);
+
+  // カーソル座標(楕円体上の緯度経度。地形ピックは高負荷のため拾わない)
+  viewer.canvas.addEventListener("pointermove", e => {
+    if (!coordsEl) return;
+    if (!document.querySelector("#display-coords")?.checked) { coordsEl.hidden = true; return; }
+    const rect = viewer.canvas.getBoundingClientRect();
+    const pos = new Cesium.Cartesian2(e.clientX - rect.left, e.clientY - rect.top);
+    const cart = viewer.camera.pickEllipsoid(pos, viewer.scene.globe.ellipsoid);
+    if (!cart) { coordsEl.hidden = true; return; }
+    const c = Cesium.Cartographic.fromCartesian(cart);
+    coordsEl.textContent = `${(c.latitude * 180 / Math.PI).toFixed(5)}, ${(c.longitude * 180 / Math.PI).toFixed(5)}`;
+    coordsEl.hidden = false;
+  });
+  document.querySelector("#display-coords")?.addEventListener("change", e => {
+    if (coordsEl && !e.target.checked) coordsEl.hidden = true;
+  });
+
+  // 地物クリックの属性ポップアップ(オプション)。既存の属性パネル表示はそのまま併用する
+  viewer.canvas.addEventListener("click", e => {
+    if (!attrPopupEl) return;
+    attrPopupEl.hidden = true;
+    if (!document.querySelector("#display-popup")?.checked) return;
+    if (walkModeActive || streetViewPickMode) return;
+    const rect = viewer.canvas.getBoundingClientRect();
+    const pos = new Cesium.Cartesian2(e.clientX - rect.left, e.clientY - rect.top);
+    const pickedList = viewer.scene.drillPick(pos, 8) || [];
+    const time = Cesium.JulianDate.now();
+    const seen = new Set();
+    const frag = document.createDocumentFragment();
+    let count = 0;
+    for (const picked of pickedList) {
+      const key = picked?.id || picked?.properties || picked;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      let entries = null, label = "";
+      if (picked?.id?.properties) {
+        entries = Object.entries(picked.id.properties.getValue(time) || {});
+        label = typeof picked.id.name === "string" ? picked.id.name : "";
+      } else if (picked?.properties) {
+        entries = Object.entries(picked.properties);
+      } else if (typeof picked?.getPropertyNames === "function") {
+        entries = picked.getPropertyNames().map(n => [n, picked.getProperty(n)]);
+      }
+      if (!entries || !entries.length) continue;
+      if (label) {
+        const t = document.createElement("div");
+        t.className = "attr-popup-title";
+        t.textContent = label;
+        frag.append(t);
+      }
+      frag.append(buildAttrTable(entries.slice(0, 30)));
+      if (++count >= 4) break;
+    }
+    if (!count) return;
+    attrPopupEl.replaceChildren(frag);
+    const vw = viewer.canvas.parentElement.getBoundingClientRect();
+    let px = e.clientX - vw.left + 12, py = e.clientY - vw.top + 8;
+    attrPopupEl.style.left = `${Math.min(px, Math.max(0, vw.width - 310))}px`;
+    attrPopupEl.style.top = `${Math.min(py, Math.max(0, vw.height - 250))}px`;
+    attrPopupEl.hidden = false;
+  });
+  viewer.camera.changed.addEventListener(() => { if (attrPopupEl) attrPopupEl.hidden = true; });
 
   document.querySelector("#dem-source").addEventListener("change", event => {
     selectedDemSource = event.target.value;
@@ -6994,6 +7130,7 @@ function setupEvents() {
         item: (match && layerState.get(match.id)) || findAttrLayerItem(ds),
         label: typeof entity.name === "string" && entity.name ? entity.name : null,
         entries: Object.entries(entity.properties.getValue(time) || {}),
+        entity,
       };
     }
     return null;
@@ -7119,6 +7256,17 @@ function setupEvents() {
       labelEl.textContent = label;
       header.append(marker, labelEl);
       const table = buildAttrTable(record.entries);
+      // 属性行クリックでその地物へ飛ぶ(属性・値一覧の行クリックと同じ挙動)。
+      // 位置が取れる entity 由来のレコードのみ対象
+      const flyCartesian = record.entity ? getEntityPosition(record.entity) : null;
+      const flyDeg = flyCartesian ? cartesianToDegrees(flyCartesian) : null;
+      if (flyDeg && Number.isFinite(flyDeg.lat) && Number.isFinite(flyDeg.lng)) {
+        table.querySelectorAll("tr").forEach(tr => {
+          tr.style.cursor = "pointer";
+          tr.title = t("vattr.clickToMove");
+          tr.addEventListener("click", () => { void flyToFeature(flyDeg.lat, flyDeg.lng); });
+        });
+      }
       const setOpen = open => {
         table.hidden = !open;
         marker.textContent = open ? "▾" : "▸";
@@ -7537,16 +7685,14 @@ function setupVectorSearch() {
     vectorAttrWidgetAttributes = attributes;
     vectorAttrWidgetRows = features.filter(feature => feature && feature.type === "Feature").map(feature => {
       const props = feature.properties || {};
-      const coordinates = feature.geometry && feature.geometry.type === "Point" && feature.geometry.coordinates;
-      const lng = coordinates && Number(coordinates[0]);
-      const lat = coordinates && Number(coordinates[1]);
+      const deg = geoJsonFeatureDegrees(feature);
       return {
         values: attributes.map(attr => {
           const raw = props[attr];
           return raw == null ? "" : (typeof raw === "object" ? JSON.stringify(raw) : String(raw));
         }),
-        lat: Number.isFinite(lat) ? lat : null,
-        lng: Number.isFinite(lng) ? lng : null,
+        lat: deg && Number.isFinite(deg.lat) ? deg.lat : null,
+        lng: deg && Number.isFinite(deg.lng) ? deg.lng : null,
       };
     });
     return true;
@@ -9091,6 +9237,25 @@ window.addEventListener("pagehide", () => {
   updateChatPanelVisibility();
   try { await loadProjects(); } catch (e) { console.error(e); }
   try { switchRestore = consumeEngineSwitchState(); } catch (e) {}
+  // ?kasc=local / localfs:// — File System Access API でローカルフォルダを直読みする
+  // （shared/kasc.js のプレイヤー系と同じ入口。fetch シムで DATA/ 等の相対参照も通す）
+  try {
+    const kascParam = urlParams.get("kasc");
+    if (kascParam && (kascParam === "local" || kascParam === "localfs" || /^localfs:/i.test(kascParam))) {
+      const lf = await import("../shared/localfs.js");
+      if (kascParam === "local" || kascParam === "localfs") {
+        currentKascUrl = await lf.openLocalKascUrl();
+      } else {
+        await lf.pickProjectDir();
+        lf.installFetchShim();
+        currentKascUrl = kascParam;
+      }
+      if (currentKascUrl) {
+        currentProjectId = decodeURIComponent(new URL(currentKascUrl).pathname.split("/").pop() || "")
+          .replace(/\.kasc$/i, "") || "kasc";
+      }
+    }
+  } catch (e) { console.error("localfs の初期化に失敗:", e); }
   try { await loadInspectorConfig(); } catch (e) { console.error(e); }
   // 他エンジンからの切替時、同一プロジェクトなら引き継がれたレイヤ状態
   // (各レイヤの可視性・テーマ選択)を適用する。インスペクタ差分は
@@ -9144,3 +9309,33 @@ window.addEventListener("pagehide", () => {
   window.kasugaiApi.isReady = true;
   window.kasugaiApi.emit("ready");
 })();
+
+// ?follow[=<base>] → geo_webview の /present/state をポーリングして QGIS キャンバスに追従
+// （プレイヤー系エンジンと同じ入口。QGIS の2Dキャンバス状態を俯瞰カメラへ反映する）
+{
+  const followParams = new URLSearchParams(location.search);
+  if (followParams.has("follow") || followParams.has("present")) {
+    const base = followParams.get("follow") || followParams.get("present") || "";
+    const followTick = async () => {
+      try {
+        const s = await (await fetch(`${base}/present/state`)).json();
+        if (typeof s.lon !== "number" || typeof s.lat !== "number") return;
+        const height = typeof s.zoom === "number"
+          ? zoomToCamHeightView(s.lat, s.zoom, viewer.canvas.clientHeight, Cesium.Math.toDegrees(viewer.camera.frustum.fovy))
+          : Cesium.Cartographic.fromCartesian(viewer.camera.position)?.height;
+        if (!Number.isFinite(height)) return;
+        viewer.camera.setView({
+          destination: Cesium.Cartesian3.fromDegrees(s.lon, s.lat, height),
+          orientation: {
+            heading: Cesium.Math.toRadians(-(s.rotation || 0)),
+            pitch: -Cesium.Math.PI_OVER_TWO,
+            roll: 0,
+          },
+        });
+        requestRender();
+      } catch (_) { /* 接続不可時は前回状態を維持 */ }
+    };
+    setInterval(followTick, 1500);
+    void followTick();
+  }
+}
