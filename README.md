@@ -27,3 +27,7 @@ KASUGAI Canvas 未インストール環境でもブラウザ再生できるよ�
 - `unstable/` は develop の `web/` を同期、`stable/` はリリース時に
   検証済み unstable の中身をそのままコピーして格上げ(再ビルドしない)
 - 使い方: `https://yamamoto-ryuzo.github.io/kasugai-canvas-web/<stage>/<engine>/?kasc=<url>`
+
+## ライセンス
+
+[MIT License](LICENSE)。コンテンツの正本は `yamamoto-ryuzo/kasugai_canvas` の `web/` であり、ライセンスも正本に準じます。
