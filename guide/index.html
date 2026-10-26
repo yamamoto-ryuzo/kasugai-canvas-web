@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KASUGAI Canvas Web ガイド</title>
+<style>
+  body { font-family: system-ui, "Segoe UI", "Yu Gothic", sans-serif; max-width: 960px; margin: 0 auto; padding: 1.5rem; line-height: 1.7; color: #222; }
+  h1 { border-bottom: 3px solid #2b6cb0; padding-bottom: .3rem; }
+  h2 { margin-top: 2rem; border-left: 5px solid #2b6cb0; padding-left: .6rem; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid #ccc; padding: .5rem .8rem; text-align: left; }
+  th { background: #eef4fa; }
+  code { background: #f0f0f0; padding: .1em .35em; border-radius: 4px; }
+  pre code { display: block; padding: .8rem; overflow-x: auto; }
+  .engine { margin: 2rem 0; }
+  .engine img { width: 100%; max-width: 720px; border: 1px solid #ccc; border-radius: 6px; display: block; margin: .6rem 0; }
+  .badge { display: inline-block; background: #2b6cb0; color: #fff; font-size: .75rem; padding: .1em .5em; border-radius: 10px; vertical-align: middle; }
+  .note { background: #fff8e1; border: 1px solid #e0c96a; border-radius: 6px; padding: .6rem 1rem; }
+</style>
+</head>
+<body>
+<h1>KASUGAI Canvas Web ガイド</h1>
+
+<p>
+  <strong>kasugai-canvas-web</strong> は、KASUGAI Canvas の描画エンジン（<code>web/</code> 一式）を
+  GitHub Pages で静的配信する公開ホストです。QGIS プラグイン <code>geo_webview</code> が出力する
+  <code>.kasc</code> + <code>DATA/</code> プロジェクトを、KASUGAI Canvas 未インストール環境でも
+  ブラウザだけで再生できます。
+</p>
+
+<h2>ステージ（配信チャンネル）</h2>
+<table>
+  <tr><th>パス</th><th>内容</th><th>更新元</th></tr>
+  <tr><td><code>stable/</code></td><td>安定版（既定の起動先）</td><td>リリース時に unstable から格上げ</td></tr>
+  <tr><td><code>unstable/</code></td><td>開発版</td><td>kasugai_canvas <code>develop</code> の <code>web/</code></td></tr>
+  <tr><td><code>latest/</code></td><td><code>stable/</code> への互換リダイレクト</td><td>—</td></tr>
+</table>
+<p>現在の各ステージのバージョンは <code>channels.json</code> を参照してください。</p>
+
+<h2>使い方</h2>
+<p>エンジン URL に <code>?kasc=&lt;.kasc の URL&gt;</code> を付けて開きます。</p>
+<pre><code>https://yamamoto-ryuzo.github.io/kasugai-canvas-web/&lt;stage&gt;/&lt;engine&gt;/?kasc=&lt;url&gt;
+例) https://yamamoto-ryuzo.github.io/kasugai-canvas-web/stable/cesium/?kasc=...</code></pre>
+<div class="note">
+  geo_webview 側からは「KASUGAI」ボタンや <code>GET :8089/kasugai</code> で、
+  エクスポート → 登録 → ブラウザ起動までを自動実行できます。
+</div>
+
+<h2>エンジン一覧</h2>
+
+<div class="engine">
+  <h3>Cesium <span class="badge">メインエンジン</span></h3>
+  <img src="./img/cesium.png" alt="Cesium エンジンの画面">
+  <p>
+    CesiumJS による 3D 地球儀ビューア。3D Tiles・地形・KML スタイルの3D表現・
+    FLY（ルート飛行）など、KASUGAI Canvas の全機能を使える主対象エンジンです。
+    既定エンジンとして使います。
+  </p>
+</div>
+
+<div class="engine">
+  <h3>MapLibre</h3>
+  <img src="./img/maplibre.png" alt="MapLibre エンジンの画面">
+  <p>
+    MapLibre GL による高速な 2D ベクター地図ビューア。
+    QML スタイルの2D再現や属性表示に対応し、平面での閲覧に適しています。
+  </p>
+</div>
+
+<div class="engine">
+  <h3>OpenLayers</h3>
+  <img src="./img/openlayers.png" alt="OpenLayers エンジンの画面">
+  <p>
+    OpenLayers による 2D 地図ビューア。多様なデータ形式と投影法を扱える
+    汎用エンジンです。
+  </p>
+</div>
+
+<div class="engine">
+  <h3>Leaflet</h3>
+  <img src="./img/leaflet.png" alt="Leaflet エンジンの画面">
+  <p>
+    Leaflet による軽量な 2D 地図ビューア。シンプルな表示・
+    軽い動作が求められる場面に適しています。
+  </p>
+</div>
+
+<h2>関連リンク</h2>
+<ul>
+  <li>正本リポジトリ: <a href="https://github.com/yamamoto-ryuzo/kasugai_canvas">yamamoto-ryuzo/kasugai_canvas</a>（<code>web/</code> がエンジン本体）</li>
+  <li>配信リポジトリ: <a href="https://github.com/yamamoto-ryuzo/kasugai-canvas-web">yamamoto-ryuzo/kasugai-canvas-web</a></li>
+  <li>ライセンス: <a href="../LICENSE">MIT License</a></li>
+</ul>
+
+</body>
+</html>
