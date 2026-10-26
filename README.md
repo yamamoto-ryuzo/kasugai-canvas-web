@@ -4,7 +4,7 @@ KASUGAI Canvas のエンジン(`web/` 一式)を静的配信する公開ホス�
 
 QGIS プラグイン `geo_webview` が出力する `.kasc`+`DATA/` を、
 KASUGAI Canvas 未インストール環境でもブラウザ再生できるようにする
-ための CDN 的な配信先。`https://yamamoto-ryuzo.github.io/kasugai-canvas-web/`
+ための CDN 的な配信先。[https://yamamoto-ryuzo.github.io/kasugai-canvas-web/](https://yamamoto-ryuzo.github.io/kasugai-canvas-web/)
 で GitHub Pages 公開。
 
 ## 構成(ステージ選択)
@@ -24,7 +24,7 @@ KASUGAI Canvas 未インストール環境でもブラウザ再生できるよ�
 
 本リポジトリは `main` ブランチのルートがそのまま GitHub Pages で公開されます。
 
-- **公開 URL**: `https://yamamoto-ryuzo.github.io/kasugai-canvas-web/`
+- **公開 URL**: [https://yamamoto-ryuzo.github.io/kasugai-canvas-web/](https://yamamoto-ryuzo.github.io/kasugai-canvas-web/)
 - ルート `index.html` は `stable/` へリダイレクトされるため、
   ベース URL にアクセスするだけで安定版が開きます
 - **エンジンを直接開く**: `…/kasugai-canvas-web/<stage>/<engine>/`
