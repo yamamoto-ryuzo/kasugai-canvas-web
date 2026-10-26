@@ -1,7 +1,7 @@
 // KASUGAI Canvas — MapLibre フロント
 // .kasc プレイヤーモード: projects/<id>/ の .kasc+DATA/ を MapLibre GL で再生する
 import * as maplibregl from "https://cdn.jsdelivr.net/npm/maplibre-gl@6.16.0/dist/maplibre-gl.mjs";
-import { loadKascProject, parseKasc, resolveKascUrl, camToZoom, zoomToCamHeight, zoomToCamHeightView, parseUrlView, hasUrlView, writeUrlView, geojsonExtent, splitKascTitle, appendGroupedTitleOptions, syncBasemapList, sanitizeAttributionFragment, layerAttribution, buildWmsTileTemplate, buildWmtsTileTemplate, rewriteKascVisibility, themeShowSet, kascTitleInTheme, fillThemeSelect, loadKascBookmarks, parseQgisBookmarksXml, qgisBookmarkToCam, downloadQgisBookmarksXml, downloadKascCamLines } from "../shared/kasc.js";
+import { loadKascProject, parseKasc, resolveKascUrl, camToZoom, zoomToCamHeight, zoomToCamHeightView, parseUrlView, hasUrlView, writeUrlView, geojsonExtent, splitKascTitle, appendGroupedTitleOptions, syncBasemapList, sanitizeAttributionFragment, layerAttribution, buildWmsTileTemplate, buildWmtsTileTemplate, rewriteKascVisibility, themeShowSet, kascTitleInTheme, fillThemeSelect, loadKascBookmarks, parseQgisBookmarksXml, qgisBookmarkToCam, downloadQgisBookmarksXml, downloadKascCamLines, projectsBaseUrl } from "../shared/kasc.js";
 import { loadVectorItem } from "../shared/vector-load.js";
 import { initAiChat, hasBackendFeature } from "../shared/ai-chat.js";
 import { createPlayerApi } from "../shared/player-api.js";
@@ -40,7 +40,7 @@ const map = new maplibregl.Map({
   attributionControl: false, // 出典は Cesium 版と同型の右下オーバーレイで表示
 });
 map.addControl(new maplibregl.NavigationControl(), "top-right");
-window.kascMap = map; // デバッグ/外部連携用参照（KascPanel と同じ公開範囲）
+window.kascMap = map; // デバッグ/外部連携用参照（他エンジンと同じ公開範囲）
 
 // 登録済み .kasc レイヤ/ソースの id（GeoJSON は fill/line/circle の3枚を一括管理）
 let managedLayers = [];
@@ -392,10 +392,15 @@ function showAttrTable(entry) {
   const feats = (entry.item._geojson?.features || []).slice(0, 50);
   const cols = [...new Set(feats.flatMap(f => Object.keys(f.properties || {})))].slice(0, 8);
   if (!cols.length) { tableBox.textContent = "（属性なし）"; return; }
-  const rows = feats.map(f =>
-    `<tr>${cols.map(c => `<td>${String(f.properties[c] ?? "")}`).join("")}</tr>`
+  const rows = feats.map((f, i) =>
+    `<tr data-idx="${i}" style="cursor:pointer" title="クリックで移動">${cols.map(c => `<td>${String(f.properties[c] ?? "")}`).join("")}</tr>`
   ).join("");
   tableBox.innerHTML = `<b>${entry.item.title}</b>（先頭${feats.length}件）<table class="attr-table"><tr>${cols.map(c => `<th>${c}`).join("")}</tr>${rows}</table>`;
+  // 行クリックでその地物へ移動（検索結果の行クリックと同じ挙動）
+  tableBox.querySelectorAll("tr[data-idx]").forEach(tr => tr.addEventListener("click", () => {
+    const env = geojsonExtent({ features: [feats[Number(tr.dataset.idx)]] });
+    if (env) map.fitBounds([env.west, env.south, env.east, env.north], { padding: 80, maxZoom: 18 });
+  }));
 }
 
 function applyEntryVisibility(entry) {
@@ -845,7 +850,7 @@ async function loadProject(id) {
 // インスペクターの「登録」: 編集済み .kasc テキストを現在プロジェクトの
 // baseUrl で再描画する。プロジェクトファイル自体は書き換えない
 async function applyInspectorText(text) {
-  const baseUrl = lastBaseUrl || `/projects/${encodeURIComponent(currentProjectId || "default")}/`;
+  const baseUrl = lastBaseUrl || projectsBaseUrl(currentProjectId);
   await renderProject(currentProjectId || "default", baseUrl, parseKasc(text));
 }
 
