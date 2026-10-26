@@ -20,6 +20,20 @@ KASUGAI Canvas 未インストール環境でもブラウザ再生できるよ�
 各ステージ配下は `index.html` / `cesium/` `maplibre/` `openlayers/`
 `leaflet/` / `shared/` `lib/` `projects/` / `version.json` の構成。
 
+## GitHub Pages での公開
+
+本リポジトリは `main` ブランチのルートがそのまま GitHub Pages で公開されます。
+
+- **公開 URL**: `https://yamamoto-ryuzo.github.io/kasugai-canvas-web/`
+- ルート `index.html` は `stable/` へリダイレクトされるため、
+  ベース URL にアクセスするだけで安定版が開きます
+- **エンジンを直接開く**: `…/kasugai-canvas-web/<stage>/<engine>/`
+  - 例: `…/stable/cesium/` `…/stable/maplibre/` `…/unstable/openlayers/`
+- **`.kasc` プロジェクトを開く**: `?kasc=<url>` を付与
+  - 例: `…/stable/cesium/?kasc=https://example.com/project.kasc`
+- 公開されるのは git にコミット済みのファイルのみ。
+  `.gitignore` 対象の `guide/` などローカルファイルは配信されません
+
 ## 正本と更新ルール
 
 - **正本は `yamamoto-ryuzo/kasugai_canvas` の `web/`**。このリポジトリは
