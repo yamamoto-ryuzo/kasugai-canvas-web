@@ -17,7 +17,8 @@ import {
 import { loadQmlStyle, compileQmlStyle, setLayerVisibilityResolver, markerLayersToCanvas, fillPartsToTile, rgbaToCss } from "../shared/qml-style.js";
 import { applyQmlStyleToDataSource, applyQmlStyleToPrimitive } from "./qml-render.js";
 import { wkbToGeoJsonGeometry, sanitizeVectorPropertyValue, quoteSqlIdent, quoteSqlLiteral } from "../shared/vector-decode.js";
-import { buildWmsTileTemplate, buildWmtsTileTemplate, rewriteKascLineVisibility, themeShowSet, kascTitleInTheme, fillThemeSelect, loadKascBookmarks, parseQgisBookmarksXml, qgisBookmarkToCam, downloadQgisBookmarksXml, downloadKascCamLines, parseKasc, camToZoomView, zoomToCamHeightView, appendGroupedTitleOptions, syncBasemapList, fetchKascProjectTitle } from "../shared/kasc.js";
+import { loadVectorItem } from "../shared/vector-load.js";
+import { buildWmsTileTemplate, buildWmtsTileTemplate, rewriteKascLineVisibility, themeShowSet, kascTitleInTheme, fillThemeSelect, loadKascBookmarks, parseQgisBookmarksXml, qgisBookmarkToCam, downloadQgisBookmarksXml, downloadKascCamLines, parseKasc, camToZoomView, zoomToCamHeightView, appendGroupedTitleOptions, syncBasemapList, fetchKascProjectTitle, projectsBaseUrl, PROJECTS_MANIFEST_URL } from "../shared/kasc.js";
 import { mountEngineSwitcher, consumeEngineSwitchState } from "../shared/engine-switch.js";
 
 await initI18n();
@@ -809,7 +810,7 @@ function updateAppPanelVisibility() {
 
 
 function getProjectBaseUrl() {
-  return `/projects/${encodeURIComponent(currentProjectId || "default")}/`;
+  return projectsBaseUrl(currentProjectId);
 }
 
 // 共有URL等のプロジェクト指定部分。?kasc= モードでは project= ではなく
@@ -888,7 +889,7 @@ function resolveProjectUrl(url) {
 async function loadProjects() {
   let definitions = [];
   try {
-    const response = await fetch("/projects/projects.json", { cache: "no-store" });
+    const response = await fetch(PROJECTS_MANIFEST_URL, { cache: "no-store" });
     if (response.ok) definitions = await response.json();
   } catch {}
   if (!definitions.length) definitions = [{ id: "default", title: t("project.default") }];
@@ -922,7 +923,7 @@ async function loadInspectorConfig() {
   try {
     const projectId = currentProjectId || "default";
     const staticUrl = currentKascUrl
-      || `/projects/${encodeURIComponent(projectId)}/kasugai_canvas.kasc`;
+      || `${projectsBaseUrl(projectId)}kasugai_canvas.kasc`;
     let text = "";
     try {
       const response = await fetch(staticUrl, { cache: "no-store" });
@@ -2422,112 +2423,10 @@ function updateVectorSearchUI() {
   uiHooks.refreshVectorAttrWidget?.();
 }
 
-// GeoParquet を CDN から読み込む軽量リーダー(hyparquet)でデコードし、
-// WKB ジオメトリを GeoJSON に変換して既存のベクター描画経路に流す。
-// DuckDB-WASM ほど重くないので「全件を読んで Entity 化する」用途に向く。
-let hyparquetLoaderPromise = null;
-function loadHyparquet() {
-  if (!hyparquetLoaderPromise) {
-    hyparquetLoaderPromise = Promise.all([
-      import("https://cdn.jsdelivr.net/npm/hyparquet@1.31.5/+esm"),
-      import("https://cdn.jsdelivr.net/npm/hyparquet-compressors@1.1.2/+esm"),
-    ]).then(([hp, hc]) => ({
-      parquetReadObjects: hp.parquetReadObjects,
-      parquetMetadata: hp.parquetMetadataAsync || hp.parquetMetadata,
-      asyncBufferFromUrl: hp.asyncBufferFromUrl,
-      compressors: hc.compressors,
-    }));
-  }
-  return hyparquetLoaderPromise;
-}
-
 // WKB→GeoJSON・属性値の正規化・SQL クォートは vector-decode.js に集約し、
-// gpkg-worker.js(Web Worker)からも import する
-
-async function loadGeoParquetAsGeoJson(url) {
-  const { parquetReadObjects, parquetMetadata, asyncBufferFromUrl, compressors } = await loadHyparquet();
-  // Range Request 対応の非同期バッファを優先し、取れない環境では全件取得にフォールバック
-  let file;
-  try {
-    file = await asyncBufferFromUrl({ url });
-  } catch {
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    file = await response.arrayBuffer();
-  }
-  const rows = await parquetReadObjects({ file, compressors });
-  if (!rows.length) return { type: "FeatureCollection", features: [] };
-  // geo メタデータの primary_column を優先し、無ければ geometry 列/バイナリ列を探す
-  let geomColumn = null;
-  try {
-    const meta = await parquetMetadata(file);
-    const kv = meta && (meta.key_value_metadata || meta.metadata || []);
-    const entry = Array.isArray(kv)
-      ? kv.find(item => item.key === "geo")
-      : (kv instanceof Map ? { value: kv.get("geo") } : null);
-    const rawGeo = entry && entry.value;
-    const geoText = rawGeo instanceof Uint8Array ? new TextDecoder().decode(rawGeo) : rawGeo;
-    const geo = geoText ? JSON.parse(geoText) : null;
-    if (geo && geo.primary_column) geomColumn = geo.primary_column;
-  } catch {}
-  const isGeometryValue = value =>
-    value instanceof Uint8Array || (value && typeof value === "object" && typeof value.type === "string" && ("coordinates" in value || "geometries" in value));
-  const firstRow = rows[0];
-  if (!geomColumn || !(geomColumn in firstRow)) {
-    geomColumn = "geometry" in firstRow ? "geometry"
-      : Object.keys(firstRow).find(key => isGeometryValue(firstRow[key]));
-  }
-  if (!geomColumn) throw new Error("ジオメトリ列が見つかりません");
-  const features = [];
-  for (const row of rows) {
-    const value = row[geomColumn];
-    // Parquet ネイティブ GEOMETRY 型は hyparquet が GeoJSON 化済み、WKB 列は自前でデコード
-    const geometry = value instanceof Uint8Array
-      ? wkbToGeoJsonGeometry(value)
-      : (isGeometryValue(value) ? value : null);
-    if (!geometry) continue;
-    const properties = {};
-    for (const key of Object.keys(row)) {
-      if (key === geomColumn) continue;
-      properties[key] = sanitizeVectorPropertyValue(row[key]);
-    }
-    features.push({ type: "Feature", geometry, properties });
-  }
-  return { type: "FeatureCollection", features };
-}
-
-// FlatGeobuf を公式 JS リーダー(CDN から遅延ロード)でデコードし、
-// GeoJSON に変換して既存のベクター描画経路に流す。
-// 空間インデックス内蔵で Range Request による範囲読みも可能だが、
-// ここでは geoparquet: と同じく全件読み込みの経路に乗せる。
-// レスポンスボディを ReadableStream のまま逐次デコードするため全件をバッファリングしない。
-// geojson サブモジュールのみを読み込む(パッケージのエントリは optional な ol にも依存するため)
-let flatgeobufLoaderPromise = null;
-function loadFlatGeobuf() {
-  if (!flatgeobufLoaderPromise) {
-    flatgeobufLoaderPromise = import("https://cdn.jsdelivr.net/npm/flatgeobuf@4.6.1/lib/mjs/geojson.js/+esm");
-  }
-  return flatgeobufLoaderPromise;
-}
-
-async function loadFlatGeobufAsGeoJson(url) {
-  const { deserialize } = await loadFlatGeobuf();
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  if (!response.body) throw new Error("レスポンスボディを取得できません");
-  const features = [];
-  for await (const feature of deserialize(response.body)) {
-    if (!feature || !feature.geometry) continue;
-    const properties = feature.properties;
-    if (properties) {
-      for (const key of Object.keys(properties)) {
-        properties[key] = sanitizeVectorPropertyValue(properties[key]);
-      }
-    }
-    features.push(feature);
-  }
-  return { type: "FeatureCollection", features };
-}
+// gpkg-worker.js(Web Worker)からも import する。
+// geoparquet:/flatgeobuf:/csv:/tsv: の全件デコードは shared/vector-load.js の
+// 共通ローダーへ一本化(プレイヤー系エンジンと同一実装)
 
 // GeoPackage の読み込みは gpkg-worker.js(module Worker)に委譲する。
 // sql.js(SQLite WASM)の初期化・ファイル全体の fetch・WKB→GeoJSON デコードが
@@ -3066,8 +2965,10 @@ async function queryDuckDbAttributeRows(item, searchText) {
 // applyInspector の行パースを追加すれば既存のベクター描画経路に乗る。
 // query:true は条件変更・再クエリ(フィルターUI/表示範囲連動)に対応した形式
 const vectorDecoders = new Map([
-  ["geoparquet", { load: item => loadGeoParquetAsGeoJson(item.url) }],
-  ["flatgeobuf", { load: item => loadFlatGeobufAsGeoJson(item.url) }],
+  // 全件読み込み系は shared/vector-load.js へ一本化(item.url は解決済みのため baseUrl 不要)。
+  // duckdb/sql は Cesium 側の高機能版(proxy=/属性クエリ/covering)を維持する
+  ["geoparquet", { load: item => loadVectorItem({ type: "geoparquet", title: item.title, url: item.url }, "").then(r => r.geojson) }],
+  ["flatgeobuf", { load: item => loadVectorItem({ type: "flatgeobuf", title: item.title, url: item.url }, "").then(r => r.geojson) }],
   // gpkg: は bbox=auto が既定 ON のため通常はクエリ系(表示範囲連動)になる。
   // bbox=off を明示した場合だけ全件読み込み系としてキャッシュ・検索索引の対象になる
   ["gpkg", { load: item => loadGeoPackageAsGeoJson(item), query: item => !!(item.where || item.limit || item.columns?.length || item.bboxAuto) }],
@@ -6524,7 +6425,7 @@ function setupEvents() {
           if (!entry.name?.endsWith(".geojson")) continue;
           const title = entry.name.replace(/\.geojson$/, "");
           if (existing.has(title)) continue;
-          const url = `projects/${encodeURIComponent(projectId)}/DATA/${entry.name.split("/").map(encodeURIComponent).join("/")}`;
+          const url = `${projectsBaseUrl(projectId)}DATA/${entry.name.split("/").map(encodeURIComponent).join("/")}`;
           const path = { title, url, speed: 30, height: 0, pitch: -10, loop: false, step: 100, view: "camera", drawn: { kind: "server", name: entry.name } };
           try { applyFlySettingsFromGeoJson(await (await fetch(url)).text(), path); } catch (e) { /* 既定値のまま */ }
           flyPaths.push(path);

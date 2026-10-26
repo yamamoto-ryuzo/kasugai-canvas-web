@@ -1,6 +1,6 @@
 // KASUGAI Canvas — Leaflet フロント
 // .kasc プレイヤーモード: projects/<id>/ の .kasc+DATA/ を Leaflet で再生する
-import { loadKascProject, parseKasc, resolveKascUrl, camToZoom, zoomToCamHeight, zoomToCamHeightView, parseUrlView, hasUrlView, writeUrlView, geojsonExtent, splitKascTitle, appendGroupedTitleOptions, syncBasemapList, sanitizeAttributionFragment, layerAttribution, buildWmtsTileTemplate, rewriteKascVisibility, themeShowSet, kascTitleInTheme, fillThemeSelect, loadKascBookmarks, parseQgisBookmarksXml, qgisBookmarkToCam, downloadQgisBookmarksXml, downloadKascCamLines } from "../shared/kasc.js";
+import { loadKascProject, parseKasc, resolveKascUrl, camToZoom, zoomToCamHeight, zoomToCamHeightView, parseUrlView, hasUrlView, writeUrlView, geojsonExtent, splitKascTitle, appendGroupedTitleOptions, syncBasemapList, sanitizeAttributionFragment, layerAttribution, buildWmtsTileTemplate, rewriteKascVisibility, themeShowSet, kascTitleInTheme, fillThemeSelect, loadKascBookmarks, parseQgisBookmarksXml, qgisBookmarkToCam, downloadQgisBookmarksXml, downloadKascCamLines, projectsBaseUrl } from "../shared/kasc.js";
 import { loadVectorItem } from "../shared/vector-load.js";
 import { initAiChat, hasBackendFeature } from "../shared/ai-chat.js";
 import { createPlayerApi } from "../shared/player-api.js";
@@ -951,7 +951,7 @@ async function loadProject(id) {
 // インスペクターの「登録」: 編集済み .kasc テキストを現在プロジェクトの
 // baseUrl で再描画する。プロジェクトファイル自体は書き換えない
 async function applyInspectorText(text) {
-  const baseUrl = lastBaseUrl || `/projects/${encodeURIComponent(currentProjectId || "default")}/`;
+  const baseUrl = lastBaseUrl || projectsBaseUrl(currentProjectId);
   await renderProject(currentProjectId || "default", baseUrl, parseKasc(text));
 }
 
