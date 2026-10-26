@@ -31,3 +31,7 @@ KASUGAI Canvas 未インストール環境でもブラウザ再生できるよ�
 ## ライセンス
 
 [MIT License](LICENSE)。コンテンツの正本は `yamamoto-ryuzo/kasugai_canvas` の `web/` であり、ライセンスも正本に準じます。
+
+## git 管理外
+
+- `guide/` — ローカル作業用ディレクトリ（ガイド用スクリーンショット等）。`.gitignore` で除外し、公開・同期の対象外とする
