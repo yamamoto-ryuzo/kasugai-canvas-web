@@ -1,15 +1,15 @@
 // KASUGAI Canvas — OpenLayers フロント
 // .kasc プレイヤーモード: projects/<id>/ の .kasc+DATA/ を OpenLayers で再生する
-import Map from "https://esm.sh/ol@10.6.1/Map.js";
-import View from "https://esm.sh/ol@10.6.1/View.js";
-import TileLayer from "https://esm.sh/ol@10.6.1/layer/Tile.js";
-import VectorLayer from "https://esm.sh/ol@10.6.1/layer/Vector.js";
-import XYZ from "https://esm.sh/ol@10.6.1/source/XYZ.js";
-import TileWMS from "https://esm.sh/ol@10.6.1/source/TileWMS.js";
-import VectorSource from "https://esm.sh/ol@10.6.1/source/Vector.js";
-import GeoJSON from "https://esm.sh/ol@10.6.1/format/GeoJSON.js";
-import { fromLonLat, toLonLat, transformExtent } from "https://esm.sh/ol@10.6.1/proj.js";
-import { loadKascProject, parseKasc, resolveKascUrl, camToZoom, zoomToCamHeight, parseUrlView, hasUrlView, writeUrlView, geojsonExtent, splitKascTitle, sanitizeAttributionFragment, layerAttribution, buildWmtsTileTemplate, rewriteKascVisibility, themeShowSet, kascTitleInTheme, fillThemeSelect, loadKascBookmarks, parseQgisBookmarksXml, qgisBookmarkToCam, downloadQgisBookmarksXml, downloadKascCamLines } from "../shared/kasc.js";
+import Map from "https://cdn.jsdelivr.net/npm/ol@10.11.0/Map.js";
+import View from "https://cdn.jsdelivr.net/npm/ol@10.11.0/View.js";
+import TileLayer from "https://cdn.jsdelivr.net/npm/ol@10.11.0/layer/Tile.js";
+import VectorLayer from "https://cdn.jsdelivr.net/npm/ol@10.11.0/layer/Vector.js";
+import XYZ from "https://cdn.jsdelivr.net/npm/ol@10.11.0/source/XYZ.js";
+import TileWMS from "https://cdn.jsdelivr.net/npm/ol@10.11.0/source/TileWMS.js";
+import VectorSource from "https://cdn.jsdelivr.net/npm/ol@10.11.0/source/Vector.js";
+import GeoJSON from "https://cdn.jsdelivr.net/npm/ol@10.11.0/format/GeoJSON.js";
+import { fromLonLat, toLonLat, transformExtent } from "https://cdn.jsdelivr.net/npm/ol@10.11.0/proj.js";
+import { loadKascProject, parseKasc, resolveKascUrl, camToZoom, zoomToCamHeight, zoomToCamHeightView, parseUrlView, hasUrlView, writeUrlView, geojsonExtent, splitKascTitle, appendGroupedTitleOptions, syncBasemapList, sanitizeAttributionFragment, layerAttribution, buildWmtsTileTemplate, rewriteKascVisibility, themeShowSet, kascTitleInTheme, fillThemeSelect, loadKascBookmarks, parseQgisBookmarksXml, qgisBookmarkToCam, downloadQgisBookmarksXml, downloadKascCamLines } from "../shared/kasc.js";
 import { loadVectorItem } from "../shared/vector-load.js";
 import { initAiChat, hasBackendFeature } from "../shared/ai-chat.js";
 import { createPlayerApi } from "../shared/player-api.js";
@@ -18,16 +18,17 @@ import { mountEngineSwitcher, consumeEngineSwitchState } from "../shared/engine-
 import { groundDeckTileset } from "../shared/deck-ground.js";
 import { buildDeckDrapeLayers, invalidateDeckTerrainCovers } from "../shared/deck-drape.js";
 import { qmlLegendSwatchDataUrl } from "../shared/qml-2d.js";
-import Style from "https://esm.sh/ol@10.6.1/style/Style.js";
-import Fill from "https://esm.sh/ol@10.6.1/style/Fill.js";
-import Stroke from "https://esm.sh/ol@10.6.1/style/Stroke.js";
-import CircleStyle from "https://esm.sh/ol@10.6.1/style/Circle.js";
-import Icon from "https://esm.sh/ol@10.6.1/style/Icon.js";
-import { loadCompiledQml, olQmlStyleFunction, compiledScaleToResRange } from "../shared/qml-2d.js";
-import { defaults as defaultControls } from "https://esm.sh/ol@10.6.1/control/defaults.js";
-import ScaleLine from "https://esm.sh/ol@10.6.1/control/ScaleLine.js";
-import MousePosition from "https://esm.sh/ol@10.6.1/control/MousePosition.js";
-import { createStringXY } from "https://esm.sh/ol@10.6.1/coordinate.js";
+import Style from "https://cdn.jsdelivr.net/npm/ol@10.11.0/style/Style.js";
+import Fill from "https://cdn.jsdelivr.net/npm/ol@10.11.0/style/Fill.js";
+import Stroke from "https://cdn.jsdelivr.net/npm/ol@10.11.0/style/Stroke.js";
+import CircleStyle from "https://cdn.jsdelivr.net/npm/ol@10.11.0/style/Circle.js";
+import Icon from "https://cdn.jsdelivr.net/npm/ol@10.11.0/style/Icon.js";
+import Text from "https://cdn.jsdelivr.net/npm/ol@10.11.0/style/Text.js";
+import { loadCompiledQml, olQmlStyleFunction, compiledScaleToResRange, installLayerVisibilityResolver } from "../shared/qml-2d.js";
+import { defaults as defaultControls } from "https://cdn.jsdelivr.net/npm/ol@10.11.0/control/defaults.js";
+import ScaleLine from "https://cdn.jsdelivr.net/npm/ol@10.11.0/control/ScaleLine.js";
+import MousePosition from "https://cdn.jsdelivr.net/npm/ol@10.11.0/control/MousePosition.js";
+import { createStringXY } from "https://cdn.jsdelivr.net/npm/ol@10.11.0/coordinate.js";
 
 const VECTOR_TYPES = new Set(["geojson", "layer", "geoparquet", "parquet", "flatgeobuf", "fgb", "gpkg", "geopackage", "csv", "tsv", "duckdb", "sql"]);
 
@@ -67,6 +68,8 @@ window.ol = {
 
 // 現在プロジェクトのレイヤーエントリ（表示範囲連動の再クエリ用）
 let layerEntries = [];
+// QML 式 is_layer_visible('名前') を item.visible へ解決する(Cesium 版と同規則)
+installLayerVisibilityResolver(() => layerEntries.map(e => e.item));
 let lastBaseUrl = "";
 let currentBaseEntries = [];
 // ?kasc= で読み込んだ .kasc の URL。設定中は URL 書き換え時に
@@ -131,7 +134,7 @@ function getViewBounds() {
 // deck.Deck を #map 上のオーバーレイキャンバスとして viewState を手動同期する
 // （OL は2Dビューのため真俯瞰の 2.5D 表示。キャンバス単位のため全 OL レイヤより
 // 手前に1枚で描かれ、OL レイヤとの相互挿入はしない）
-const DECK_CDN = "https://cdn.jsdelivr.net/npm/deck.gl@9/dist.min.js";
+const DECK_CDN = "https://cdn.jsdelivr.net/npm/deck.gl@9.4.0/dist.min.js";
 let deckLoadPromise = null;
 function loadDeck() {
   if (window.deck) return Promise.resolve(window.deck);
@@ -336,7 +339,7 @@ async function buildLayer(item, baseUrl, preloaded) {
       try {
         const compiled = await loadCompiledQml(item.opts.style, baseUrl);
         item._qml = compiled;
-        const base = olQmlStyleFunction(compiled, { Style, Fill, Stroke, Circle: CircleStyle, Icon });
+        const base = olQmlStyleFunction(compiled, { Style, Fill, Stroke, Circle: CircleStyle, Icon, Text });
         // 凡例シンボル単位の表示切替: 先頭シンボル名が hidden 集合にある地物は描画しない
         layer.setStyle(f => {
           const names = compiled.namesFor?.(f.getProperties() || {});
@@ -921,13 +924,20 @@ async function renderProject(loadedId, baseUrl, doc, manifest) {
     sel.innerHTML = "";
     let active = baseEntries.findIndex(e => e.item.visible !== false);
     if (active < 0) active = 0;
-    baseEntries.forEach((entry, i) => {
+    // "グループ/名前" タイトルは optgroup でグループ化表示する。
+    // optgroup があれば select を折りたたみ可能なリスト UI へ置き換える
+    appendGroupedTitleOptions(sel, baseEntries.map(e => e.item), (item, leafTitle, i) => {
       const opt = document.createElement("option");
-      opt.value = i; opt.textContent = entry.item.title || `base ${i}`;
-      sel.append(opt);
+      opt.value = i; opt.textContent = leafTitle || `base ${i}`;
+      return opt;
+    });
+    baseEntries.forEach((entry, i) => {
       entry.layer.setVisible(i === active);
     });
     sel.value = active;
+    // 初期表示は選択中の1レイヤのみ示す畳み状態で同期するため、
+    // sel.value 確定後にリストを描画する
+    syncBasemapList(sel);
     sel.onchange = () => {
       baseEntries.forEach((e, i) => e.layer.setVisible(i === Number(sel.value)));
       syncDeckLayers(); // ベースマップのドレープコピーを選択中タイルへ差替える
@@ -1202,6 +1212,23 @@ document.querySelector("#basemap-toggle").addEventListener("click", e => {
   ctl.classList.toggle("collapsed");
   e.target.textContent = ctl.classList.contains("collapsed") ? "＋" : "−";
 });
+
+// 🌐 ボタン: 現在の表示位置を Google Earth (Web) で開く。
+// distance は実ビューポート高 + 垂直FOV60° 換算のカメラ距離。
+// heading は view rotation の符号反転（getViewState と同規則）、
+// OpenLayers は傾斜を持たないため tilt は 0 固定
+function openGoogleEarth() {
+  try {
+    const view = map.getView();
+    const [lon, lat] = toLonLat(view.getCenter() || [0, 0]);
+    const vh = (map.getSize() || [0, 0])[1];
+    const distance = Math.max(50, zoomToCamHeightView(lat, view.getZoom() ?? 10, vh));
+    const heading = ((-view.getRotation() * 180 / Math.PI) % 360 + 360) % 360;
+    const url = `https://earth.google.com/web/@${lat.toFixed(6)},${lon.toFixed(6)},0a,${distance.toFixed(2)}d,35y,${heading.toFixed(1)}h,0t,0r`;
+    window.open(url, "_blank", "noopener");
+  } catch (e) { console.error("Google Earth 連携エラー:", e); }
+}
+document.querySelector("#basemap-globe").addEventListener("click", openGoogleEarth);
 
 // 表示タブ: ベースマップ透過度・回転・レイヤー透過度・スケールバー・座標・ポップアップ
 {

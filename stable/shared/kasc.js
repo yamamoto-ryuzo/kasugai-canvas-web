@@ -437,6 +437,159 @@ export function splitKascTitle(title) {
   };
 }
 
+// "グループ/名前" タイトルの候補群を <select> へ追加する。
+// タイトルにグループを含む項目は同名 <optgroup> へ集約し、
+// グループ無しの項目はトップレベルの <option> のまま並べる
+// （ベースマップ選択のグループ化表示用）。optgroup は初出位置に
+// 挿入され、メンバーは元の並び順を保つ。
+// makeOption(item, leafTitle, index) が <option> 要素を返す。
+export function appendGroupedTitleOptions(select, items, makeOption) {
+  const groups = new Map();
+  items.forEach((item, index) => {
+    const { group, title } = splitKascTitle(item?.title || "");
+    const opt = makeOption(item, title, index);
+    if (!opt) return;
+    if (!group) { select.append(opt); return; }
+    if (!groups.has(group)) {
+      const og = document.createElement("optgroup");
+      og.label = group;
+      groups.set(group, og);
+      select.append(og);
+    }
+    groups.get(group).append(opt);
+  });
+}
+
+// select 単位の折りたたみ状態(WeakMap で再描画・プロジェクト切替後も保持)
+const _basemapListState = new WeakMap();
+
+// <select>(optgroup 対応)をミラーする折りたたみ可能なリスト UI
+// (.basemap-list) を select の親内へ同期描画する。
+// - optgroup が無い場合は素の select を表示し、リストは除去する
+// - optgroup がある場合は select を隠し、グループ見出し(▸/▾で
+//   折りたたみ)付きのリストへ置き換える。グループは初期状態で閉じ
+//   (expanded に含まれるもののみ展開)。先頭の「すべて展開」
+//   「すべて閉じる」ボタンで一括操作できる
+// - 項目クリックは select.value 更新 + change 発火なので、
+//   既存の select.onchange ハンドラ・AI 制御がそのまま動く
+// - labels.expandAll / labels.collapseAll でボタン文言を上書きできる
+export function syncBasemapList(select, labels) {
+  if (!select?.parentElement) return null;
+  const container = select.parentElement;
+  let list = container.querySelector(".basemap-list");
+  if (!select.querySelector("optgroup")) {
+    list?.remove();
+    select.hidden = false;
+    return null;
+  }
+  select.hidden = true;
+  if (!list) {
+    list = document.createElement("div");
+    list.className = "basemap-list";
+    select.after(list);
+  }
+  let st = _basemapListState.get(select);
+  if (!st) {
+    // 初期表示は選択中の1レイヤのみを示す畳み状態(open=false)に統一し、
+    // クリックで一覧を展開する
+    st = { expanded: new Set(), open: false, changeBound: false };
+    _basemapListState.set(select, st);
+  }
+  if (!st.changeBound) {
+    // select 側からの変更(AI/プログラム操作)にも選択ハイライトを追従
+    select.addEventListener("change", () => {
+      list.querySelectorAll(".basemap-item").forEach(el =>
+        el.classList.toggle("selected", el.dataset.value === select.value));
+    });
+    st.changeBound = true;
+  }
+  list.replaceChildren();
+  if (!st.open) {
+    // 選択後の畳み状態: 現在値だけを1行表示し、クリックで一覧を再展開
+    const cur = document.createElement("div");
+    cur.className = "basemap-item selected basemap-current";
+    const selOpt = [...select.options].find(o => o.value === select.value)
+      || select.selectedOptions?.[0];
+    const og = selOpt?.parentElement;
+    const tg = document.createElement("span");
+    tg.className = "basemap-group-toggle";
+    tg.textContent = "▸";
+    cur.append(tg, document.createTextNode(
+      og?.tagName === "OPTGROUP"
+        ? og.label + "/" + selOpt.textContent
+        : (selOpt?.textContent || "")));
+    cur.addEventListener("click", () => {
+      st.open = true;
+      syncBasemapList(select, labels);
+    });
+    list.append(cur);
+    return list;
+  }
+  const groupNames = [...select.querySelectorAll("optgroup")]
+    .map(o => o.label);
+  if (groupNames.length) {
+    const tools = document.createElement("div");
+    tools.className = "basemap-list-tools";
+    const expand = document.createElement("button");
+    expand.type = "button";
+    expand.className = "basemap-tool";
+    expand.textContent = labels?.expandAll || "すべて展開";
+    expand.addEventListener("click", () => {
+      groupNames.forEach(g => st.expanded.add(g));
+      syncBasemapList(select, labels);
+    });
+    const collapse = document.createElement("button");
+    collapse.type = "button";
+    collapse.className = "basemap-tool";
+    collapse.textContent = labels?.collapseAll || "すべて閉じる";
+    collapse.addEventListener("click", () => {
+      st.expanded.clear();
+      syncBasemapList(select, labels);
+    });
+    tools.append(expand, collapse);
+    list.append(tools);
+  }
+  const makeItem = opt => {
+    const row = document.createElement("div");
+    row.className = "basemap-item" + (opt.selected ? " selected" : "");
+    row.dataset.value = opt.value;
+    row.textContent = opt.textContent;
+    row.addEventListener("click", () => {
+      select.value = opt.value;
+      select.dispatchEvent(new Event("change"));
+      // 選択後は従来の select と同様、現在値のみ表示する状態へ畳む
+      st.open = false;
+      syncBasemapList(select, labels);
+    });
+    return row;
+  };
+  for (const el of select.children) {
+    if (el.tagName === "OPTGROUP") {
+      const gname = el.label;
+      const collapsed = !st.expanded.has(gname);
+      const head = document.createElement("div");
+      head.className = "basemap-group-head";
+      const toggle = document.createElement("span");
+      toggle.className = "basemap-group-toggle";
+      toggle.textContent = collapsed ? "▸" : "▾";
+      head.append(toggle, document.createTextNode(gname));
+      const items = document.createElement("div");
+      items.className = "basemap-group-items";
+      items.hidden = collapsed;
+      for (const opt of el.children) items.append(makeItem(opt));
+      head.addEventListener("click", () => {
+        if (st.expanded.has(gname)) st.expanded.delete(gname);
+        else st.expanded.add(gname);
+        syncBasemapList(select, labels);
+      });
+      list.append(head, items);
+    } else if (el.tagName === "OPTION") {
+      list.append(makeItem(el));
+    }
+  }
+  return list;
+}
+
 // カメラ高さ(m) → Web メルカトルズームの近似変換
 // m/px ≈ height * 2 / 256（視野角45°・画面高512px相当の近似）
 export function camToZoom(cam) {

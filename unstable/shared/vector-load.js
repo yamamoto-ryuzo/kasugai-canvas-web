@@ -6,9 +6,9 @@
 import { wkbToGeoJsonGeometry } from "./vector-decode.js";
 import { resolveKascUrl } from "./kasc.js";
 
-const FGB_URL = "https://esm.sh/flatgeobuf@3.36.0/lib/mjs/geojson.js";
-const HYPARQUET_URL = "https://cdn.jsdelivr.net/npm/hyparquet@1.30.1/+esm";
-const HYPARQUET_COMPRESSORS_URL = "https://cdn.jsdelivr.net/npm/hyparquet-compressors@1.1.1/+esm";
+const FGB_URL = "https://cdn.jsdelivr.net/npm/flatgeobuf@4.6.1/lib/mjs/geojson.js/+esm";
+const HYPARQUET_URL = "https://cdn.jsdelivr.net/npm/hyparquet@1.31.5/+esm";
+const HYPARQUET_COMPRESSORS_URL = "https://cdn.jsdelivr.net/npm/hyparquet-compressors@1.1.2/+esm";
 
 let gpkgWorker = null;
 let gpkgReqId = 0;
@@ -16,7 +16,9 @@ const gpkgPending = new Map();
 
 function ensureGpkgWorker() {
   if (!gpkgWorker) {
-    gpkgWorker = new Worker("./gpkg-worker.js", { type: "module" });
+    // import.meta.url 基準で解決する(plain "./gpkg-worker.js" はドキュメント
+    // 基準のため /<engine>/gpkg-worker.js を指して 404 になる)
+    gpkgWorker = new Worker(new URL("./gpkg-worker.js", import.meta.url), { type: "module" });
     gpkgWorker.onmessage = event => {
       const { reqId, error, ...result } = event.data || {};
       const entry = gpkgPending.get(reqId);
@@ -28,6 +30,9 @@ function ensureGpkgWorker() {
     gpkgWorker.onerror = event => {
       for (const entry of gpkgPending.values()) entry.reject(new Error(String(event.message || event)));
       gpkgPending.clear();
+      // 起動失敗 Worker を使い回すと以後の呼出が応答無しで固着するため破棄する
+      try { gpkgWorker.terminate(); } catch (e) { /* ignore */ }
+      gpkgWorker = null;
     };
   }
   return gpkgWorker;

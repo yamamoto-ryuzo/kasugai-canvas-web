@@ -1,6 +1,7 @@
 // KASUGAI Canvas — MapLibre フロント
 // .kasc プレイヤーモード: projects/<id>/ の .kasc+DATA/ を MapLibre GL で再生する
-import { loadKascProject, parseKasc, resolveKascUrl, camToZoom, zoomToCamHeight, parseUrlView, hasUrlView, writeUrlView, geojsonExtent, splitKascTitle, sanitizeAttributionFragment, layerAttribution, buildWmsTileTemplate, buildWmtsTileTemplate, rewriteKascVisibility, themeShowSet, kascTitleInTheme, fillThemeSelect, loadKascBookmarks, parseQgisBookmarksXml, qgisBookmarkToCam, downloadQgisBookmarksXml, downloadKascCamLines } from "../shared/kasc.js";
+import * as maplibregl from "https://cdn.jsdelivr.net/npm/maplibre-gl@6.16.0/dist/maplibre-gl.mjs";
+import { loadKascProject, parseKasc, resolveKascUrl, camToZoom, zoomToCamHeight, zoomToCamHeightView, parseUrlView, hasUrlView, writeUrlView, geojsonExtent, splitKascTitle, appendGroupedTitleOptions, syncBasemapList, sanitizeAttributionFragment, layerAttribution, buildWmsTileTemplate, buildWmtsTileTemplate, rewriteKascVisibility, themeShowSet, kascTitleInTheme, fillThemeSelect, loadKascBookmarks, parseQgisBookmarksXml, qgisBookmarkToCam, downloadQgisBookmarksXml, downloadKascCamLines } from "../shared/kasc.js";
 import { loadVectorItem } from "../shared/vector-load.js";
 import { initAiChat, hasBackendFeature } from "../shared/ai-chat.js";
 import { createPlayerApi } from "../shared/player-api.js";
@@ -8,7 +9,7 @@ import { mountEngineSwitcher, consumeEngineSwitchState } from "../shared/engine-
 
 import { groundDeckTileset } from "../shared/deck-ground.js";
 import { buildDeckDrapeLayers, invalidateDeckTerrainCovers } from "../shared/deck-drape.js";
-import { qmlLegendSwatchDataUrl } from "../shared/qml-2d.js";
+import { qmlLegendSwatchDataUrl, installLayerVisibilityResolver, bakeQmlLabels } from "../shared/qml-2d.js";
 
 const VECTOR_TYPES = new Set(["geojson", "layer", "geoparquet", "parquet", "flatgeobuf", "fgb", "gpkg", "geopackage", "csv", "tsv", "duckdb", "sql"]);
 
@@ -31,7 +32,9 @@ const panel = {
 
 const map = new maplibregl.Map({
   container: "map",
-  style: { version: 8, sources: {}, layers: [] },
+  // glyphs は QML <labeling> の symbol レイヤが必要とするフォント PBF。
+  // openmaptiles の Noto Sans は日本語を含む(demotiles.maplibre.org は非CJK)
+  style: { version: 8, glyphs: "https://fonts.openmaptiles.org/{fontstack}/{range}.pbf", sources: {}, layers: [] },
   center: [139.767, 35.681],
   zoom: 10,
   attributionControl: false, // 出典は Cesium 版と同型の右下オーバーレイで表示
@@ -45,6 +48,19 @@ let currentBaseEntries = [];
 let managedSources = [];
 // 現在プロジェクトのレイヤーエントリ（表示範囲連動の再クエリ用）
 let layerEntries = [];
+// QML 式 is_layer_visible('名前') を item.visible へ解決する(Cesium 版と同規則)
+installLayerVisibilityResolver(() => layerEntries.map(e => e.item));
+
+// QML <labeling> は is_layer_visible で他レイヤーの表示状態を参照し得るため、
+// 表示切替のたびに全ラベル付きエントリの __kasc_label を焼き直してソースを更新する
+function refreshQmlLabels() {
+  for (const entry of layerEntries) {
+    const item = entry.item;
+    if (!item?._qml?.labelFor || !entry.sid || !item._geojson) continue;
+    bakeQmlLabels(item._geojson, item._qml);
+    map.getSource(entry.sid)?.setData?.(item._geojson);
+  }
+}
 let lastBaseUrl = "";
 // ?kasc= で読み込んだ .kasc の URL。設定中は URL 書き換え時に
 // project= を書かず ?kasc= を維持する(実プロジェクト選択で空に戻る)
@@ -117,7 +133,7 @@ function removeManaged() {
 
 // ---- deck.gl（3dtiles: 行専用・初回利用時にCDNから遅延ロード） ----
 // 軽量プレイヤー維持のため 3dtiles を含む .kasc の時だけ読み込む
-const DECK_CDN = "https://cdn.jsdelivr.net/npm/deck.gl@9/dist.min.js";
+const DECK_CDN = "https://cdn.jsdelivr.net/npm/deck.gl@9.4.0/dist.min.js";
 let deckLoadPromise = null;
 function loadDeck() {
   if (window.deck) return Promise.resolve(window.deck);
@@ -345,15 +361,16 @@ async function addKascLayer(item, baseUrl, preloaded, beforeIdFn) {
     item._geojson = geojson;
     const before = beforeId();
     map.addSource(sid, { type: "geojson", data: geojson, attribution: layerAttribution(item) || undefined });
-    for (const [kind, filter, paint] of kinds) {
+    for (const [kind, filter, paint, layout] of kinds) {
       const lid = `${sid}-${kind}`;
-      const def = { id: lid, type: kind, source: sid, filter, paint, layout: { visibility: item.visible ? "visible" : "none" } };
+      const def = { id: lid, type: kind, source: sid, filter, paint, layout: { ...layout, visibility: item.visible ? "visible" : "none" } };
       if (zoomRange) { def.minzoom = zoomRange.minzoom; def.maxzoom = zoomRange.maxzoom; }
       map.addLayer(def, before);
       lids.push(lid);
       if (!filters) filters = new Map();
       filters.set(lid, filter);
-      const opaProp = `${kind}-opacity`;
+      // symbol レイヤに symbol-opacity は無いため text-opacity を使う
+      const opaProp = kind === "symbol" ? "text-opacity" : `${kind}-opacity`;
       opas.set(lid, { prop: opaProp, base: typeof paint?.[opaProp] === "number" ? paint[opaProp] : 1 });
     }
     syncDeckLayers(); // 読込完了でドレープコピー対象(_geojson)が増えた場合に反映
@@ -389,6 +406,7 @@ function applyEntryVisibility(entry) {
   }
   if (deckDirty) void syncDeckLayersAsync();
   else syncDeckLayers(); // ドレープコピーの表示追従（deck 未初期化なら no-op）
+  refreshQmlLabels();
   updateMapAttribution();
 }
 
@@ -903,13 +921,20 @@ async function renderProject(loadedId, baseUrl, doc, manifest) {
     sel.innerHTML = "";
     let active = baseEntries.findIndex(e => e.item.visible !== false);
     if (active < 0) active = 0;
-    baseEntries.forEach((entry, i) => {
+    // "グループ/名前" タイトルは optgroup でグループ化表示する。
+    // optgroup があれば select を折りたたみ可能なリスト UI へ置き換える
+    appendGroupedTitleOptions(sel, baseEntries.map(e => e.item), (item, leafTitle, i) => {
       const opt = document.createElement("option");
-      opt.value = i; opt.textContent = entry.item.title || `base ${i}`;
-      sel.append(opt);
+      opt.value = i; opt.textContent = leafTitle || `base ${i}`;
+      return opt;
+    });
+    baseEntries.forEach((entry, i) => {
       entry.lids.forEach(lid => map.getLayer(lid) && map.setLayoutProperty(lid, "visibility", i === active ? "visible" : "none"));
     });
     sel.value = active;
+    // 初期表示は選択中の1レイヤのみ示す畳み状態で同期するため、
+    // sel.value 確定後にリストを描画する
+    syncBasemapList(sel);
     sel.onchange = () => {
       baseEntries.forEach((e, i) =>
         e.lids.forEach(lid => map.getLayer(lid) && map.setLayoutProperty(lid, "visibility", i === Number(sel.value) ? "visible" : "none")));
@@ -1162,6 +1187,25 @@ document.querySelector("#basemap-toggle").addEventListener("click", e => {
   ctl.classList.toggle("collapsed");
   e.target.textContent = ctl.classList.contains("collapsed") ? "＋" : "−";
 });
+
+// 🌐 ボタン: 現在の表示位置を Google Earth (Web) で開く。
+// heading は bearing の符号反転（getViewState と同規則）、
+// tilt は pitch、distance は実ビューポート高 + 垂直FOV60° 換算の
+// カメラ高で、傾斜時は高さ/cos(tilt) で視線距離へ換算
+function openGoogleEarth() {
+  try {
+    const c = map.getCenter();
+    const heading = ((-map.getBearing()) % 360 + 360) % 360;
+    const tilt = Math.max(0, Math.min(90, map.getPitch()));
+    const tiltRad = tilt * Math.PI / 180;
+    const vh = map.getCanvas().clientHeight || map.getContainer().clientHeight;
+    const height = Math.max(50, zoomToCamHeightView(c.lat, map.getZoom(), vh));
+    const distance = tiltRad > 0.01 ? height / Math.cos(tiltRad) : height;
+    const url = `https://earth.google.com/web/@${c.lat.toFixed(6)},${c.lng.toFixed(6)},0a,${distance.toFixed(2)}d,35y,${heading.toFixed(1)}h,${tilt.toFixed(1)}t,0r`;
+    window.open(url, "_blank", "noopener");
+  } catch (e) { console.error("Google Earth 連携エラー:", e); }
+}
+document.querySelector("#basemap-globe").addEventListener("click", openGoogleEarth);
 
 // ---- テレイン(3D地形): raster-dem ソース + map.setTerrain ----
 // raster-dem は Terrarium/Mapbox encoding のタイルのみ読める

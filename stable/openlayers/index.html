@@ -5,6 +5,17 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>KASUGAI Canvas — OpenLayers</title>
 <link rel="icon" type="image/x-icon" href="../favicon.ico" />
+<script type="importmap">
+{
+  "imports": {
+    "rbush": "https://cdn.jsdelivr.net/npm/rbush@4.0.1/+esm",
+    "earcut": "https://cdn.jsdelivr.net/npm/earcut@3.2.4/+esm",
+    "pbf": "https://cdn.jsdelivr.net/npm/pbf@5.1.2/+esm",
+    "geotiff": "https://cdn.jsdelivr.net/npm/geotiff@3.1.0-beta.0/+esm",
+    "zarrita": "https://cdn.jsdelivr.net/npm/zarrita@0.7.5/+esm"
+  }
+}
+</script>
 <style>
   html, body { margin: 0; height: 100%; font-family: system-ui, "Segoe UI", "Yu Gothic", sans-serif; }
   #map { position: absolute; inset: 0; background: #20262b; }
@@ -43,7 +54,20 @@
     border: 1px solid #cbd9de; border-radius: 4px; background: #fff; font-size: 13px; }
   .basemap-control.collapsed { padding: 4px; }
   .basemap-control.collapsed select { display: none; }
-  #basemap-toggle { width: 22px; height: 22px; border: 0; border-radius: 4px;
+  .basemap-control.collapsed .basemap-list { display: none; }
+  .basemap-control.collapsed #basemap-globe { display: none; }
+  /* ベースマップのグループ化表示(select optgroup を折りたたみ可能なリストへ置き換え) */
+  .basemap-control .basemap-list { min-width: 160px; max-width: 60vw; max-height: 45vh; overflow-y: auto; font-size: 13px; }
+  .basemap-control .basemap-item { padding: 3px 6px; border-radius: 4px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .basemap-control .basemap-item:hover { background: rgba(44,94,168,.12); }
+  .basemap-control .basemap-item.selected { background: rgba(44,94,168,.2); font-weight: 600; }
+  .basemap-control .basemap-group-head { display: flex; align-items: center; gap: 4px; padding: 2px 4px; font-weight: 600; color: #2c5ea8; cursor: pointer; user-select: none; }
+  .basemap-control .basemap-group-toggle { font-size: 10px; }
+  .basemap-control .basemap-group-items .basemap-item { padding-left: 18px; }
+  .basemap-control .basemap-list-tools { display: flex; gap: 4px; padding: 0 0 4px; border-bottom: 1px solid rgba(44,94,168,.18); margin-bottom: 3px; }
+  .basemap-control .basemap-tool { padding: 1px 7px; border: 1px solid rgba(44,94,168,.4); border-radius: 4px; background: #fff; color: #2c5ea8; cursor: pointer; font-size: 11px; line-height: 1.6; }
+  .basemap-control .basemap-tool:hover { background: rgba(44,94,168,.12); }
+  #basemap-toggle, #basemap-globe { width: 22px; height: 22px; border: 0; border-radius: 4px;
     background: rgba(44,94,168,.12); color: #2c5ea8; cursor: pointer; font-size: 14px; line-height: 1; }
   .map-attribution { position: absolute; right: 8px; bottom: 6px; z-index: 1004; max-width: 60%;
     padding: 3px 5px; color: #52636d; background: rgba(255,255,255,.8); font-size: 10px;
@@ -232,6 +256,7 @@
 </script>
 <div id="basemap-ctl" class="basemap-control" hidden>
   <button id="basemap-toggle" type="button" aria-label="最小化">−</button>
+  <button id="basemap-globe" type="button" title="Google Earth で現在の表示を開く" aria-label="Google Earth で現在の表示を開く">🌐</button>
   <select id="basemap-select"></select>
 </div>
 <script type="module" src="./app.js"></script>
