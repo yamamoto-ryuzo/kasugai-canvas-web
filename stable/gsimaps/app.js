@@ -21,7 +21,7 @@ import {
 } from "../shared/kasc.js";
 import { loadVectorItem, isViewportQueryItem } from "../shared/vector-load.js";
 import { createPlayerApi } from "../shared/player-api.js";
-import { mountEngineSwitcher, consumeEngineSwitchState } from "../shared/engine-switch.js";
+import { mountEngineSwitcher, consumeEngineSwitchState, storeEngineSwitchState, engineSwitchUrl } from "../shared/engine-switch.js";
 import { initAiChat } from "../shared/ai-chat.js";
 
 // 診断: この中間エンジンが iframe 内で読み込まれた場合(ネスト)、
@@ -152,6 +152,7 @@ function waitGsimaps(timeoutMs = 30000) {
         try { h.removeFrom?.(gmap); } catch (_) {}
         try { if (h._interval) clearInterval(h._interval); } catch (_) {}
       }
+      interceptGlobeOpen(w);
       resolve();
     };
     const tick = () => {
@@ -172,6 +173,38 @@ function waitGsimaps(timeoutMs = 30000) {
     };
     tick();
   });
+}
+
+// 地理院地図の「Globe」(gsiglobe)は iframe 内 window.open で別タブの
+// globe/index_globe.html を開き、.kasc レイヤ等の Canvas 状態を持たない
+// 単独ページへ出てしまう。Canvas における Globe 相当は cesium エンジンなので
+// window.open をフックしてエンジン切替(レイヤ・視点引継ぎつき)へ差し替える
+function interceptGlobeOpen(w) {
+  if (!w || w.__kasugaiGlobeHooked) return;
+  w.__kasugaiGlobeHooked = true;
+  const origOpen = w.open?.bind(w);
+  w.open = (url, target, features) => {
+    if (typeof url === "string" && /globe\/index_globe\.html/.test(url)) {
+      switchToCesium();
+      return null;
+    }
+    return origOpen ? origOpen(url, target, features) : null;
+  };
+}
+
+function switchToCesium() {
+  // moveend デバウンスを待たず現在視点をハッシュへ確定させてから遷移する
+  try {
+    if (gmap) {
+      const c = gmap.getCenter();
+      writeUrlView({
+        latitude: c.lat, longitude: c.lng, zoom: gmap.getZoom(),
+        height: zoomToCamHeight(c.lat, gmap.getZoom()), pitch: -90, heading: 0,
+      }, currentProjectId);
+    }
+  } catch (_) { /* 視点書込失敗でも切替自体は行う */ }
+  storeEngineSwitchState();
+  window.location.href = engineSwitchUrl("cesium");
 }
 
 // 新しい iframe 地図へのイベント配線(reboot 時にも呼ぶ)
