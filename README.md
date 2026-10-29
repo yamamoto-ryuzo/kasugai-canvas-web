@@ -7,7 +7,7 @@ KASUGAI Canvas 未インストール環境でもブラウザ再生できるよ�
 ための CDN 的な配信先。
 
 **エンジン本体のみを配信**し、プロジェクトデータ(`projects/`)は同梱しない
-（デモ・テストデータは [kasugai_canvas_weGIS](https://yamamoto-ryuzo.github.io/kasugai_canvas_weGIS/)
+（デモ・テストデータは [kasugai_canvas_webGIS](https://yamamoto-ryuzo.github.io/kasugai_canvas_webGIS/)
 等の外部データホストが持ち、`?kasc=` で指定して再生する）。
 
 ## 使い方・詳細
