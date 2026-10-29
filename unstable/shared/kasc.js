@@ -1,6 +1,7 @@
 // .kasc 行パーサー + プロジェクトローダー（エンジン非依存コア）
 // 行形式: 種類:タイトル|URL|出典|オプション名=値|on/off   （docs/inspector.html 参照）
 // 対象: /projects/<id>/ の標準プロジェクト（外部登録プロジェクトの @parent 解決は未対応）
+import { backendBaseUrl, detectBackend } from "./backend.js";
 
 const BOOL_RE = /^(on|off|true|false)$/i;
 const KV_RE = /^([A-Za-z_][\w-]*)\s*=\s*(.*)$/;
@@ -243,9 +244,25 @@ export function applyPanelTitle(title) {
 
 // projects/ 静的配信への基準パス。各エンジンのページは <root>/<stage>/<engine>/
 // にあるため ../projects でルート配信(localhost)・ステージ配信(CDN)の両方を
-// カバーする。baseUrl は絶対 URL で返し、呼び出し側の URL 解決を統一する
+// カバーする。ローカルアプリをバックエンド検出した環境ではそちらの
+// /projects/ へ向ける（静的＋外部登録プロジェクトをマージした一覧が返り、
+// QGIS 出力等のローカル .kasc+DATA/ もホスト版エンジンから読める）。
+// baseUrl は絶対 URL で返し、呼び出し側の URL 解決を統一する
 export const PROJECTS_MANIFEST_URL = "../projects/projects.json";
+export function projectsManifestUrl() {
+  return backendBaseUrl()
+    ? `${backendBaseUrl()}/projects/projects.json`
+    : PROJECTS_MANIFEST_URL;
+}
 export function projectsBaseUrl(id = "default") {
+  const base = backendBaseUrl();
+  return base
+    ? `${base}/projects/${encodeURIComponent(id || "default")}/`
+    : new URL(`../projects/${encodeURIComponent(id || "default")}/`, location.href).href;
+}
+// projectsBaseUrl と同じ解決をページオリジン(=配信元)側へ固定して行う。
+// ローカルアプリへ向けて存在しないプロジェクトを CDN 側で探すフォールバック用
+export function hostedProjectsBaseUrl(id = "default") {
   return new URL(`../projects/${encodeURIComponent(id || "default")}/`, location.href).href;
 }
 
@@ -310,7 +327,7 @@ async function loadKascUrl(kascParam) {
     .replace(/\.kasc$/i, "") || "kasc";
   let manifest = [];
   try {
-    const res2 = await fetch(PROJECTS_MANIFEST_URL, { cache: "no-store" });
+    const res2 = await fetch(projectsManifestUrl(), { cache: "no-store" });
     if (res2.ok) manifest = await res2.json();
   } catch (_) { /* 静的配信で一覧が無い場合もあり得る */ }
   // 選択中プロジェクトとして一覧へ表示できるよう先頭に仮エントリを足す
@@ -323,20 +340,33 @@ async function loadKascUrl(kascParam) {
 // プロジェクト一覧と .kasc を読み込む。
 // 優先順位: 明示引数 > ?kasc=<url> > ?project=<id> > マニフェスト先頭(default)
 export async function loadKascProject(projectId) {
+  // projects/ の向き先（同一オリジン or ローカルアプリ）を決めるため、
+  // バックエンド検出を先に確定する（検出 Promise はモジュール内で共有済み）
+  await detectBackend();
   const params = new URLSearchParams(location.search);
   const kascParam = params.get("kasc");
   if (kascParam && !projectId) return loadKascUrl(kascParam);
 
   let manifest = [];
   try {
-    const res = await fetch(PROJECTS_MANIFEST_URL, { cache: "no-store" });
+    const res = await fetch(projectsManifestUrl(), { cache: "no-store" });
     if (res.ok) manifest = await res.json();
   } catch (_) { /* 静的配信で一覧が無い場合もあり得る */ }
 
   const requested = projectId || params.get("project");
   const id = requested || (manifest[0] && (manifest[0].id || manifest[0])) || "default";
-  const baseUrl = projectsBaseUrl(id);
-  const res = await fetch(`${baseUrl}kasugai_canvas.kasc`, { cache: "no-store" });
+  let baseUrl = projectsBaseUrl(id);
+  let res = await fetch(`${baseUrl}kasugai_canvas.kasc`, { cache: "no-store" });
+  if (!res.ok && backendBaseUrl()) {
+    // 配信元にのみ存在するプロジェクトをローカルアプリへ向けて失敗した
+    // 場合は、配信元側でも探す（CDN 専用プロジェクトの直リンク対策）
+    const fallback = hostedProjectsBaseUrl(id);
+    const res2 = await fetch(`${fallback}kasugai_canvas.kasc`, { cache: "no-store" }).catch(() => res);
+    if (res2.ok) {
+      baseUrl = fallback;
+      res = res2;
+    }
+  }
   if (!res.ok) throw new Error(`.kasc を読み込めません: ${baseUrl}kasugai_canvas.kasc (${res.status})`);
   const text = await res.text();
   return { id, manifest, baseUrl, doc: parseKasc(text), raw: text };
