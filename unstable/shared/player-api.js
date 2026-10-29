@@ -503,7 +503,11 @@ export function createPlayerApi(hooks) {
     buildShareUrl({ latitude, longitude, height, zoom, pitch, heading, project } = {}) {
       const params = new URLSearchParams();
       params.set("engine", hooks.engine);
-      params.set("project", project || hooks.getProjectId() || "default");
+      // ?kasc= 読込中は id がファイル名由来の仮名のため、project= ではなく
+      // kasc=<url> を共有URLへ入れる（projects/ 配下に存在しないため404になる）
+      const curKasc = new URLSearchParams(window.location.search).get("kasc");
+      if (curKasc && !project) params.set("kasc", curKasc);
+      else params.set("project", project || hooks.getProjectId() || "default");
       const hash = new URLSearchParams();
       const c = hooks.getViewInfo() || {};
       const lat2 = Number.isFinite(latitude) ? latitude : c.latitude;

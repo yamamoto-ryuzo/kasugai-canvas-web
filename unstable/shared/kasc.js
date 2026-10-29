@@ -334,7 +334,23 @@ async function loadKascUrl(kascParam) {
   if (!manifest.some(e => (e.id || e) === name)) {
     manifest.unshift({ id: name, title: title || name, external: true });
   }
+  // id がファイル名由来の仮名のため、?project=<name> へのURL生成・再選択・
+  // 共有URLから復帰できるよう .kasc の URL を記憶しておく
+  try {
+    lastKascUrl = kascUrl;
+    lastKascName = name;
+    localStorage.setItem(`kasc:lastProjectUrl:${name}`, kascUrl);
+  } catch (e) {}
   return { id: name, title: title || name, manifest, baseUrl, doc: parseKasc(text), raw: text, kascUrl };
+}
+
+// ?kasc= で読んだ直近の .kasc URL とファイル名由来の仮 id。
+// ?project=<name> 形式のURL（共有・仮エントリ再選択）を ?kasc= へ復元する
+let lastKascUrl = null;
+let lastKascName = null;
+export function rememberedKascUrl(name) {
+  if (lastKascName === name && lastKascUrl) return lastKascUrl;
+  try { return localStorage.getItem(`kasc:lastProjectUrl:${name}`); } catch (e) { return null; }
 }
 
 // プロジェクト一覧と .kasc を読み込む。
@@ -366,6 +382,12 @@ export async function loadKascProject(projectId) {
       baseUrl = fallback;
       res = res2;
     }
+  }
+  if (!res.ok && requested) {
+    // id が .kasc ファイル名由来の仮名（?project=<ファイル名> の共有URLや
+    // ?kasc= 仮エントリの再選択）だった場合、記憶した .kasc URL から復元する
+    const saved = rememberedKascUrl(requested);
+    if (saved) return loadKascUrl(saved);
   }
   if (!res.ok) throw new Error(`.kasc を読み込めません: ${baseUrl}kasugai_canvas.kasc (${res.status})`);
   const text = await res.text();
