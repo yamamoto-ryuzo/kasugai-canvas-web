@@ -18,7 +18,7 @@ KASUGAI Canvas 未インストール環境でもブラウザ再生できるよ�
 
 - **公開 URL**: `https://yamamoto-ryuzo.github.io/kasugai-canvas-web/`（`stable/` へリダイレクト）
 - **起動形式**: `…/kasugai-canvas-web/<stage>/<engine>/?kasc=<url>`
-- **ステージ**: `stable/`(安定版・既定) / `unstable/`(開発版) / `latest/`(stable リダイレクト)
+- **ステージ**: `stable/`(安定版・既定) / `unstable/`(開発版)
 
 ## 正本と更新ルール
 
