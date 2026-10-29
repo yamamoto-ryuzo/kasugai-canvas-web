@@ -51,21 +51,51 @@ async function fetchCapabilities(origin) {
   return caps && caps.tier ? caps : null;
 }
 
-// 静的配信環境でのフォールバック検出。ローカルアプリを確実に識別するため
-// name==="kasugai_canvas" のみ受け入れる（8510 に無関係なサービスが居ても
-// バックエンドと誤認しない。ok:true の寛容判定は同一オリジン限定）
-async function detectLocalBackend() {
+// Chrome の Local Network Access 権限状態。公開サイト→ローカルアプリの
+// fetch はこの権限が必要で、未対応ブラウザ（権限名を知らない）は null を
+// 返して通常経路で試す
+async function localNetworkPermission() {
+  try {
+    return await navigator.permissions?.query?.({ name: "local-network-access" }) ?? null;
+  } catch (e) {
+    return null;
+  }
+}
+
+// ローカルアプリの /health を疎通し、KASUGAI 確認できればバックエンドとして
+// 登録する。name==="kasugai_canvas" のみ受け入れる（8510 に無関係なサービス
+// が居てもバックエンドと誤認しない。ok:true の寛容判定は同一オリジン限定）
+async function probeLocalBackend(timeoutMs) {
   try {
     const res = await fetch(`${LOCAL_BACKEND_ORIGIN}/health`,
-      { signal: AbortSignal.timeout(1500), cache: "no-store" });
-    if (!res.ok) return;
+      { signal: AbortSignal.timeout(timeoutMs), cache: "no-store" });
+    if (!res.ok) return false;
     const data = await res.json().catch(() => ({}));
-    if (data?.name !== "kasugai_canvas") return;
+    if (data?.name !== "kasugai_canvas") return false;
     alive = true;
     setBackendCapabilities(await fetchCapabilities(LOCAL_BACKEND_ORIGIN),
       true, LOCAL_BACKEND_ORIGIN);
     adoptServerMapsKey(capabilities);
+    return true;
   } catch (e) { /* ローカルアプリ未起動 */ }
+  return false;
+}
+
+// 静的配信環境でのフォールバック検出
+async function detectLocalBackend() {
+  const perm = await localNetworkPermission();
+  if (perm?.state === "prompt") {
+    // 権限プロンプトはローカルへの実リクエストで発火し、応答はユーザーの
+    // 判断を待って保留される。ページ読込を止めないよう検出とは別に長めの
+    // 疎通を投げ、許可されてバックエンドが見つかった場合だけ再読込して
+    // ローカル連携（ブリッジ・/projects/*）を有効化する
+    void (async () => {
+      if (await probeLocalBackend(60000)) window.location.reload();
+    })();
+    return;
+  }
+  if (perm?.state === "denied") return; // ユーザーが拒否済み（再プロンプトされない）
+  await probeLocalBackend(1500);
 }
 
 // /health + /api/capabilities によるバックエンド検出。
