@@ -1,0 +1,62 @@
+{
+  "name": "@navaramap/three-default-descs",
+  "type": "module",
+  "version": "0.2.1",
+  "module": "dist/index.js",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "src",
+    "dist"
+  ],
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/maplibre/navara.git",
+    "directory": "web/navara_three_default_descs"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependencies": {
+    "postprocessing": ">=6.38.0",
+    "three": ">=0.183.0",
+    "@navaramap/three": "0.2.1"
+  },
+  "dependencies": {
+    "@sparkjsdev/spark": "2.1.0",
+    "@takram/three-atmosphere": "0.19.1",
+    "@takram/three-clouds": "0.7.6",
+    "@takram/three-geospatial": "0.9.1",
+    "@takram/three-geospatial-effects": "0.6.4",
+    "n8ao": "2.0.1",
+    "tiny-invariant": "1.3.3"
+  },
+  "devDependencies": {
+    "@types/geojson": "7946.0.16",
+    "@types/three": "0.185.4",
+    "postprocessing": "6.39.4",
+    "three": "0.185.1",
+    "vite-plugin-glsl": "1.6.1",
+    "@navaramap/core": "0.2.1",
+    "@navaramap/three-csm": "0.2.1",
+    "@navaramap/three": "0.2.1"
+  },
+  "scripts": {
+    "type-check": "tsc && tsc -p tsconfig.node.json",
+    "build": "pnpm type-check && vite build --watch=false",
+    "build:dev": "vite build --mode development",
+    "build:dev:watch": "pnpm build:dev --watch",
+    "test": "vitest --passWithNoTests --watch=false",
+    "lint": "eslint . --fix",
+    "lint:check": "eslint .",
+    "format": "prettier --write --ignore-path ../../.gitignore .",
+    "format:check": "prettier --check --ignore-path ../../.gitignore ."
+  }
+}
