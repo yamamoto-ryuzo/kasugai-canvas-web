@@ -1,0 +1,24 @@
+{
+  "name": "@navaramap/engine",
+  "type": "module",
+  "version": "0.2.1",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/maplibre/navara.git",
+    "directory": "web/wasm/navara_engine"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "navara_wasm_bg.wasm",
+    "navara_wasm.js",
+    "navara_wasm.d.ts"
+  ],
+  "main": "navara_wasm.js",
+  "types": "navara_wasm.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

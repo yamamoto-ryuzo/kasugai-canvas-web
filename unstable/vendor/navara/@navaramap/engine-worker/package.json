@@ -1,0 +1,24 @@
+{
+  "name": "@navaramap/engine-worker",
+  "type": "module",
+  "version": "0.2.1",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/maplibre/navara.git",
+    "directory": "web/wasm/navara_engine_worker"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "navara_wasm_worker_bg.wasm",
+    "navara_wasm_worker.js",
+    "navara_wasm_worker.d.ts"
+  ],
+  "main": "navara_wasm_worker.js",
+  "types": "navara_wasm_worker.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

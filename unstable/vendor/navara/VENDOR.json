@@ -1,0 +1,14 @@
+{
+  "name": "navara",
+  "npm": {
+    "@navaramap/engine": "0.2.1",
+    "@navaramap/engine-api": "0.2.1",
+    "@navaramap/engine-worker": "0.2.1",
+    "@navaramap/three": "0.2.1",
+    "@navaramap/three-default-descs": "0.2.1",
+    "@navaramap/three-default-plugin": "0.2.1",
+    "postprocessing": "6.39.4",
+    "three": "0.185.1"
+  },
+  "sha": "npm:@navaramap/engine@0.2.1,@navaramap/engine-api@0.2.1,@navaramap/engine-worker@0.2.1,@navaramap/three@0.2.1,@navaramap/three-default-descs@0.2.1,@navaramap/three-default-plugin@0.2.1,postprocessing@6.39.4,three@0.185.1"
+}
