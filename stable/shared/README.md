@@ -11,18 +11,25 @@ KASUGAI Canvas のマルチエンジン化に伴う、エンジン非依存モ�
 - `web/leaflet/` … Leaflet フロント（.kasc プレイヤー・実装済み）
 - `web/navara/` … Navara フロント（写実 3D プレゼンエンジン）。`@navaramap/three`
   （Rust/WASM GIS コア + Three.js）で .kasc を再生。ライブラリは npm dist を
-  `web/vendor/navara/`（`web/navara/vendor.json` でバージョンピン・gitignore）
-  から importmap 経由で読み、**同一オリジン必須**（Worker が `import.meta.url`
-  相対で生成されるため外部 CDN 直読みは不可）。CDN には publish_cdn.py
-  `--vendor` で発行物として配置される。対応行: base:/xyz:/geojson 系・
-  3dtiles:・cam:。wms/wmts・ドレープ先=3DTiles は未対応
+  `vendor/navara/`（`web/navara/vendor.json` でバージョンピン）から importmap
+  経由で読み、**同一オリジン必須**（Worker が `import.meta.url` 相対で生成
+  されるため外部 CDN 直読みは不可）。vendor 実体はどこにも置かず、
+  `vendor-proxy-sw.js` が vendor.json の npm ピン先（jsdelivr）から
+  同一オリジン中継する。対応行: base:/
+  xyz:/geojson 系・3dtiles:・cam:。wms/wmts・ドレープ先=3DTiles は未対応
 - `web/gsimaps/` … GSI Maps フロント（中間エンジン・**現在調整中**。vendored 地理院地図
-  `web/vendor/gsimaps/` を同一オリジン iframe で組み込み、.kasc を
+  `vendor/gsimaps/` を同一オリジン iframe で組み込み、.kasc を
   GSI/Leaflet API 経由で再生。上流コードは無改変。vendor 実体は
-  リポジトリ・配布物に同梱せず CDN（kasugai-canvas-web）へ移行し、
-  ローカルで vendor が無い環境では index.html 先頭の検出スクリプトが
-  ホスト版 gsimaps へ `?kasc=<ローカル絶対URL>` で転送する。iframe 内を
+  リポジトリ・配布物・ローカル・CDN のいずれにも置かず、
+  `vendor-proxy-sw.js` が vendor.json の sha ピン先（jsdelivr/gh・
+  失敗時 raw.githubusercontent）から同一オリジン中継する
+  （Service Worker 前提。SW 非対応環境のフォールバックは持たない）。
+  iframe 内を
   `GSI.GLOBALS` 内部 API 経由で操作する構造のため AI 制御の安定化が難しい）
+- `web/vendor-proxy-sw.js` + `web/shared/vendor-guard.js` … vendor/* を
+  上流オリジナル（vendor.json のピン先 CDN）から同一オリジン供給する
+  Service Worker と、その登録・供給可否プローブの共通ガード
+  （vendor 依存エンジン専用）
 - `web/shared/` … 本ディレクトリ。エンジン横断で使うコードをここへ集約する
 - `web/projects/` … 静的配信用の同梱プロジェクトデータ（エンジン非依存）
 

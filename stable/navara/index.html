@@ -4,6 +4,29 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>KASUGAI Canvas — Navara</title>
+<script src="../shared/vendor-guard.js"></script>
+<script>
+  // vendored Navara(web/vendor/navara)は配布物・リポジトリに同梱しない。
+  // vendorGuardProbe(shared/vendor-guard.js)が vendor-proxy-sw を登録し、
+  // vendor/* を上流オリジナル(vendor.json のピン先 CDN)から同一オリジン中継
+  // する（github.io のような静的配信でも有効）。Worker は import.meta.url
+  // 相対・同一オリジン必須のため、importmap の外部 CDN 直読みではなく
+  // SW 中継で供給する。
+  // Service Worker 前提（SW 非対応環境のフォールバックは持たない）
+  (function () {
+    var VENDOR_URL = "../vendor/navara/@navaramap/three/dist/index.js";
+    // app.js は静的な <script type=module> ではなくプローブ後に注入する。
+    // 静的読み込みだと初回訪問で SW 制御前に vendor を取りに行き 404 確定
+    // するため、SW 制御の確定を待ってからモジュールを起動する
+    vendorGuardProbe(VENDOR_URL)
+      .then(function () {
+        var s = document.createElement("script");
+        s.type = "module";
+        s.src = "./app.js";
+        document.head.appendChild(s);
+      });
+  })();
+</script>
 <link rel="icon" type="image/x-icon" href="../favicon.ico" />
 <script type="importmap">
 {
@@ -360,6 +383,5 @@
   <button id="basemap-globe" type="button" title="Google Earth で現在の表示を開く" aria-label="Google Earth で現在の表示を開く">🌐</button>
   <select id="basemap-select"></select>
 </div>
-<script type="module" src="./app.js"></script>
 </body>
 </html>
