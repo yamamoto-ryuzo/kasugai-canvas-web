@@ -12,7 +12,7 @@ import {
   initAiChat, executeChatTool, showReportModal,
   listUiControls as sharedListUiControls, controlUi as sharedControlUi,
   updateChatPanelVisibility, updateBridgeProviderOptions, resyncProviderSelect,
-  startRemoteCommandLoop, isFetchProxyTarget,
+  startRemoteCommandLoop, isFetchProxyTarget, refreshCliSetupStates,
 } from "../shared/ai-chat.js";
 import {
   detectBackend, backendUrl, isBackendAlive, getBackendCapabilities, hasBackendFeature,
@@ -120,6 +120,8 @@ let undergroundTransparency = 0;
 let undergroundDiveEnabled = true;
 let undergroundBackgroundColor = Cesium.Color.BLACK;
 let basemapDrape3DTiles = false;
+// 3D Tiles ドレープの imagery 縫合倍率(0=標準, 1=2x/512px, 2=4x/1024px)
+let drapeSupersampleLevel = 1;
 // 表示>一般タブ: 透過度スライダ(ベースマップ/レイヤー)の係数と現在のベースマップ ImageryLayer
 let basemapOpacityFactor = 1;
 let layerOpacityFactor = 1;
@@ -2063,6 +2065,47 @@ function createUrlTemplateProvider(options) {
   return new Cesium.UrlTemplateImageryProvider(providerOptions);
 }
 
+// 3D Tiles ドレープの高精細化。Cesium の 3D Tiles ドレープは 1プリミティブ≈1タイルの
+// imagery レベルで固定されタイル範囲が広いと粗くなるが、テクスチャは画像の実サイズの
+// まま GPU に載るため、z+superLevel のサブタイルを縫合した大きな画像を返せば
+// coverage・テクスチャユニット数を変えずに実解像度だけ 2^superLevel 倍にできる。
+// 親レベル画像を先に敷いてからサブタイルを重ねるので、サーバー未提供ズームや
+// 個別タイルの取得失敗でも欠落は出ない
+function supersampleImageryProvider(provider, superLevel) {
+  if (!superLevel) return provider;
+  const sub = 1 << superLevel;
+  const tileSize = provider.tileWidth || 256;
+  const size = tileSize * sub;
+  const requestSub = provider.requestImage.bind(provider);
+  provider.requestImage = function(x, y, level, request) {
+    const settle = fn => {
+      try { return Promise.resolve(fn()).catch(() => undefined); }
+      catch (_) { return Promise.resolve(undefined); }
+    };
+    const base = settle(() => requestSub(x, y, level, request));
+    const cells = [];
+    for (let dy = 0; dy < sub; dy++) {
+      for (let dx = 0; dx < sub; dx++) {
+        cells.push({ dx, dy, p: settle(() => requestSub(x * sub + dx, y * sub + dy, level + superLevel, request)) });
+      }
+    }
+    return Promise.all([base, ...cells.map(c => c.p)]).then(async () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = size;
+      canvas.height = size;
+      const ctx = canvas.getContext("2d");
+      const baseImage = await base;
+      if (baseImage) ctx.drawImage(baseImage, 0, 0, size, size);
+      for (const c of cells) {
+        const image = await c.p;
+        if (image) ctx.drawImage(image, c.dx * tileSize, c.dy * tileSize, tileSize, tileSize);
+      }
+      return canvas;
+    });
+  };
+  return provider;
+}
+
 function createClippingPlaneFromEnu(normalEnu) {
   const center = viewer.camera.position.clone();
   const transform = Cesium.Transforms.eastNorthUpToFixedFrame(center);
@@ -3255,7 +3298,7 @@ async function refreshLayersImpl() {
         if (drape3DTiles && Array.isArray(drapeProviders) && drapeProviders.length > 0) {
           drapeProviders.forEach(options => {
             try {
-              const provider = createUrlTemplateProvider(options);
+              const provider = supersampleImageryProvider(createUrlTemplateProvider(options), drapeSupersampleLevel);
               const imageryLayer = new Cesium.ImageryLayer(provider, { alpha: options.opacity ?? 0.8 });
               tileset.imageryLayers.add(imageryLayer);
             } catch (drapeError) {
@@ -5215,6 +5258,12 @@ function setupEvents() {
     });
   });
 
+  // 3D Tiles ドレープ画質(imagery 縫合倍率)。変更時は再描画して反映
+  document.querySelector("#drape-supersample")?.addEventListener("change", event => {
+    drapeSupersampleLevel = Number(event.target.value) || 0;
+    refreshLayers();
+  });
+
   // ベクター描画件数の上限(フリーズ防止)。変更時は全レイヤーを再描画して反映
   document.querySelector("#vector-entity-limit")?.addEventListener("change", () => refreshLayers());
 
@@ -6867,6 +6916,7 @@ function setupEvents() {
         pane.querySelectorAll(".settings-subpanel").forEach((panel) => panel.classList.toggle("active", panel.id === btn.dataset.manageSub));
         if (["settings-cloud-panel", "settings-rclone-panel", "settings-drive-panel", "settings-save-panel"].includes(btn.dataset.manageSub)) void refreshCloudStatus();
         if (btn.dataset.manageSub === "settings-save-panel") void refreshSaveStatus();
+        if (btn.dataset.manageSub === "ai-install-panel") void refreshCliSetupStates();
       });
     });
     const manageTitlebar = manageWindow.querySelector(".manage-titlebar");
@@ -8169,6 +8219,8 @@ function setupVectorSearch() {
 // 自動更新の無限ループ防止用。更新適用→再起動→リロード後もバージョンが変わらない
 // （配布ZIPの中身が古い等）場合に、同一タブ内での再試行を止めるため試行済みバージョンを記録する
 const UPDATE_ATTEMPT_KEY = "kasugaiUpdateAttempt";
+// CDN/静的配信で最新版を得るための公開 latest.json（raw.githubusercontent.com は CORS 許可済み）
+const CDN_LATEST_JSON = "https://raw.githubusercontent.com/yamamoto-ryuzo/kasugai_canvas/main/download/latest.json";
 
 function compareVersions(left, right) {
   const a = left.split(".").map(Number);
@@ -8183,8 +8235,30 @@ function compareVersions(left, right) {
 
 async function loadUpdateInfo() {
   const current = document.querySelector("#current-version");
+  // 動作環境の明示（アプリ=ローカル exe / CDN=静的配信）
+  const envText = isBackendAlive() ? t("env.app") : t("env.cdn");
+  document.querySelectorAll(".env-kind").forEach((el) => { el.textContent = envText; });
   if (!isBackendAlive()) {
-    if (current) current.textContent = "-";
+    // CDN/静的配信（バックエンド無し）はステージの version.json を表示。
+    // ローカル exe が無いため自己更新 UI は出さない（更新は配信側同期）
+    try {
+      const r = await fetch("../version.json", { cache: "no-store" });
+      const d = await r.json().catch(() => ({}));
+      if (current) current.textContent = (r.ok && d?.version) || "-";
+    } catch (e) { if (current) current.textContent = "-"; }
+    // 最新版はメインリポジトリの latest.json から取得
+    const latest = document.querySelector("#latest-version");
+    try {
+      const lr = await fetch(CDN_LATEST_JSON, { cache: "no-store" });
+      const ld = await lr.json().catch(() => ({}));
+      if (latest) latest.textContent = (lr.ok && ld?.version) || "-";
+    } catch (e) { if (latest) latest.textContent = "-"; }
+    const installButton = document.querySelector("#install-update");
+    if (installButton) installButton.hidden = true;
+    const autoUpdate = document.querySelector("#auto-update");
+    if (autoUpdate) { autoUpdate.checked = false; autoUpdate.disabled = true; }
+    const status = document.querySelector("#version-status");
+    if (status) status.textContent = t("update.cdnNote");
     return;
   }
   try {
@@ -8201,7 +8275,12 @@ async function loadUpdateInfo() {
     void loadFetchSettings();
     await checkForUpdate(health.version);
   } catch (error) {
-    current.textContent = "-";
+    // バックエンド応答が取れない場合も CDN/静的配信の version.json で現在版を表示
+    try {
+      const r = await fetch("../version.json", { cache: "no-store" });
+      const d = await r.json().catch(() => ({}));
+      current.textContent = (r.ok && d?.version) || "-";
+    } catch (_) { current.textContent = "-"; }
     document.querySelector("#version-status").textContent = t("update.fetchFailedError", { error: error.message });
   }
 }
@@ -8210,6 +8289,13 @@ async function checkForUpdate(currentVersion = document.querySelector("#current-
   const status = document.querySelector("#version-status");
   const updateStatus = document.querySelector("#update-status");
   const installButton = document.querySelector("#install-update");
+  // CDN/静的配信は自己更新対象外（/api/update/* が存在せず 404 になるため早期に抜ける）
+  if (!isBackendAlive()) {
+    if (installButton) installButton.hidden = true;
+    if (updateStatus) updateStatus.textContent = "";
+    status.textContent = t("update.cdnNote");
+    return;
+  }
   status.textContent = t("update.checking");
   installButton.hidden = true;
   try {

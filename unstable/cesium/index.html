@@ -174,6 +174,13 @@
                   <label><input id="drape-geojson-primitive-tiles3d" type="checkbox" /><span data-i18n="settings.layer.geojsonPrimitive"> ベクター高速ドレープ (実験的)</span></label>
                 </div>
                 <p class="hint" data-i18n="settings.layer.primitiveHint">CesiumJS 1.146 の GeoJsonPrimitive を使い、ベクターレイヤー(GeoJSON/GeoParquet/FlatGeobuf)を高品質・高速に地形や 3D Tiles にドレープします。有効時はベクター検索・属性クリックの対象外になります。</p>
+                <label class="field-label" for="drape-supersample" data-i18n="settings.layer.drapeQuality">3D Tiles ドレープ画質</label>
+                <select id="drape-supersample">
+                  <option value="0" data-i18n="settings.layer.drapeQuality0">標準</option>
+                  <option value="1" selected data-i18n="settings.layer.drapeQuality1">高精細 (軽量・解像度2倍)</option>
+                  <option value="2" data-i18n="settings.layer.drapeQuality2">最高精細 (解像度4倍・高負荷)</option>
+                </select>
+                <p class="hint" data-i18n="settings.layer.drapeQualityHint">3D Tiles へのベースマップ/XYZ ドレープを高ズームのタイル画像で縫合して精細化します。高いほど綺麗ですがタイル取得数とメモリが増えます。</p>
                 <label class="field-label" for="vector-entity-limit" data-i18n="settings.layer.vectorLimit">ベクター描画件数の上限</label>
                 <input id="vector-entity-limit" type="number" min="0" step="1000" value="20000" />
                 <p class="hint" data-i18n="settings.layer.vectorLimitHint">1回の描画で entity 化するベクター地物数の合計上限(全レイヤー合算)。超過分は描画を省略してフリーズを防ぎます。0 で無制限。</p>
@@ -300,6 +307,7 @@
                 <section id="manage-ai" class="manage-pane">
                   <nav class="manage-subnav">
                     <button type="button" class="active" data-manage-sub="gemini-panel" data-i18n="manage.section.chat">チャット (AI)</button>
+                    <button type="button" data-manage-sub="ai-install-panel" data-i18n="manage.section.install">インストール</button>
                     <button type="button" data-manage-sub="chat-instructions-panel" data-i18n="chat.customInstructionsLabel">追加指示</button>
                     <button type="button" data-manage-sub="datasource-panel" data-i18n="manage.section.datasource">データソース</button>
                     <button type="button" data-manage-sub="plugin-panel" data-i18n="google.tab.plugin">プラグイン</button>
@@ -309,6 +317,8 @@
                     <select id="chat-provider">
                       <option value="gemini" selected data-i18n="chat.provider.gemini">【API】Gemini (Google)</option>
                       <option value="openai" data-i18n="chat.provider.openai">【API】OpenAI互換 (GitHub Models 等)</option>
+                      <option value="anthropic" data-i18n="chat.provider.anthropic">【API】Anthropic (Claude)</option>
+                      <option value="azure" data-i18n="chat.provider.azure">【API】Azure OpenAI</option>
                       <option value="copilot" data-i18n="chat.provider.copilot">【ブリッジ】GitHub Copilot</option>
                       <option value="devin" data-i18n="chat.provider.devin">【ブリッジ】Devin</option>
                       <option value="antigravity" data-i18n="chat.provider.antigravity">【ブリッジ】Antigravity</option>
@@ -318,7 +328,7 @@
                       <p class="hint" data-i18n-html="google.gemini.hint">Gemini API（AIチャット用）の設定です。<a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">Google AI Studio</a> で発行したキーを入力してください。</p>
                       <p class="hint" data-i18n-html="google.gemini.security"><strong>セキュリティについて</strong>：キーはブラウザの localStorage にのみ保存され、送信先は Google の API エンドポイント（HTTPS）のみです。localStorage はオリジン・ブラウザプロファイルごとに分離されるため、<strong>同じデプロイにアクセスする他のユーザーからは読み取れません</strong>。ただし「このPC・ブラウザプロファイルを操作する人」「ブラウザ拡張機能」「ページ上のスクリプト」からは参照可能です — 端末・プロファイルを他者と共有しないでください。またキー自体を共有ファイル（.kasc等）やコードに書き込まないでください。Google Cloud 側でキーに「Generative Language APIのみ」等のAPI制限をかけることを推奨します。</p>
                       <label class="field-label" for="google-api-key" data-i18n="google.gemini.keyLabel">Gemini API キー</label>
-                      <input id="google-api-key" type="password" placeholder="Gemini APIキーを入力" data-i18n-attr="placeholder:google.gemini.keyPlaceholder" autocomplete="off" size="28" />
+                      <input id="google-api-key" type="text" class="secret" data-1p-ignore data-lpignore="true" data-bwignore placeholder="Gemini APIキーを入力" data-i18n-attr="placeholder:google.gemini.keyPlaceholder" autocomplete="off" size="28" />
                       <label class="field-label" for="google-gemini-model" style="margin-top:10px;" data-i18n="google.gemini.modelLabel">Gemini モデル</label>
                       <select id="google-gemini-model">
                         <option value="gemini-3.1-flash-lite" selected data-i18n="google.gemini.model.flashLite">gemini-3.1-flash-lite (標準・低コスト)</option>
@@ -328,29 +338,46 @@
                       </select>
                     </div>
                     <div id="openai-fields" hidden>
-                      <p class="hint" data-i18n-html="chat.openai.hint">AIチャットに使う OpenAI 互換 API の設定です。<a href="https://models.github.ai" target="_blank" rel="noopener noreferrer">GitHub Models</a>（GitHub PAT を使用）のほか、OpenAI・Azure OpenAI・Ollama・LM Studio など OpenAI 互換のエンドポイントに接続できます。GitHub Copilot を使う場合はプロバイダを GitHub Copilot に変更し、表示されるブリッジ欄で Copilot ブリッジ（copilot-bridge/）を接続してください。</p>
+                      <p class="hint" data-i18n-html="chat.openai.hint">AIチャットに使う OpenAI 互換 API の設定です。<a href="https://models.github.ai" target="_blank" rel="noopener noreferrer">GitHub Models</a>（GitHub PAT を使用）のほか、OpenAI・Azure OpenAI・Ollama・LM Studio など OpenAI 互換のエンドポイントに接続できます。GitHub Copilot を使う場合はプロバイダを GitHub Copilot に変更し、表示されるブリッジ欄で Copilot ブリッジ（copilot CLI 経由）を接続してください。</p>
                       <p class="hint" data-i18n-html="chat.openai.security"><strong>セキュリティについて</strong>：キーはブラウザの localStorage にのみ保存され、送信先は上のエンドポイントのみです。http（非HTTPS）のエンドポイントを指定するとキーが平文で送信されるため、localhost/127.0.0.1 以外では https を使ってください。キー自体を共有ファイル（.kasc等）やコードに書き込まないでください。</p>
                       <label class="field-label" for="openai-base-url" data-i18n="chat.openai.baseUrlLabel">エンドポイント ベースURL</label>
                       <input id="openai-base-url" type="text" placeholder="https://models.github.ai/inference" data-i18n-attr="placeholder:chat.openai.baseUrlPlaceholder" autocomplete="off" size="28" />
                       <label class="field-label" for="openai-api-key" style="margin-top:10px;" data-i18n="chat.openai.keyLabel">APIキー / トークン</label>
-                      <input id="openai-api-key" type="password" placeholder="GitHub PAT 等" data-i18n-attr="placeholder:chat.openai.keyPlaceholder" autocomplete="off" size="28" />
+                      <input id="openai-api-key" type="text" class="secret" data-1p-ignore data-lpignore="true" data-bwignore placeholder="GitHub PAT 等" data-i18n-attr="placeholder:chat.openai.keyPlaceholder" autocomplete="off" size="28" />
                       <label class="field-label" for="openai-model" style="margin-top:10px;" data-i18n="chat.openai.modelLabel">モデル</label>
                       <input id="openai-model" type="text" placeholder="gpt-4o-mini" data-i18n-attr="placeholder:chat.openai.modelPlaceholder" autocomplete="off" size="28" />
                     </div>
+                    <div id="anthropic-fields" hidden>
+                      <p class="hint" data-i18n-html="chat.anthropic.hint"></p>
+                      <label class="field-label" for="anthropic-api-key" data-i18n="chat.anthropic.keyLabel">APIキー</label>
+                      <input id="anthropic-api-key" type="text" class="secret" data-1p-ignore data-lpignore="true" data-bwignore placeholder="sk-ant-..." data-i18n-attr="placeholder:chat.anthropic.keyPlaceholder" autocomplete="off" size="28" />
+                      <label class="field-label" for="anthropic-model" style="margin-top:10px;" data-i18n="chat.anthropic.modelLabel">モデル</label>
+                      <input id="anthropic-model" type="text" placeholder="claude-sonnet-4-5" data-i18n-attr="placeholder:chat.anthropic.modelPlaceholder" autocomplete="off" size="28" />
+                      <label class="field-label" for="anthropic-base-url" style="margin-top:10px;" data-i18n="chat.anthropic.baseUrlLabel">エンドポイント ベースURL（省略可）</label>
+                      <input id="anthropic-base-url" type="text" placeholder="https://api.anthropic.com" autocomplete="off" size="28" />
+                    </div>
+                    <div id="azure-fields" hidden>
+                      <p class="hint" data-i18n-html="chat.azure.hint"></p>
+                      <label class="field-label" for="azure-base-url" data-i18n="chat.azure.baseUrlLabel">リソース エンドポイントURL</label>
+                      <input id="azure-base-url" type="text" placeholder="https://<resource>.openai.azure.com" data-i18n-attr="placeholder:chat.azure.baseUrlPlaceholder" autocomplete="off" size="28" />
+                      <label class="field-label" for="azure-api-key" style="margin-top:10px;" data-i18n="chat.azure.keyLabel">APIキー</label>
+                      <input id="azure-api-key" type="text" class="secret" data-1p-ignore data-lpignore="true" data-bwignore autocomplete="off" size="28" />
+                      <label class="field-label" for="azure-deployment" style="margin-top:10px;" data-i18n="chat.azure.deploymentLabel">デプロイ名</label>
+                      <input id="azure-deployment" type="text" placeholder="my-deployment" data-i18n-attr="placeholder:chat.azure.deploymentPlaceholder" autocomplete="off" size="28" />
+                      <label class="field-label" for="azure-api-version" style="margin-top:10px;" data-i18n="chat.azure.apiVersionLabel">API バージョン（省略可）</label>
+                      <input id="azure-api-version" type="text" placeholder="2024-10-21" autocomplete="off" size="28" />
+                    </div>
                     <div id="bridge-fields" hidden>
                       <p class="hint provider-only" data-for="agent" data-i18n-html="agent.externalHint" hidden>チャット入力を外部エージェントのHTTPエンドポイントへ POST します（Antigravity等で構築したエージェントを接続可能）。応答JSONの <code>actions</code> はチャットツールと同名で実行されます。</p>
-                      <p class="hint provider-only" data-for="copilot" data-i18n-html="chat.copilot.hint" hidden>GitHub Copilot の場合は同梱の Copilot ブリッジ（<code>copilot-bridge/</code>・GitHub Copilot SDK）経由で接続します（ブリッジハブ経由で自動起動 :8511・空欄なら自動検出）。GitHub Copilot 契約が必要です — 手順は copilot-bridge/README.md。</p>
-                      <p class="hint provider-only" data-for="devin" data-i18n-html="chat.devin.hint" hidden>Devin の場合は同梱の Devin ブリッジ（<code>devin-bridge/</code>・<code>devin acp</code>）経由で接続します（ブリッジハブ経由で自動起動 :8511・空欄なら自動検出）。Devin CLI と利用者自身の Devin プランが必要で、ローカル・本人利用限定です — 手順と利用条件は devin-bridge/README.md。</p>
-                      <p class="hint provider-only" data-for="antigravity" data-i18n-html="chat.antigravity.hint" hidden>Antigravity の場合は同梱の Antigravity ブリッジ（<code>antigravity-bridge/</code>・<code>agy</code> CLI）経由で接続します（ブリッジハブ経由で自動起動 :8511・空欄なら自動検出）。Antigravity CLI と利用者自身の Google アカウントでのログインが必要で、ローカル・本人利用限定です — 手順と利用条件は antigravity-bridge/README.md。</p>
+                      <p class="hint provider-only" data-for="copilot" data-i18n-html="chat.copilot.hint" hidden>GitHub Copilot の場合はブリッジハブ経由で <code>copilot</code> CLI へ接続します（:8511 自動検出・空欄可）。GitHub Copilot 契約と <code>copilot</code> CLI の導入・ログインが必要です — 導入手順は <a href="https://github.com/github/copilot-cli" target="_blank" rel="noopener">github/copilot-cli</a> を参照（npm 版は <a href="https://nodejs.org/" target="_blank" rel="noopener">Node.js</a> も必要）。</p>
+                      <p class="hint provider-only" data-for="devin" data-i18n-html="chat.devin.hint" hidden>Devin の場合はブリッジハブ経由で <code>devin acp</code>（Devin CLI）へ接続します（:8511 自動検出・空欄可）。Devin CLI と利用者自身の Devin プラン・本人の ACP 認証が必要です（Node.js 不要・ローカル・本人利用限定） — 手順と利用条件は bridge-hub/README.md。</p>
+                      <p class="hint provider-only" data-for="antigravity" data-i18n-html="chat.antigravity.hint" hidden>Antigravity の場合はブリッジハブ経由で <code>agy</code> CLI へ接続します（:8511 自動検出・空欄可）。Antigravity CLI と利用者自身の Google アカウントでのログインが必要です（Node.js 不要・ローカル・本人利用限定） — 手順と利用条件は bridge-hub/README.md。</p>
                       <label class="field-label" for="agent-endpoint" data-i18n="agent.endpointLabel">エンドポイントURL</label>
                       <input id="agent-endpoint" type="text" placeholder="http://127.0.0.1:9000/agent" data-i18n-attr="placeholder:agent.endpointPlaceholder" autocomplete="off" size="28" />
-                      <p class="hint" id="bridge-hub-note" hidden>
-                        <span data-i18n-html="chat.bridge.hubNote"></span>
-                        <a href="../download/bridge-hub.zip" download data-i18n="chat.bridge.hubDownload">bridge-hub.zip をダウンロード</a>
-                      </p>
+                      <p class="hint" id="bridge-install-hint" data-i18n-html="chat.bridge.installTabHint" hidden></p>
                       <div class="provider-only" data-for="agent" hidden>
                         <label class="field-label" for="agent-token" data-i18n="agent.tokenLabel">トークン（任意）</label>
-                        <input id="agent-token" type="password" placeholder="Bearer トークン（省略可）" data-i18n-attr="placeholder:agent.tokenPlaceholder" autocomplete="off" size="28" />
+                        <input id="agent-token" type="text" class="secret" data-1p-ignore data-lpignore="true" data-bwignore placeholder="Bearer トークン（省略可）" data-i18n-attr="placeholder:agent.tokenPlaceholder" autocomplete="off" size="28" />
                         <label><input id="agent-send-key" type="checkbox" /> <span data-i18n="agent.sendKeyLabel">自分の Gemini API キーをエージェントへ送信（BYO）</span></label>
                         <p class="hint" data-i18n-html="agent.sendKeyHint">有効にすると「チャット (Gemini)」で登録した API キーがエージェントへのリクエストに含まれ、サーバー側にキー設定がない環境でも各ユーザー自身のキーでエージェントが動作します（自己ホスト・同一オリジンの配布システム向け）。信頼できないエンドポイントでは有効にしないでください。</p>
                         <p class="hint" id="agent-backend-status" aria-live="polite"></p>
@@ -363,7 +390,7 @@
                       </div>
                       <div id="devin-fields" class="provider-only" data-for="devin" hidden>
                         <label class="field-label" for="devin-api-key" data-i18n="chat.devin.apiKeyLabel">Devin APIキー（任意）</label>
-                        <input id="devin-api-key" type="password" placeholder="cog_..." data-i18n-attr="placeholder:chat.devin.apiKeyPlaceholder" autocomplete="off" size="28" />
+                        <input id="devin-api-key" type="text" class="secret" data-1p-ignore data-lpignore="true" data-bwignore placeholder="cog_..." data-i18n-attr="placeholder:chat.devin.apiKeyPlaceholder" autocomplete="off" size="28" />
                         <p class="hint" data-i18n-html="chat.devin.apiKeyHint">Devin の認証に使うサービスユーザー APIキー。app.devin.ai → Settings → Devin API → Service users タブから発行します（ロール: Member・<code>cog_</code> で始まるトークン）。※PAT（Personal Access Token）は devin acp の認証では拒否されます。空欄の場合はブラウザで Devin にログインする PKCE 認証が起動します。キーは localStorage に保存され、ローカルのブリッジにのみ送信されて <code>devin acp</code> の認証に使われます。</p>
                         <label class="field-label" for="devin-model" data-i18n="chat.devin.modelLabel">モデル</label>
                         <select id="devin-model"></select>
@@ -386,6 +413,35 @@
                     <p id="google-settings-status" class="hint" aria-live="polite"></p>
                     <p id="google-proxy-status" class="hint" aria-live="polite"></p>
                   </section>
+                  <section id="ai-install-panel" class="settings-subpanel">
+                    <p class="hint"><span data-i18n="env.label">環境: </span><code class="env-kind">-</code></p>
+                    <div class="install-row" data-for="hub">
+                      【CDN】 <strong data-i18n="chat.bridge.hubTitle">ブリッジハブ</strong> <span class="cli-state" data-provider="hub" aria-live="polite"></span><br />
+                      <p class="hint" id="bridge-hub-note"><span data-i18n-html="chat.bridge.hubNote"></span></p>
+                      <button type="button" id="bridge-hub-install" data-i18n="chat.bridge.hubInstall">ハブを自動インストール</button>
+                      <a href="../download/bridge-hub.zip" download="bridge-hub.zip" data-i18n="chat.bridge.hubDownload">bridge-hub.zip をダウンロード</a>
+                      <a href="../download/bridge-hub.exe" download="bridge-hub.exe" data-i18n="chat.bridge.hubDownloadExe">bridge-hub.exe をダウンロード</a>
+                      <span id="bridge-hub-status" aria-live="polite"></span>
+                    </div>
+                    <div class="install-row" data-for="copilot" style="margin-top:8px;">
+                      【CDN】【アプリ】 <strong>GitHub Copilot</strong> <span class="cli-state" data-provider="copilot" aria-live="polite"></span><br />
+                      <button type="button" class="bridge-setup-install" data-i18n="chat.bridge.autoInstall">CLI を自動インストール</button>
+                      <button type="button" class="bridge-setup-login" data-i18n="chat.bridge.login">CLI ログイン</button>
+                      <span class="hint bridge-setup-note" aria-live="polite"></span>
+                    </div>
+                    <div class="install-row" data-for="devin" style="margin-top:8px;">
+                      【CDN】【アプリ】 <strong>Devin</strong> <span class="cli-state" data-provider="devin" aria-live="polite"></span><br />
+                      <button type="button" class="bridge-setup-install" data-i18n="chat.bridge.autoInstall">CLI を自動インストール</button>
+                      <button type="button" class="bridge-setup-login" data-i18n="chat.bridge.login">CLI ログイン</button>
+                      <span class="hint bridge-setup-note" aria-live="polite"></span>
+                    </div>
+                    <div class="install-row" data-for="antigravity" style="margin-top:8px;">
+                      【CDN】【アプリ】 <strong>Antigravity</strong> <span class="cli-state" data-provider="antigravity" aria-live="polite"></span><br />
+                      <button type="button" class="bridge-setup-install" data-i18n="chat.bridge.autoInstall">CLI を自動インストール</button>
+                      <button type="button" class="bridge-setup-login" data-i18n="chat.bridge.login">CLI ログイン</button>
+                      <span class="hint bridge-setup-note" aria-live="polite"></span>
+                    </div>
+                  </section>
                   <section id="chat-instructions-panel" class="settings-subpanel">
                     <label class="field-label" for="chat-custom-instructions" data-i18n="chat.customInstructionsLabel">追加指示</label>
                     <textarea id="chat-custom-instructions" rows="8" maxlength="8000" placeholder="AIにいつも守ってほしい指示を入力" data-i18n-attr="placeholder:chat.customInstructionsPlaceholder" style="width:100%;box-sizing:border-box;"></textarea>
@@ -394,6 +450,7 @@
                       <button id="chat-instructions-save" type="button" data-i18n="common.save">保存</button>
                     </div>
                     <p id="chat-instructions-status" class="hint" aria-live="polite"></p>
+                    <div id="ai-instr-root"></div>
                   </section>
                   <section id="plugin-panel" class="settings-subpanel">
                     <p class="hint" data-i18n-html="agent.hint">AIチャットが生成したプラグイン（このブラウザの IndexedDB に保存）を管理します。有効化したプラグインは起動時に自動で読み込まれます。公開するプラグインは <code>PLUGIN/</code> フォルダと <code>plugins.json</code> へ登録します。</p>
@@ -423,7 +480,7 @@
                     <label class="field-label" for="mcp-add-url" style="margin-top:6px;" data-i18n="mcp.add.urlLabel">エンドポイント URL</label>
                     <input id="mcp-add-url" type="text" placeholder="https://example.com/mcp" autocomplete="off" size="28" />
                     <label class="field-label" for="mcp-add-token" style="margin-top:6px;" data-i18n="mcp.add.tokenLabel">Bearer トークン（任意）</label>
-                    <input id="mcp-add-token" type="password" placeholder="省略可" data-i18n-attr="placeholder:mcp.add.tokenPlaceholder" autocomplete="off" size="28" />
+                    <input id="mcp-add-token" type="text" class="secret" data-1p-ignore data-lpignore="true" data-bwignore placeholder="省略可" data-i18n-attr="placeholder:mcp.add.tokenPlaceholder" autocomplete="off" size="28" />
                     <div style="display:flex;gap:6px;margin-top:6px;">
                       <button id="mcp-add" type="button" data-i18n="mcp.add.add">追加して接続</button>
                     </div>
@@ -439,9 +496,9 @@
                     <p class="hint" data-i18n-html="google.maps.hint">Google Maps Platform の API キーです。<a href="https://console.cloud.google.com/google/maps-apis/credentials" target="_blank" rel="noopener noreferrer">Google Cloud Console</a> で発行したキーを入力してください。ジオコーディング・Places・Photorealistic 3D Tiles 等の地図機能で使用します。</p>
                     <p class="hint" data-i18n-html="google.maps.security"><strong>セキュリティについて</strong>：キーはブラウザの localStorage にのみ保存されます。Gemini キーとは別キーを推奨します。Google Cloud 側で使用する API のみに絞る API 制限を推奨します。<strong>注意</strong>：Geocoding・Places・Street View などの Web サービス API は HTTP リファラー制限付きキーを拒否します（リファラー制限が有効なのは Map Tiles API = 3D Tiles のみ）。これらを使う場合はアプリケーションの制限を「なし」にするか、別キーを用意してください。従量課金のため、予算アラートの設定を推奨します。</p>
                     <label class="field-label" for="google-maps-api-key" data-i18n="google.maps.keyLabel">Maps API キー</label>
-                    <input id="google-maps-api-key" type="password" placeholder="Maps APIキーを入力" data-i18n-attr="placeholder:google.maps.keyPlaceholder" autocomplete="off" size="28" />
+                    <input id="google-maps-api-key" type="text" class="secret" data-1p-ignore data-lpignore="true" data-bwignore placeholder="Maps APIキーを入力" data-i18n-attr="placeholder:google.maps.keyPlaceholder" autocomplete="off" size="28" />
                     <label class="field-label" for="google-maps-ws-api-key" data-i18n="google.maps.wsKeyLabel">Web サービス用キー（任意）</label>
-                    <input id="google-maps-ws-api-key" type="password" placeholder="Webサービス用 Maps APIキー（省略可）" data-i18n-attr="placeholder:google.maps.wsKeyPlaceholder" autocomplete="off" size="28" />
+                    <input id="google-maps-ws-api-key" type="text" class="secret" data-1p-ignore data-lpignore="true" data-bwignore placeholder="Webサービス用 Maps APIキー（省略可）" data-i18n-attr="placeholder:google.maps.wsKeyPlaceholder" autocomplete="off" size="28" />
                     <p class="hint" data-i18n="google.maps.wsKeyHint">Geocoding・Places・Street View で使用します。未設定時は上のキーを使用。これらの API は HTTP リファラー制限付きキーを拒否するため、上のキーにリファラー制限をかけている場合はこちらに別キーを設定してください。</p>
                     <div class="terrain-options" style="margin-top:10px;">
                       <button id="google-maps-settings-save" type="button" data-i18n="common.save">保存</button>
@@ -565,6 +622,7 @@
                     <input id="current-port" type="number" min="1" max="65535" readonly />
                     <p class="hint" data-i18n="settings.port.hint">ポート番号の変更は、アプリ起動時の設定で行います。</p>
                     <div class="section-title" data-i18n="update.title">バージョン・更新</div>
+                    <p class="hint"><span data-i18n="env.label">環境: </span><code class="env-kind">-</code></p>
                     <p class="hint"><span data-i18n="update.current">現在のバージョン: </span><code id="current-version">-</code></p>
                     <p class="hint"><span data-i18n="update.latest">最新バージョン: </span><code id="latest-version">-</code> <span id="update-status"></span></p>
                     <div class="terrain-options">
@@ -687,8 +745,18 @@
                 <button id="chat-panel-toggle" class="chat-toggle" type="button" aria-label="最小化" data-i18n-attr="aria-label:common.minimize">−</button>
               </span>
             </div>
+            <div class="chat-sessions-bar">
+              <select id="chat-session-select" class="chat-session-select" title="チャットセッション" data-i18n-attr="title:chat.sessionSelect"></select>
+              <button id="chat-session-new" class="chat-toggle" type="button" title="新規チャット" data-i18n-attr="title:chat.sessionNew">＋</button>
+              <button id="chat-session-export" class="chat-toggle" type="button" title="エクスポート" data-i18n-attr="title:chat.sessionExport">⤓</button>
+              <button id="chat-session-delete" class="chat-toggle" type="button" title="セッションを削除" data-i18n-attr="title:chat.sessionDelete">✕</button>
+              <span id="chat-usage" class="chat-usage"></span>
+            </div>
             <div id="chat-messages" class="chat-messages" aria-live="polite"></div>
+            <div id="chat-attachments" class="chat-attachments" hidden></div>
             <form id="chat-form" class="chat-form">
+              <button id="chat-attach" class="chat-attach" type="button" title="画像を添付" data-i18n-attr="title:chat.attach">📎</button>
+              <input id="chat-attach-file" type="file" accept="image/*" multiple hidden />
               <input id="chat-input" type="text" placeholder="メッセージを入力 (/ でコマンド)" data-i18n-attr="placeholder:chat.placeholder" autocomplete="off" />
               <button type="submit" data-i18n="chat.send">送信</button>
             </form>

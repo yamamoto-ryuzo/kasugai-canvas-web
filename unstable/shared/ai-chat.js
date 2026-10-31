@@ -95,6 +95,7 @@ const CHAT_TOOL_API = {
   showReport: "showReport", listProjects: "listProjects", switchProject: "switchProject",
   toggleDrawMode: "toggleDrawMode", applyInspector: "applyInspector", exportInspector: "exportInspector",
   checkUpdate: "checkUpdate", installUpdate: "installUpdate",
+  bridgeSetup: "local:bridgeSetup",
   runCode: "local:runCode",
   addLayer: "addLayer", addGeoJsonLayer: "addGeoJsonLayer",
   shutdownApp: "shutdownApp",
@@ -111,6 +112,9 @@ const CHAT_TOOL_API = {
   listGsiSakuzu: "listGsiSakuzu", importGsiSakuzu: "importGsiSakuzu",
   listGsiBasemaps: "listGsiBasemaps", setGsiBasemap: "setGsiBasemap",
   importGsiCatalog: "importGsiCatalog",
+  listInstructions: "local:listInstructions", readInstruction: "local:readInstruction",
+  saveInstruction: "local:saveInstruction", deleteInstruction: "local:deleteInstruction",
+  selectAgents: "local:selectAgents",
   setGsiLayerHidden: "setGsiLayerHidden", removeGsiSakuzu: "removeGsiSakuzu",
   getGsiElevation: "getGsiElevation",
   getGsiShareUrl: "getGsiShareUrl", setGsiGlobe: "setGsiGlobe",
@@ -140,11 +144,11 @@ let suppressSettingsVerify = false;
 // ※ setupGoogleSettings() 等がモジュール評価中に実行されるため、
 //   初期化で参照する定数は呼び出し位置より前に置く（TDZ 回避）
 const BRIDGE_HUB_ENDPOINT_APP = "http://127.0.0.1:8511/agent";
-// スタンドアロン bridge-hub（手動起動の server.mjs）の検出ポート。
-// 8512 = スタンドアロン既定（run-hidden.vbs/install-autostart.ps1）。
+// ブラウザ WebGIS 用 bridge-hub（bridge-hub.exe）の検出ポート。
+// 8512 = ブラウザ WebGIS 用既定（run-hidden.vbs/install-autostart.ps1）。
 // 8511 も探すのは、BRIDGE_HUB_PORT を変えずに手動起動したハブや
 // capabilities が届かない経路でアプリ版ハブだけが居るケースのため
-const STANDALONE_HUB_PORTS = [8512, 8511];
+const WEBGIS_HUB_PORTS = [8512, 8511];
 // ブリッジ経由のプロバイダ（capabilities の同名キーがエンドポイントを通知する）
 const BRIDGE_PROVIDERS = ["copilot", "devin", "antigravity"];
 // ブリッジ系プロバイダ（copilot/devin/antigravity/agent）のエンドポイント記憶キー。
@@ -156,43 +160,95 @@ const PROVIDER_ENDPOINT_KEYS = {
   antigravity: "agentEndpoint.antigravity",
   agent: "agentEndpoint.agent",
 };
-const PROVIDER_ORDER = ["gemini", "openai", "copilot", "devin", "antigravity", "agent"];
-// ---- スタンドアロン bridge-hub 検出 ----
+const PROVIDER_ORDER = ["gemini", "openai", "anthropic", "azure", "copilot", "devin", "antigravity", "agent"];
+// ---- ブラウザ WebGIS 用 bridge-hub 検出 ----
 // アプリ版を持たない環境（CDN ホスト版・静的配信・他ポート起動など）でも、
-// ユーザーが bridge-hub/server.mjs を起動していれば /health が hub:true を返す。
+// ユーザーが bridge-hub（bridge-hub.exe）を起動していれば /health が hub:true を返す。
 // その場合は capabilities の feature 通知が無くてもブリッジ系プロバイダを
-// 有効とみなす。8511 はアプリのハブ口なので、スタンドアロンの既定は 8512
+// 有効とみなす。8511 はアプリのハブ口なので、ブラウザ WebGIS 用の既定は 8512
 // （run-hidden.vbs / install-autostart.ps1。新版アプリは 8512 のハブを
 // 旧ブリッジ掃除の対象から外している）
-let standaloneHub = undefined; // {endpoint, providers:{...}} = 検出 / null = 未検出
-let standaloneHubAt = 0;
-const STANDALONE_HUB_TTL_MS = 15000;
-async function probeStandaloneHub() {
-  if (standaloneHub !== undefined
-    && Date.now() - standaloneHubAt < STANDALONE_HUB_TTL_MS) return standaloneHub;
-  standaloneHubAt = Date.now();
-  for (const port of STANDALONE_HUB_PORTS) {
+let webgisHub = undefined; // {endpoint, providers:{...}} = 検出 / null = 未検出
+let webgisHubAt = 0;
+const WEBGIS_HUB_TTL_MS = 15000;
+async function probeWebgisHub() {
+  if (webgisHub !== undefined
+    && Date.now() - webgisHubAt < WEBGIS_HUB_TTL_MS) return webgisHub;
+  webgisHubAt = Date.now();
+  for (const port of WEBGIS_HUB_PORTS) {
     try {
       const r = await fetch(`http://127.0.0.1:${port}/health`,
         { signal: AbortSignal.timeout(2000), cache: "no-store" });
       const d = await r.json().catch(() => ({}));
       if (r.ok && d?.hub) {
-        standaloneHub = {
+        webgisHub = {
           endpoint: `http://127.0.0.1:${port}/agent`,
           providers: d.providers || {},
         };
-        return standaloneHub;
+        return webgisHub;
       }
     } catch (e) { /* 次の候補へ */ }
   }
-  standaloneHub = null;
+  webgisHub = null;
   return null;
 }
+// /health をポーリングしてハブの立ち上がりを待つ（自己インストール exe の
+// 実行待ち用。TTL を無視して都度疎通する）
+async function waitForWebgisHub(timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    webgisHub = undefined;
+    if (await probeWebgisHub()) return webgisHub;
+    await new Promise(r => setTimeout(r, 2000));
+  }
+  return null;
+}
+// ハブ未検出時の自動インストール誘導。
+// フロー: bridge-hub.exe（自己インストール型）を DL → ユーザーが実行すると
+// %LOCALAPPDATA%\kasugai\bridge-hub へコピー＋自動起動登録＋8512 で起動 →
+// こちらは /health ポーリングで検出して接続まで自動完了する。
+// ブラウザから exe を直接起動することはできないため、ユーザー操作は
+// 「DL した exe を実行」の1回のみ（以後はログイン時自動起動）
+let hubInstallWait = null; // 重複実行ガード
+async function offerHubInstall(provider, auto) {
+  const note = document.querySelector("#bridge-hub-note");
+  const btn = document.querySelector("#bridge-hub-install");
+  const status = document.querySelector("#bridge-hub-status");
+  if (!note || !btn) return;
+  note.hidden = false;
+  const start = async () => {
+    // exe のダウンロードは常に発火する（待機中の再クリック＝再DL・再案内
+    // のリトライ導線。ポーリング自体は1本に保つ）
+    const a = document.createElement("a");
+    a.href = "../download/bridge-hub.zip";
+    a.download = "bridge-hub.zip";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    if (status) status.textContent = t("chat.bridge.hubWaitExe");
+    if (hubInstallWait) return hubInstallWait;
+    hubInstallWait = (async () => {
+      const hub = await waitForWebgisHub(180000);
+      if (hub) {
+        const input = document.querySelector("#agent-endpoint");
+        if (input && !input.value.trim()) input.value = hub.endpoint;
+        if (status) status.textContent = t("chat.bridge.hubDetected");
+        void refreshBridgeStatus(provider);
+      } else if (status) {
+        status.textContent = t("chat.bridge.hubNotFound");
+      }
+    })().finally(() => { hubInstallWait = null; });
+    return hubInstallWait;
+  };
+  btn.onclick = () => void start();
+  // プロバイダ選択（ユーザーの明示操作）に続けて自動でも DL+待機を開始する
+  if (auto) void start();
+}
 // ブリッジ系プロバイダの利用可否。アプリ版は capabilities の feature 通知、
-// スタンドアロンはハブの providers.<名>.available で判定する
+// ブラウザ WebGIS 用はハブの providers.<名>.available で判定する
 function bridgeFeatureAvailable(provider) {
   if (hasBackendFeature(provider + "Bridge")) return true;
-  return standaloneHub?.providers?.[provider]?.available === true;
+  return webgisHub?.providers?.[provider]?.available === true;
 }
 // 管理 → AI → データソース: MCP サーバー接続（Box・任意のリモートMCP）の管理画面。
 // サーバー定義は localStorage "mcpServers"、Box のトークンは BYO（OAuth+PKCE）
@@ -526,7 +582,7 @@ function sanitizeHeaderToken(s) {
   return String(s || "").replace(/[\s  -​　]+/g, "");
 }
 // 設定画面で保存した Devin APIキー。ブリッジへは X-Devin-Api-Key ヘッダで
-// 渡し、devin-bridge が devin acp の authenticate（meta.api_key）に使う。
+// 渡し、Devin ブリッジが devin acp の authenticate（meta.api_key）に使う。
 // 空値も送ってブリッジ側のキーをクリアできるようにする（再びブラウザ認証へ戻る）。
 // BYO キーと同じポリシーで https / localhost 以外の宛先には付けない
 function getDevinApiKey() {
@@ -540,38 +596,31 @@ function devinAuthHeaders(endpoint) {
   return { "X-Devin-Api-Key": key };
 }
 
-// GitHub Copilot / Devin / Antigravity プロバイダはブリッジが使える環境
-// （アプリ版の feature 通知、またはスタンドアロン bridge-hub の検出）のとき
-// のみ選択肢に出す。option 要素の hidden 属性はブラウザ差があるため、
-// 要素自体を着脱する。
+// GitHub Copilot / Devin / Antigravity プロバイダの選択肢管理。
+// ハブ未検出でも設定画面では常時表示する — 未導入環境では選択が
+// 「ハブの自己インストール exe 自動DL＋起動待機」の導線になるため。
+// 利用可否の絞り込みはチャット側ドロップダウン（usableChatProviders）が担う。
 // （プロバイダ「外部エージェント」は自作エージェント等の汎用接続口）
 const bridgeProviderOptionStash = {};
 function updateBridgeProviderOption(value) {
   const select = document.querySelector("#chat-provider");
   if (!select) return;
   const option = select.querySelector(`option[value="${value}"]`);
-  if (bridgeFeatureAvailable(value)) {
-    // 再接続時は【ブリッジ】系（agent の手前）に戻しカテゴリ順を保つ
-    if (!option && bridgeProviderOptionStash[value]) {
-      const agentOpt = select.querySelector('option[value="agent"]');
-      select.insertBefore(bridgeProviderOptionStash[value], agentOpt || null);
-      // 隠れている間に保存プロバイダが他へ切り替わっていた場合に備え、
-      // 記憶上のプロバイダがこの値なら表示を戻す
-      if (getChatProvider() === value) select.value = value;
-    }
-  } else if (option) {
-    const wasSelected = select.value === value;
-    bridgeProviderOptionStash[value] = option;
-    option.remove();
-    if (wasSelected) select.dispatchEvent(new Event("change"));
+  // 旧版で外された選択肢があれば【ブリッジ】系（agent の手前）に戻す
+  if (!option && bridgeProviderOptionStash[value]) {
+    const agentOpt = select.querySelector('option[value="agent"]');
+    select.insertBefore(bridgeProviderOptionStash[value], agentOpt || null);
+    // 隠れている間に保存プロバイダが他へ切り替わっていた場合に備え、
+    // 記憶上のプロバイダがこの値なら表示を戻す
+    if (getChatProvider() === value) select.value = value;
   }
 }
 export function updateBridgeProviderOptions() {
-  // アプリ通知の capabilities とは別に、手動起動のスタンドアロン
+  // アプリ通知の capabilities とは別に、手動起動のブラウザ WebGIS 用
   // bridge-hub（8511）も疎通してから選択肢を更新する。プローブは非同期の
   // ため、戻ってきた選択肢に合わせて設定欄も再同期する
   void (async () => {
-    await probeStandaloneHub();
+    await probeWebgisHub();
     for (const v of BRIDGE_PROVIDERS) updateBridgeProviderOption(v);
     resyncProviderSelect();
   })();
@@ -581,7 +630,11 @@ export function updateChatPanelVisibility() {
   const panel = document.querySelector("#chat-panel");
   if (panel) {
     let hasKey = false;
-    try { hasKey = !!localStorage.getItem("googleApiKey") || !!localStorage.getItem("openaiApiKey"); } catch (e) {}
+    try {
+      hasKey = !!localStorage.getItem("googleApiKey") || !!localStorage.getItem("openaiApiKey")
+        || !!localStorage.getItem("anthropicApiKey")
+        || !!(localStorage.getItem("azureApiKey") && localStorage.getItem("azureBaseUrl"));
+    } catch (e) {}
     // アプリ管理ブリッジが使える環境ではキー未設定でもチャットを開ける
     // （ヘッダーのドロップダウンに有効なプロバイダだけが出る）
     const hasBridge = BRIDGE_PROVIDERS.some(bridgeFeatureAvailable);
@@ -611,6 +664,71 @@ export function updateChatPanelVisibility() {
   void refreshChatProviderSwitch();
 }
 
+// 「インストール」タブの導入状態チップ（導入済み=緑・未導入=赤・不明=灰）
+// モデル確認で認証フローが起動されるプロバイダ（devin PKCE 等）があるため、
+// 未ログインが残った場合は遅延で一度だけ再チェックして表示を更新する
+let cliRecheckTimer = null;
+export async function refreshCliSetupStates() {
+  const chips = document.querySelectorAll(".cli-state");
+  if (!chips.length) return;
+  const setChip = (prov, state) => {
+    chips.forEach((c) => {
+      if (c.dataset.provider !== prov) return;
+      c.textContent = state === "installed" ? t("chat.bridge.cliInstalled")
+        : state === "signedin" ? t("chat.bridge.cliSignedIn")
+        : state === "signedout" ? t("chat.bridge.cliSignedOut")
+        : state === "missing" ? t("chat.bridge.cliMissing") : t("chat.bridge.cliUnknown");
+      c.style.color = (state === "installed" || state === "signedin") ? "#2e7d32"
+        : state === "signedout" ? "#e65100" : state === "missing" ? "#c62828" : "#777";
+      c.style.fontWeight = "bold";
+    });
+  };
+  const hub = await probeWebgisHub();
+  setChip("hub", hub ? "installed" : "missing");
+  if (!hub) { for (const p of BRIDGE_PROVIDERS) setChip(p, "unknown"); return; }
+  try {
+    const r = await fetch(hub.endpoint.replace(/\/agent$/, "") + "/setup",
+      { signal: AbortSignal.timeout(5000), cache: "no-store" });
+    const d = await r.json();
+    const prov = d?.providers || d; // 応答は {providers:{copilot:{cli_found..}}} 形
+    const base = hub.endpoint.replace(/\/agent$/, "");
+    const probes = [];
+    for (const p of BRIDGE_PROVIDERS) {
+      if (!prov?.[p]?.cli_found) { setChip(p, "missing"); continue; }
+      setChip(p, "installed");
+      // ログイン状態は実モデル一覧が取れるかで判定（fallback/error = 未ログイン疑い）
+      probes.push(
+        fetch(`${base}/models?provider=${p}`, { signal: AbortSignal.timeout(25000), cache: "no-store" })
+          .then((r2) => r2.json().catch(() => ({})))
+          .then((m) => {
+            const ok = !m?.error && !m?.fallback && Array.isArray(m?.models) && m.models.length;
+            setChip(p, ok ? "signedin" : "signedout");
+            return ok ? null : p;
+          })
+          .catch(() => { setChip(p, "signedout"); return p; })
+      );
+    }
+    // 未ログイン判定が残った場合は遅延で一度だけ再チェック
+    // （上の /models 確認が devin 等の認証フローを起動し、その間に完了することがある）
+    void Promise.all(probes).then((failed) => {
+      const rest = failed.filter(Boolean);
+      if (!rest.length) return;
+      if (cliRecheckTimer) clearTimeout(cliRecheckTimer);
+      cliRecheckTimer = setTimeout(() => {
+        cliRecheckTimer = null;
+        for (const p of rest) {
+          fetch(`${base}/models?provider=${p}`, { signal: AbortSignal.timeout(25000), cache: "no-store" })
+            .then((r2) => r2.json().catch(() => ({})))
+            .then((m) => setChip(p, (!m?.error && !m?.fallback && Array.isArray(m?.models) && m.models.length) ? "signedin" : "signedout"))
+            .catch(() => {});
+        }
+      }, 30000);
+    });
+  } catch (e) {
+    for (const p of BRIDGE_PROVIDERS) setChip(p, "unknown");
+  }
+}
+
 export function setupAiSettings() {
   const keyInput = document.querySelector("#google-api-key");
   const modelSelect = document.querySelector("#google-gemini-model");
@@ -626,6 +744,15 @@ export function setupAiSettings() {
   const openaiBaseUrlInput = document.querySelector("#openai-base-url");
   const openaiKeyInput = document.querySelector("#openai-api-key");
   const openaiModelInput = document.querySelector("#openai-model");
+  const anthropicFields = document.querySelector("#anthropic-fields");
+  const anthropicBaseUrlInput = document.querySelector("#anthropic-base-url");
+  const anthropicKeyInput = document.querySelector("#anthropic-api-key");
+  const anthropicModelInput = document.querySelector("#anthropic-model");
+  const azureFields = document.querySelector("#azure-fields");
+  const azureBaseUrlInput = document.querySelector("#azure-base-url");
+  const azureKeyInput = document.querySelector("#azure-api-key");
+  const azureDeploymentInput = document.querySelector("#azure-deployment");
+  const azureApiVersionInput = document.querySelector("#azure-api-version");
   const bridgeFields = document.querySelector("#bridge-fields");
   const endpointInput = document.querySelector("#agent-endpoint");
   const tokenInput = document.querySelector("#agent-token");
@@ -648,6 +775,15 @@ export function setupAiSettings() {
   // 保存済みの選択が一覧に無ければ先頭に残す。空値はブリッジ既定モデル。
   // ハブが子ブリッジを起動中（コールドスタート）や、Devin の acp が pending を
   // 返している間は応答が遅れる/失敗するため一定間隔で再取得する
+  // ブリッジ系の接続状態表示。NG/エラー時はステータス文字とモデル選択を
+  // 赤にして未接続が一目で分かるようにする（OK/中立時は元の色に戻す）
+  const setBridgeStatus = (ui, text, ok) => {
+    if (!ui) return;
+    if (text !== undefined && ui.status) ui.status.textContent = text;
+    const ng = ok === false;
+    if (ui.status) ui.status.style.color = ng ? "#c0392b" : "";
+    if (ui.modelSelect) ui.modelSelect.style.borderColor = ng ? "#c0392b" : "";
+  };
   const refreshBridgeModels = async (provider, endpoint, retries = 4) => {
     const ui = bridgeUi[provider];
     if (!ui?.modelSelect) return;
@@ -670,12 +806,27 @@ export function setupAiSettings() {
         if (d?.model) detectedBridgeModels[provider] = d.model;
         retry = !!(d?.pending || (d?.error && !models.length));
         // ブリッジが返す失敗理由（APIキー拒否・起動失敗等）を保持し、
-        // statusError キーがあるプロバイダ（devin）はステータス欄にも出す
+        // 接続失敗としてステータス欄・接続状態へ反映する（全プロバイダ共通）
         if (d?.error) {
           providerConnDetail[provider] = String(d.error);
-          if (provider === "devin" && ui.status) {
-            ui.status.textContent = t("chat.devin.statusError", { error: String(d.error).slice(0, 300) });
-          }
+          providerConnState = { provider, state: "ng", detail: String(d.error).slice(0, 200) };
+          setBridgeStatus(ui, t("chat.devin.statusError", { error: String(d.error).slice(0, 300) }), false);
+        } else if (d?.fallback) {
+          // モデル一覧を実取得できず固定一覧が返った = CLI 未ログイン等の
+          // エラー状態。実在する一覧のふりをしないため選択肢は既定のみにし、
+          // 接続失敗として明示する（再試行はしない — ログインしないと解消しない）
+          // CLI の検出状態（見つかっているか/パス）も併せて表示し、
+          // 「未導入なのか、導入済みだが未ログインなのか」を区別できるようにする
+          const st = await bridgeSetupRun(provider, "status").catch(() => null);
+          providerConnDetail[provider] = st?.ok && st.status?.cli_found
+            ? t("chat.bridge.modelsFallbackCli", { provider, path: st.status.cli_path || "?" })
+            : t("chat.bridge.modelsFallback");
+          providerConnState = { provider, state: "ng", detail: providerConnDetail[provider] };
+          setBridgeStatus(ui, providerConnDetail[provider], false);
+          models = [];
+          retry = false;
+        } else {
+          setBridgeStatus(ui, undefined, true);
         }
       } catch (e) { retry = true; }
       if (retry && retries > 0) {
@@ -710,11 +861,22 @@ export function setupAiSettings() {
     if (!ui?.status) return;
     const configured = (endpointInput?.value || "").trim();
     const fallback = configured || bridgeCandidates(provider)[0];
-    ui.status.textContent = t(`chat.${provider}.endpoint`, { endpoint: fallback });
+    setBridgeStatus(ui, t(`chat.${provider}.endpoint`, { endpoint: fallback }), true);
     const found = configured ? await pingBridge(configured, provider) : await detectBridge(provider);
-    ui.status.textContent = found
-      ? t(`chat.${provider}.statusOk`, { endpoint: found.endpoint, model: found.model })
-      : t(`chat.${provider}.statusNg`, { endpoint: fallback });
+    // /health に version が無いハブは旧版（fallback 判定等に非対応）なので
+    // 接続OK扱いせず「要更新」として明示し接続状態も NG にする
+    const outdatedHub = found && found.hub === true && typeof found.version !== "string";
+    if (outdatedHub) {
+      providerConnDetail[provider] = t("chat.bridge.hubOld", { endpoint: found.endpoint });
+      providerConnState = { provider, state: "ng", detail: providerConnDetail[provider] };
+      setBridgeStatus(ui, providerConnDetail[provider], false);
+    } else {
+      setBridgeStatus(ui,
+        found
+          ? t(`chat.${provider}.statusOk`, { endpoint: found.endpoint, model: found.model })
+          : t(`chat.${provider}.statusNg`, { endpoint: fallback }),
+        !!found);
+    }
     detectedBridgeModels[provider] = found?.model || "";
     updateChatProviderLabel();
     void refreshChatProviderSwitch();
@@ -751,10 +913,12 @@ export function setupAiSettings() {
     }
     endpointInput.value = ep;
   };
-  const syncProviderFields = () => {
+  const syncProviderFields = (userAction) => {
     const v = providerSelect?.value || "gemini";
     if (geminiFields) geminiFields.hidden = v !== "gemini";
     if (openaiFields) openaiFields.hidden = v !== "openai";
+    if (anthropicFields) anthropicFields.hidden = v !== "anthropic";
+    if (azureFields) azureFields.hidden = v !== "azure";
     const isBridge = v === "copilot" || v === "devin" || v === "antigravity" || v === "agent";
     if (bridgeFields) {
       bridgeFields.hidden = !isBridge;
@@ -765,8 +929,10 @@ export function setupAiSettings() {
     }
     // ブリッジハブ導入の案内は専用プロバイダ（copilot/devin/antigravity）のみ。
     // 「外部エージェント」（自作実装の接続口）には出さない
-    const hubNote = document.querySelector("#bridge-hub-note");
-    if (hubNote) hubNote.hidden = !BRIDGE_PROVIDERS.includes(v);
+    // ハブ案内は「インストール」タブの主コンテンツなのでプロバイダ選択に
+    // 関わらず常時表示。切替えるのはチャットタブ側の案内文のみ
+    const installHint = document.querySelector("#bridge-install-hint");
+    if (installHint) installHint.hidden = !BRIDGE_PROVIDERS.includes(v);
     // プロバイダ切替時は前プロバイダの入力値を記憶へ退避し、新プロバイダの値を読み込む
     if (endpointOwner !== v) {
       const prevKey = PROVIDER_ENDPOINT_KEYS[endpointOwner];
@@ -787,11 +953,13 @@ export function setupAiSettings() {
       // チャット側ドロップダウンからの切替では suppressSettingsVerify が立ち、
       // ここでの重い検証（Devin の acp 起動・ブラウザ認証を含み得る）はスキップする
       if (!suppressSettingsVerify) {
-        // エンドポイント未入力なら疎通するブリッジを自動検出して入力する
+        // エンドポイント未入力なら疎通するブリッジを自動検出して入力する。
+        // 見つからずユーザーが明示選択した場合はハブの自動インストールを開始する
         if (endpointInput && !endpointInput.value.trim()) {
           void detectBridge(v).then(found => {
             if (found && endpointInput && !endpointInput.value.trim()) endpointInput.value = found.endpoint;
             void refreshBridgeStatus(v);
+            if (!found && userAction) void offerHubInstall(v, true);
           });
         } else {
           void refreshBridgeStatus(v);
@@ -812,6 +980,13 @@ export function setupAiSettings() {
     if (openaiBaseUrlInput) openaiBaseUrlInput.value = localStorage.getItem("openaiBaseUrl") || "";
     if (openaiKeyInput) openaiKeyInput.value = localStorage.getItem("openaiApiKey") || "";
     if (openaiModelInput) openaiModelInput.value = localStorage.getItem("openaiModel") || "";
+    if (anthropicBaseUrlInput) anthropicBaseUrlInput.value = localStorage.getItem("anthropicBaseUrl") || "";
+    if (anthropicKeyInput) anthropicKeyInput.value = localStorage.getItem("anthropicApiKey") || "";
+    if (anthropicModelInput) anthropicModelInput.value = localStorage.getItem("anthropicModel") || "";
+    if (azureBaseUrlInput) azureBaseUrlInput.value = localStorage.getItem("azureBaseUrl") || "";
+    if (azureKeyInput) azureKeyInput.value = localStorage.getItem("azureApiKey") || "";
+    if (azureDeploymentInput) azureDeploymentInput.value = localStorage.getItem("azureDeployment") || "";
+    if (azureApiVersionInput) azureApiVersionInput.value = localStorage.getItem("azureApiVersion") || "";
     if (endpointInput) endpointInput.value = localStorage.getItem("agentEndpoint") || "";
     if (tokenInput) tokenInput.value = localStorage.getItem("agentToken") || "";
     if (sendKeyInput) sendKeyInput.checked = localStorage.getItem("agentSendKey") === "1";
@@ -822,7 +997,7 @@ export function setupAiSettings() {
     for (const p of BRIDGE_PROVIDERS) void refreshBridgeModels(p, "");
     syncProviderFields();
   } catch (e) {}
-  providerSelect?.addEventListener("change", syncProviderFields);
+  providerSelect?.addEventListener("change", () => syncProviderFields(true));
   saveButton.addEventListener("click", () => {
     try {
       localStorage.setItem("googleApiKey", keyInput.value.trim());
@@ -831,6 +1006,13 @@ export function setupAiSettings() {
       if (openaiBaseUrlInput) localStorage.setItem("openaiBaseUrl", openaiBaseUrlInput.value.trim());
       if (openaiKeyInput) localStorage.setItem("openaiApiKey", openaiKeyInput.value.trim());
       if (openaiModelInput) localStorage.setItem("openaiModel", openaiModelInput.value.trim());
+      if (anthropicBaseUrlInput) localStorage.setItem("anthropicBaseUrl", anthropicBaseUrlInput.value.trim());
+      if (anthropicKeyInput) localStorage.setItem("anthropicApiKey", anthropicKeyInput.value.trim());
+      if (anthropicModelInput) localStorage.setItem("anthropicModel", anthropicModelInput.value.trim());
+      if (azureBaseUrlInput) localStorage.setItem("azureBaseUrl", azureBaseUrlInput.value.trim());
+      if (azureKeyInput) localStorage.setItem("azureApiKey", azureKeyInput.value.trim());
+      if (azureDeploymentInput) localStorage.setItem("azureDeployment", azureDeploymentInput.value.trim());
+      if (azureApiVersionInput) localStorage.setItem("azureApiVersion", azureApiVersionInput.value.trim());
       if (copilotModelSelect) localStorage.setItem("copilotModel", copilotModelSelect.value);
       if (devinModelSelect) localStorage.setItem("devinModel", devinModelSelect.value);
       if (antigravityModelSelect) localStorage.setItem("antigravityModel", antigravityModelSelect.value);
@@ -866,6 +1048,7 @@ export function setupAiSettings() {
       // 旧自動設定マーカーは廃止（エンドポイント欄が明示されるため不要）
       localStorage.removeItem("agentAutoConfig");
       if (BRIDGE_PROVIDERS.includes(pv)) void refreshBridgeStatus(pv);
+      void refreshCliSetupStates();
       if (pv === "agent") void refreshAgentStatus();
       if (stepsInput) {
         localStorage.setItem("geminiToolMaxSteps", String(clampToolSteps(stepsInput.value)));
@@ -886,6 +1069,74 @@ export function setupAiSettings() {
     } catch (e) {
       if (customInstructionsStatus) customInstructionsStatus.textContent = t("common.saveError", { error: e.message });
     }
+  });
+
+  // 指示書（agents/skills）管理 UI を「追加指示」ペインへ描画する
+  renderAiInstruments();
+
+  // 「CLI を自動インストール」ボタン — ハブの /setup を呼び、
+  // 検出状況 → 確認 → install ジョブの完了までを進行表示する
+  document.querySelectorAll(".bridge-setup-install").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const holder = btn.closest("[data-for]");
+      const provider = holder?.dataset.for || "";
+      const note = holder?.querySelector(".bridge-setup-note");
+      if (!BRIDGE_PROVIDERS.includes(provider)) return;
+      btn.disabled = true;
+      if (note) note.textContent = "";
+      try {
+        const st = await bridgeSetupRun(provider, "status");
+        if (!st.ok) {
+          if (note) note.textContent = st.message || "";
+          return;
+        }
+        if (st.status?.cli_found) {
+          if (note) note.textContent = t("chat.bridge.cliDetected", { path: st.status.cli_path || "" });
+          void refreshBridgeStatus(provider);
+          return;
+        }
+        if (!st.status?.auto_install) {
+          if (note) note.textContent = st.status?.note || "";
+          return;
+        }
+        if (!window.confirm(t("chat.bridge.installConfirm", { provider }))) return;
+        if (note) note.textContent = t("chat.bridge.installing");
+        const r = await bridgeSetupRun(provider, "install");
+        if (r.ok) {
+          if (note) note.textContent = t("chat.bridge.installDone", { path: r.result?.cli_path || "" });
+          void refreshBridgeStatus(provider);
+        } else if (note) {
+          note.textContent = t("chat.bridge.installFailed",
+            { error: r.result?.error || r.message || r.status || "" });
+        }
+      } finally {
+        btn.disabled = false;
+        void refreshCliSetupStates();
+      }
+    });
+  });
+  // CLI の対話ログイン（copilot /login・devin login）はハブから代理実行
+  // できないため、ハブの login アクションで別コンソールを開いてもらう
+  document.querySelectorAll(".bridge-setup-login").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const holder = btn.closest("[data-for]");
+      const provider = holder?.dataset.for || "";
+      const note = holder?.querySelector(".bridge-setup-note");
+      if (!BRIDGE_PROVIDERS.includes(provider)) return;
+      btn.disabled = true;
+      try {
+        const r = await bridgeSetupRun(provider, "login");
+        if (note) {
+          note.textContent = r.ok
+            ? (r.already ? t("chat.bridge.loginAlready") : t("chat.bridge.loginStarted"))
+            : t("chat.bridge.loginFailed", { error: r.message || "" });
+          void refreshCliSetupStates();
+        }
+      } finally {
+        btn.disabled = false;
+        void refreshCliSetupStates();
+      }
+    });
   });
 }
 
@@ -1502,6 +1753,18 @@ const CHAT_TOOLS = [{
       parameters: { type: "OBJECT", properties: {} },
     },
     {
+      name: "bridgeSetup",
+      description: "ブリッジハブ(127.0.0.1)経由でブリッジ系プロバイダ用CLIの導入状況確認・自動インストールを行う。action=status(既定)は対象プロバイダのCLI検出状況と自動化可否を返し、action=installは公式手順でCLIを自動導入する(copilot/devinのみ・antigravityは案内のみ)。installはPCにソフトウェアをインストールするため、ユーザーが明示的に導入を求めた場合のみ使う(実行前に確認ダイアログが出る)",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          provider: { type: "STRING", description: "copilot / devin / antigravity" },
+          action: { type: "STRING", description: "status(既定) / install" },
+        },
+        required: ["provider"],
+      },
+    },
+    {
       name: "runCode",
       description: "ブラウザ内サンドボックスでJavaScriptを実行し、戻り値とconsole出力を返す。データ加工・集計・座標計算などに使う。api.flyTo(...)等の地図操作APIが非同期で呼べる(api.<関数名>はkasugaiApiと同じ)。例: const layers = await api.listLayers(); return layers.length; ※DOM・localStorage・外部fetchは不可",
       parameters: {
@@ -1914,8 +2177,295 @@ const CHAT_TOOLS = [{
         required: ["on"],
       },
     },
+    {
+      name: "listInstructions",
+      description: "AI の指示書ファイルを一覧する。kind=\"agents\" はシステム指示へ常時注入される常駐指示書（enabled=有効化中）、kind=\"skills\" はオンデマンド手順書",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          kind: { type: "STRING", description: "\"agents\" または \"skills\"" },
+        },
+        required: ["kind"],
+      },
+    },
+    {
+      name: "readInstruction",
+      description: "指示書ファイルの本文を読む。スキルの詳細な手順が必要なときに使う",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          kind: { type: "STRING", description: "\"agents\" または \"skills\"" },
+          id: { type: "STRING", description: "指示書ID（listInstructionsで確認）" },
+        },
+        required: ["kind", "id"],
+      },
+    },
+    {
+      name: "saveInstruction",
+      description: "指示書ファイルを新規作成・上書き保存する。kind=\"agents\" は常時注入される常駐指示書、kind=\"skills\" はオンデマンド手順書。既存IDの上書き・新規作成ともにユーザーへ確認が出る場合がある",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          kind: { type: "STRING", description: "\"agents\" または \"skills\"" },
+          id: { type: "STRING", description: "指示書ID（空白・パス区切り不可）" },
+          text: { type: "STRING", description: "指示書本文（Markdown）" },
+        },
+        required: ["kind", "id", "text"],
+      },
+    },
+    {
+      name: "deleteInstruction",
+      description: "指示書ファイルを削除する",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          kind: { type: "STRING", description: "\"agents\" または \"skills\"" },
+          id: { type: "STRING", description: "指示書ID" },
+        },
+        required: ["kind", "id"],
+      },
+    },
+    {
+      name: "selectAgents",
+      description: "常時注入する agents 指示書を選択する（複数選択・全置換）。ids に含めた agents のみ有効になる",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          ids: { type: "ARRAY", description: "有効化する agents の指示書ID一覧", items: { type: "STRING" } },
+        },
+        required: ["ids"],
+      },
+    },
   ],
 }];
+
+// ---- 指示書ファイル（agents / skills） ----
+// LIVE ハーネス（qgis_live_driver）の ~/.qgis-live/agents|skills/*.md に相当。
+//   agents … システム指示へ常時注入される常駐指示書（複数選択可）
+//   skills … 一覧のみプロンプトへ載せ、モデルが readInstruction ツールで
+//            必要時に本文を読むオンデマンド手順書
+// ブラウザ単体（CDN・静的配信）でも動くよう正本は localStorage。
+// 指示書自体の一覧・読み書き・選択は ai 系ツール（listInstructions 等）から
+// モデルが操作でき、設定画面の「追加指示」ペインでも編集できる
+const AI_INSTR_KEY = "kasugaiAiInstructions";
+const AI_INSTR_KINDS = ["agents", "skills"];
+
+function aiInstrStore() {
+  try {
+    const s = JSON.parse(localStorage.getItem(AI_INSTR_KEY) || "{}");
+    return {
+      agents: s?.agents && typeof s.agents === "object" ? s.agents : {},
+      skills: s?.skills && typeof s.skills === "object" ? s.skills : {},
+      enabledAgents: Array.isArray(s?.enabledAgents) ? s.enabledAgents.filter(v => typeof v === "string") : [],
+    };
+  } catch (e) {
+    return { agents: {}, skills: {}, enabledAgents: [] };
+  }
+}
+function aiInstrSaveStore(store) {
+  try { localStorage.setItem(AI_INSTR_KEY, JSON.stringify(store)); } catch (e) {}
+}
+
+// 指示書ID（ファイル名相当）。空白は _ に、パス区切り等の危険文字は除去
+function aiInstrId(name) {
+  return String(name || "").trim().replace(/\s+/g, "_")
+    .replace(/[\\/:*?"<>|#%{}$!'@+`=~^&;,[\]()]/g, "")
+    .replace(/^\.+/, "").slice(0, 80);
+}
+
+function aiInstrList(kind) {
+  const store = aiInstrStore();
+  const bag = store[kind] || {};
+  const enabled = new Set(store.enabledAgents);
+  return Object.keys(bag).sort().map(id => ({
+    id,
+    enabled: kind === "agents" ? enabled.has(id) : undefined,
+    summary: (bag[id]?.text || "").split(/\r?\n/).find(l => l.trim())?.trim().slice(0, 80) || "",
+  }));
+}
+
+function aiInstrRead(kind, id) {
+  const item = aiInstrStore()[kind]?.[id];
+  return item && typeof item.text === "string" ? item.text : null;
+}
+
+// kind="agents" なら有効化状態を保つため enabledAgents 側も掃除する
+function aiInstrWrite(kind, id, text) {
+  const store = aiInstrStore();
+  store[kind][id] = { text: String(text ?? ""), updated: Date.now() };
+  aiInstrSaveStore(store);
+  return id;
+}
+function aiInstrDelete(kind, id) {
+  const store = aiInstrStore();
+  if (!store[kind][id]) return false;
+  delete store[kind][id];
+  store.enabledAgents = store.enabledAgents.filter(v => v !== id);
+  aiInstrSaveStore(store);
+  return true;
+}
+function aiInstrSelectAgents(ids) {
+  const store = aiInstrStore();
+  const known = new Set(Object.keys(store.agents));
+  store.enabledAgents = [...new Set((Array.isArray(ids) ? ids : []).map(String))].filter(id => known.has(id));
+  aiInstrSaveStore(store);
+  return store.enabledAgents;
+}
+function aiInstrEnabledAgents() {
+  const store = aiInstrStore();
+  const known = new Set(Object.keys(store.agents));
+  return store.enabledAgents.filter(id => known.has(id));
+}
+
+// システム指示への注入片。agents は本文を常時注入、skills は id+要約の一覧のみ
+function aiInstrPromptText() {
+  const store = aiInstrStore();
+  const enabled = aiInstrEnabledAgents();
+  const parts = [];
+  if (enabled.length) {
+    const texts = enabled.map(id => `### Agent instruction "${id}"\n${store.agents[id]?.text || ""}`.trim());
+    parts.push(`Additional instruction files (always applied):\n${texts.join("\n\n")}`);
+  }
+  const skills = aiInstrList("skills");
+  if (skills.length) {
+    const list = skills.map(s => `- ${s.id}${s.summary ? `: ${s.summary}` : ""}`).join("\n");
+    parts.push(`Available skill files (read the full text on demand via the readInstruction tool with kind="skills"):\n${list}`);
+  }
+  return parts.join("\n\n");
+}
+
+// ---- 指示書（agents/skills）管理 UI ----
+// 設定画面「追加指示」ペイン内の #ai-instr-root へ動的に描画する。
+// agents はチェックで常時注入の有効/無効を切り替え、skills はオンデマンド
+// 手順書として登録する。AI ツール側からも renderAiInstruments() で再描画できる
+function renderAiInstruments() {
+  const root = document.querySelector("#ai-instr-root");
+  if (!root) return;
+  root.replaceChildren();
+
+  // 新規・編集共用のインラインエディタ
+  const editor = document.createElement("div");
+  editor.className = "ai-instr-editor";
+  editor.hidden = true;
+  let editKind = "agents";
+  let editingId = "";
+  const editorTitle = document.createElement("div");
+  editorTitle.className = "ai-sec-title";
+  const idInput = document.createElement("input");
+  idInput.type = "text";
+  idInput.setAttribute("data-i18n-attr", "placeholder:instr.idPlaceholder");
+  idInput.placeholder = t("instr.idPlaceholder");
+  const textArea = document.createElement("textarea");
+  textArea.rows = 8;
+  textArea.style.cssText = "width:100%;box-sizing:border-box;";
+  const btnRow = document.createElement("div");
+  btnRow.style.cssText = "display:flex;gap:6px;margin-top:6px;";
+  const saveBtn = document.createElement("button");
+  saveBtn.type = "button";
+  saveBtn.textContent = t("common.save");
+  const cancelBtn = document.createElement("button");
+  cancelBtn.type = "button";
+  cancelBtn.textContent = t("common.cancel");
+  const status = document.createElement("p");
+  status.className = "hint";
+  btnRow.append(saveBtn, cancelBtn);
+  editor.append(editorTitle, idInput, textArea, btnRow, status);
+
+  const openEditor = (kind, id) => {
+    editKind = kind;
+    editingId = id || "";
+    editorTitle.textContent = editingId
+      ? t("instr.editTitle", { id: editingId })
+      : t("instr.newTitle", { kind: t(`instr.kind.${kind}`) });
+    idInput.value = editingId;
+    idInput.disabled = !!editingId;
+    textArea.value = editingId ? (aiInstrRead(kind, editingId) || "") : "";
+    status.textContent = "";
+    editor.hidden = false;
+    textArea.focus();
+  };
+  cancelBtn.addEventListener("click", () => { editor.hidden = true; });
+  saveBtn.addEventListener("click", () => {
+    const target = editingId || aiInstrId(idInput.value);
+    if (!target) {
+      status.textContent = t("instr.badId");
+      return;
+    }
+    aiInstrWrite(editKind, target, textArea.value);
+    // 新規作成した agents は既定で有効化する（常時注入の意図に即す）
+    if (editKind === "agents" && !editingId) {
+      const store = aiInstrStore();
+      store.enabledAgents = [...new Set([...store.enabledAgents, target])];
+      aiInstrSaveStore(store);
+    }
+    editor.hidden = true;
+    renderAiInstruments();
+  });
+
+  for (const kind of AI_INSTR_KINDS) {
+    const title = document.createElement("div");
+    title.className = "ai-sec-title";
+    title.textContent = t(`instr.${kind}Title`);
+    const hint = document.createElement("p");
+    hint.className = "hint";
+    hint.textContent = t(`instr.${kind}Hint`);
+    const list = document.createElement("div");
+    list.className = "ai-instr-list";
+    for (const item of aiInstrList(kind)) {
+      const row = document.createElement("div");
+      row.className = "ai-instr-row";
+      const name = document.createElement("span");
+      name.className = "ai-instr-name";
+      name.textContent = item.id;
+      name.title = item.summary;
+      if (kind === "agents") {
+        const label = document.createElement("label");
+        label.className = "ai-instr-name";
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.checked = !!item.enabled;
+        cb.addEventListener("change", () => {
+          const store = aiInstrStore();
+          store.enabledAgents = cb.checked
+            ? [...new Set([...store.enabledAgents, item.id])]
+            : store.enabledAgents.filter(v => v !== item.id);
+          aiInstrSaveStore(store);
+        });
+        label.append(cb, name);
+        row.append(label);
+      } else {
+        row.append(name);
+      }
+      const editBtn = document.createElement("button");
+      editBtn.type = "button";
+      editBtn.textContent = t("common.edit");
+      editBtn.addEventListener("click", () => openEditor(kind, item.id));
+      const delBtn = document.createElement("button");
+      delBtn.type = "button";
+      delBtn.textContent = t("common.delete");
+      delBtn.addEventListener("click", () => {
+        if (window.confirm(t("instr.confirmDelete", { id: item.id }))) {
+          aiInstrDelete(kind, item.id);
+          renderAiInstruments();
+        }
+      });
+      row.append(editBtn, delBtn);
+      list.append(row);
+    }
+    if (!list.children.length) {
+      const empty = document.createElement("p");
+      empty.className = "hint";
+      empty.textContent = t("instr.empty");
+      list.append(empty);
+    }
+    const addBtn = document.createElement("button");
+    addBtn.type = "button";
+    addBtn.textContent = t("instr.add");
+    addBtn.addEventListener("click", () => openEditor(kind, ""));
+    root.append(title, hint, list, addBtn);
+  }
+  root.append(editor);
+}
 
 // AI に自オリジンを教える — 位置リンクの案内でデプロイ先と異なるドメインを推測させないため
 const chatSystemInstruction = () => {
@@ -1928,7 +2478,8 @@ const chatSystemInstruction = () => {
     : aiEngine === "gsimaps"
       ? " (KASUGAI Canvas .kasc プレイヤー(地理院地図)。地形起伏・断面クリップ・描画モード等の一部3Dツールは利用不可。setGsiGlobe で Globe(Cesium) へ切替可能。flyPath 系はカメラ巡回のみで地形追従しない)"
       : " (KASUGAI Canvas .kasc 2D プレイヤー。3D地形・断面クリップ・描画モード系ツールはこのエンジンでは利用不可。flyPath 系はカメラ巡回のみで地形追従しない)"}`;
-  return `${t("chat.systemInstruction")} ${t("chat.systemInstructionAppUrl", { url: `${window.location.origin}${window.location.pathname}` })}${engineNote}${custom.trim() ? `\n\nUser's additional instructions:\n${custom.trim()}` : ""}`;
+  const instr = aiInstrPromptText();
+  return `${t("chat.systemInstruction")} ${t("chat.systemInstructionAppUrl", { url: `${window.location.origin}${window.location.pathname}` })}${engineNote}${custom.trim() ? `\n\nUser's additional instructions:\n${custom.trim()}` : ""}${instr ? `\n\n${instr}` : ""}`;
 };
 
 // バックエンドの能力に応じて公開するツールを絞る（公開環境に高権限ツールを見せない）
@@ -1942,6 +2493,8 @@ function activeChatTools() {
     // 更新・停止はローカルサーバー版のみ（静的配信では非公開）
     .filter(d => !["checkUpdate", "installUpdate"].includes(d.name) || hasBackendFeature("update"))
     .filter(d => d.name !== "shutdownApp" || hasBackendFeature("shutdown"))
+    // ブリッジCLI導入ツールはハブが検出できる環境のみ（内蔵AIからも使える導線）
+    .filter(d => d.name !== "bridgeSetup" || bridgeSetupHubMaybe())
     .filter(d => chatToolAvailable(d.name))
     // MCP サーバー（Box 等）のツールを末尾へ合成する
     .concat(mcpDeclarations());
@@ -2129,6 +2682,41 @@ export async function executeChatTool(name, args = {}) {
   if (!requiredApi.startsWith("local:") && typeof window.kasugaiApi?.[requiredApi] !== "function") {
     return { ok: false, message: t("tool.unknown", { name }) };
   }
+  // ---- 指示書ツール（agents/skills）。ブラウザ localStorage の指示書ストアを操作 ----
+  if (["listInstructions", "readInstruction", "saveInstruction", "deleteInstruction", "selectAgents"].includes(name)) {
+    const kind = AI_INSTR_KINDS.includes(args.kind) ? args.kind : null;
+    if (name !== "selectAgents" && !kind) return { ok: false, message: t("instr.badKind") };
+    if (name === "listInstructions") return { items: aiInstrList(kind) };
+    if (name === "readInstruction") {
+      const id = aiInstrId(args.id);
+      const text = aiInstrRead(kind, id) ?? aiInstrRead(kind, String(args.id || ""));
+      if (text === null) return { ok: false, message: t("instr.notFound", { id: args.id || "" }) };
+      return { id, text };
+    }
+    if (name === "saveInstruction") {
+      const id = aiInstrId(args.id);
+      if (!id) return { ok: false, message: t("instr.badId") };
+      if (aiInstrRead(kind, id) !== null
+        && !window.confirm(t("instr.confirmOverwrite", { id }))) {
+        return { ok: false, message: t("agent.cancelled") };
+      }
+      aiInstrWrite(kind, id, args.text);
+      renderAiInstruments();
+      return { ok: true, id };
+    }
+    if (name === "deleteInstruction") {
+      const id = aiInstrId(args.id) || String(args.id || "");
+      if (aiInstrRead(kind, id) === null) return { ok: false, message: t("instr.notFound", { id }) };
+      if (!window.confirm(t("instr.confirmDelete", { id }))) return { ok: false, message: t("agent.cancelled") };
+      aiInstrDelete(kind, id);
+      renderAiInstruments();
+      return { ok: true, id };
+    }
+    // selectAgents — 常時注入の有効セットを全置換
+    const enabled = aiInstrSelectAgents(args.ids);
+    renderAiInstruments();
+    return { ok: true, enabled };
+  }
   if (name === "flyTo") {
     await window.kasugaiApi?.flyTo?.(await applyDroneViewDefaults(args));
     return { ok: true };
@@ -2275,6 +2863,19 @@ export async function executeChatTool(name, args = {}) {
     const r = await window.kasugaiApi.shutdownApp();
     return r && typeof r === "object" ? r : { ok: !!r };
   }
+  if (name === "bridgeSetup") {
+    const provider = String(args.provider || "").toLowerCase().trim();
+    if (!BRIDGE_PROVIDERS.includes(provider)) {
+      return { ok: false, message: `unknown provider: ${provider}` };
+    }
+    const action = String(args.action || "status").toLowerCase();
+    // ソフトウェアのインストールは実行前に必ずユーザー確認を取る
+    if (action === "install"
+      && !window.confirm(t("chat.bridge.installConfirm", { provider }))) {
+      return { ok: false, message: t("agent.cancelled") };
+    }
+    return await bridgeSetupRun(provider, action);
+  }
   if (name === "savePlugin") {
     // 生成コードの適用前にユーザーへ全文確認を取る（プラグインはフル権限で動くため）
     const approved = await confirmPluginApply({ id: args.id, name: args.name, code: String(args.code || "") });
@@ -2411,10 +3012,10 @@ function bridgeCandidates(provider) {
   const advertised = getBackendCapabilities()?.[provider]?.endpoint;
   if (advertised) list.push(advertised);
   // 既定のハブ口(8511)は通知の有無にかかわらず候補に入れる。
-  // スタンドアロン bridge-hub（8512 等）が検出済みならその口も足す。
+  // ブラウザ WebGIS 用 bridge-hub（8512 等）が検出済みならその口も足す。
   // localhost への疎通失敗は即座に返るためコストは無視できる
   list.push(BRIDGE_HUB_ENDPOINT_APP);
-  if (standaloneHub?.endpoint) list.push(standaloneHub.endpoint);
+  if (webgisHub?.endpoint) list.push(webgisHub.endpoint);
   return [...new Set(list)];
 }
 
@@ -2470,6 +3071,94 @@ async function healBridgeEndpoint(provider, failedEndpoint) {
   return null;
 }
 
+// ブリッジハブのオリジン(http://127.0.0.1:<port>)を検出する。
+// /agent エンドポイント記憶・webgis 検出・既定ポートを順に試し、
+// /health が hub:true を返した最初のオリジンを返す(なければ null)
+async function detectBridgeHubBase() {
+  const eps = [];
+  try {
+    const saved = (localStorage.getItem("agentEndpoint") || "").trim();
+    if (saved) eps.push(saved);
+  } catch (e) {}
+  if (webgisHub?.endpoint) eps.push(webgisHub.endpoint);
+  eps.push(BRIDGE_HUB_ENDPOINT_APP, "http://127.0.0.1:8512/agent");
+  for (const ep of [...new Set(eps)]) {
+    try {
+      const r = await fetch(new URL("/health", ep).href,
+        { signal: AbortSignal.timeout(2000), cache: "no-store" });
+      const d = await r.json().catch(() => ({}));
+      if (r.ok && d?.hub) return new URL(ep).origin;
+    } catch (e) { /* 次の候補へ */ }
+  }
+  return null;
+}
+
+// bridgeSetup ツールを公開する目安（正確な可否は実行時に detectBridgeHubBase で確認）
+function bridgeSetupHubMaybe() {
+  return BRIDGE_PROVIDERS.some(p => hasBackendFeature(p + "Bridge"))
+    || !!webgisHub?.endpoint;
+}
+
+// ハブの /setup を呼ぶ。action=status は GET、install はジョブを開始して
+// 完了(またはタイムアウト)までポーリングする。戻り値はツール結果向けの要約
+async function bridgeSetupRun(provider, action) {
+  const hub = await detectBridgeHubBase();
+  if (!hub) return { ok: false, message: t("chat.bridge.hubNotFound") };
+  if (action !== "install") {
+    try {
+      const r = await fetch(`${hub}/setup`, { signal: AbortSignal.timeout(15000) });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) return { ok: false, message: d?.error || `HTTP ${r.status}` };
+      return { ok: true, provider, status: d?.providers?.[provider] || null };
+    } catch (e) {
+      return { ok: false, message: String(e?.message || e) };
+    }
+  }
+  if (action === "login") {
+    try {
+      const r = await fetch(`${hub}/setup`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider, action: "login" }),
+        signal: AbortSignal.timeout(15000),
+      });
+      const d = await r.json().catch(() => ({}));
+      return r.ok ? { ok: true, already: !!d?.already } : { ok: false, message: d?.error || `HTTP ${r.status}` };
+    } catch (e) {
+      return { ok: false, message: String(e?.message || e) };
+    }
+  }
+  try {
+    const r = await fetch(`${hub}/setup`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider, action: "install", confirm: true }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) return { ok: false, message: d?.error || `HTTP ${r.status}`, guide: d?.guide };
+    const jobId = d?.job;
+    const deadline = Date.now() + 480000;
+    let last = null;
+    for (;;) {
+      await new Promise(res => setTimeout(res, 2000));
+      try {
+        const jr = await fetch(`${hub}/setup/job/${jobId}`, { signal: AbortSignal.timeout(10000) });
+        last = await jr.json().catch(() => ({}));
+      } catch (e) { /* ポーリング継続 */ }
+      if (last?.status && last.status !== "running") break;
+      if (Date.now() > deadline) break;
+    }
+    return {
+      ok: last?.status === "done",
+      status: last?.status || "timeout",
+      result: last?.result || null,
+      log: (last?.log || []).slice(-15),
+    };
+  } catch (e) {
+    return { ok: false, message: String(e?.message || e) };
+  }
+}
+
 // 現環境で実際に使えるプロバイダ一覧を返す（チャットヘッダーのドロップダウン用）。
 // gemini: BYOキーまたはサーバーキー(aiProxy)。openai: キー設定済み。
 // copilot/devin/antigravity: アプリがブリッジを管理（feature通知）しハブが疎通。
@@ -2479,6 +3168,10 @@ async function usableChatProviders() {
   try {
     if (localStorage.getItem("googleApiKey") || hasBackendFeature("aiProxy")) set.add("gemini");
     if (localStorage.getItem("openaiApiKey")) set.add("openai");
+    if (localStorage.getItem("anthropicApiKey")) set.add("anthropic");
+    // Azure はキーとリソースURL・デプロイ名の3点が揃っているときだけ有効
+    if (localStorage.getItem("azureApiKey") && localStorage.getItem("azureBaseUrl")
+      && localStorage.getItem("azureDeployment")) set.add("azure");
   } catch (e) {}
   await Promise.all(BRIDGE_PROVIDERS.map(async (v) => {
     if (!bridgeFeatureAvailable(v)) return;
@@ -2501,6 +3194,22 @@ async function usableChatProviders() {
   return PROVIDER_ORDER.filter(v => set.has(v));
 }
 
+// チャットヘッダーのプロバイダドロップダウンを、選択中の項目が収まる幅に調整する。
+// CSS の固定幅だと「【ブリッジ】GitHub Copilot」等が見切れるため、選択項目の
+// テキストを実測して矢印・余白分を足した明示 width を与える
+let providerSwitchMeasureCtx = null;
+function fitChatProviderSwitchWidth() {
+  const select = document.querySelector("#chat-provider-switch");
+  if (!select) return;
+  const text = select.selectedOptions?.[0]?.textContent || "";
+  if (!text) { select.style.width = ""; return; }
+  if (!providerSwitchMeasureCtx) providerSwitchMeasureCtx = document.createElement("canvas").getContext("2d");
+  const cs = getComputedStyle(select);
+  providerSwitchMeasureCtx.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+  // +34px は左右 padding・ボーダー・ドロップダウン矢印の分
+  select.style.width = `${Math.ceil(providerSwitchMeasureCtx.measureText(text).width) + 34}px`;
+}
+
 // チャットヘッダーのプロバイダドロップダウンを「使えるものだけ」で再構築する。
 // 現在の選択が無効になった場合は先頭の有効プロバイダへ自動で切り替える
 async function refreshChatProviderSwitch() {
@@ -2508,15 +3217,19 @@ async function refreshChatProviderSwitch() {
   if (!select) return;
   // capabilities 評価前はブリッジ系が「使えない」と誤判定されるため再構築を遅延する
   if (!isBackendCapabilitiesResolved()) return;
-  // 手動起動のスタンドアロン bridge-hub も選択肢対象にするため併せて疎通する
-  await probeStandaloneHub();
+  // 手動起動のブラウザ WebGIS 用 bridge-hub も選択肢対象にするため併せて疎通する
+  await probeWebgisHub();
   const usable = await usableChatProviders();
   const prevValue = select.value;
   select.textContent = "";
   for (const v of usable) {
     const o = document.createElement("option");
     o.value = v;
-    o.textContent = t(`chat.provider.${v}`);
+    // クイック切替は幅が限られるため括弧内の補足（"(GitHub Models 等)" 等）を
+    // 落とした短縮表示にする。全文はホバーの title で参照できる
+    const full = t(`chat.provider.${v}`);
+    o.textContent = full.replace(/\s*\([^)]*\)/g, "");
+    o.title = full;
     select.appendChild(o);
   }
   select.style.display = usable.length ? "" : "none";
@@ -2540,6 +3253,7 @@ async function refreshChatProviderSwitch() {
   if (prevValue && usable.includes(prevValue) && getChatProvider() !== prevValue) {
     selectChatProvider(prevValue);
   }
+  fitChatProviderSwitchWidth();
 }
 
 // チャットヘッダーのドロップダウンからの切替。プロバイダ記憶・エンドポイント・
@@ -2698,6 +3412,10 @@ function updateChatProviderLabel() {
   let model = "";
   if (provider === "openai") {
     model = getOpenAIConfig().model;
+  } else if (provider === "anthropic") {
+    model = getAnthropicConfig().model;
+  } else if (provider === "azure") {
+    model = getAzureConfig().deployment;
   } else if (provider === "copilot" || provider === "devin" || provider === "antigravity") {
     const selected = getBridgeModel(provider);
     model = selected || detectedBridgeModels[provider] || "";
@@ -2723,6 +3441,7 @@ function updateChatProviderLabel() {
     if (select.querySelector(`option[value="${provider}"]`) && select.value !== provider) {
       select.value = provider;
     }
+    fitChatProviderSwitchWidth();
   }
 }
 
@@ -2732,6 +3451,27 @@ function formatTokenCount(n) {
   if (n >= 1e6) return `${Math.round(n / 1e5) / 10}M`;
   if (n >= 1e3) return `${Math.round(n / 1e3)}K`;
   return String(Math.round(n));
+}
+
+// モデル単価の概算表（USD / 1Mトークン [入力, 出力]）。ファミリー名の
+// 部分一致で引く。公表価格は変動するため表示は「〜$」（概算）とし、
+// 未掲載モデルは料金を出さない
+const MODEL_PRICE_TABLE = [
+  [/flash-lite/i, [0.10, 0.40]],
+  [/flash/i, [0.30, 2.50]],
+  [/haiku/i, [0.80, 4.00]],
+  [/sonnet/i, [3.00, 15.00]],
+  [/opus/i, [15.00, 75.00]],
+  [/4o-mini|mini/i, [0.15, 0.60]],
+  [/gpt-4o|gpt-4\.1/i, [2.50, 10.00]],
+  [/pro/i, [1.25, 10.00]],
+];
+// 概算料金（USD）。単価表に無いモデルは null
+function estimateUsageCost(usage) {
+  if (!usage?.model) return null;
+  const hit = MODEL_PRICE_TABLE.find(([re]) => re.test(usage.model));
+  if (!hit) return null;
+  return (usage.input * hit[1][0] + usage.output * hit[1][1]) / 1e6;
 }
 
 // モデルIDからコンテキスト長の目安を推定する（表示のみ・ファミリー別の公称値）。
@@ -2765,11 +3505,11 @@ function modelOptionLabel(m) {
 
 // 内蔵AIのプロバイダ選択。Gemini（BYOキーまたはサーバープロキシ）、
 // OpenAI互換API（GitHub Models・OpenAI・Ollama等）のAPI系と、
-// GitHub Copilot（copilot-bridge）・外部エージェントのブリッジ系のいずれか
+// GitHub Copilot（copilot ブリッジ）・外部エージェントのブリッジ系のいずれか
 export function getChatProvider() {
   try {
     const p = localStorage.getItem("chatProvider");
-    if (["gemini", "openai", "copilot", "devin", "antigravity", "agent"].includes(p)) return p;
+    if (["gemini", "openai", "anthropic", "azure", "copilot", "devin", "antigravity", "agent"].includes(p)) return p;
     // 移行前の利用形態を推定（プロバイダ未保存＋エージェント有効 → agent 相当）
     if (!p) {
       const enabledFlag = localStorage.getItem("agentEnabled");
@@ -2793,6 +3533,36 @@ function getOpenAIConfig() {
     };
   } catch (e) {
     return { apiKey: "", baseUrl: "https://models.github.ai/inference", model: "gpt-4o-mini" };
+  }
+}
+
+// Anthropic Messages API プロバイダの接続情報。
+// ブラウザからの直接呼び出しには anthropic-dangerous-direct-browser-access ヘッダが必要
+function getAnthropicConfig() {
+  try {
+    return {
+      apiKey: sanitizeHeaderToken(localStorage.getItem("anthropicApiKey")),
+      baseUrl: ((localStorage.getItem("anthropicBaseUrl") || "").trim() || "https://api.anthropic.com").replace(/\/+$/, ""),
+      model: (localStorage.getItem("anthropicModel") || "").trim() || "claude-sonnet-4-5",
+    };
+  } catch (e) {
+    return { apiKey: "", baseUrl: "https://api.anthropic.com", model: "claude-sonnet-4-5" };
+  }
+}
+
+// Azure OpenAI プロバイダの接続情報。ベースURLは https://<リソース>.openai.azure.com。
+// 「モデル」欄はデプロイ名として使い、URLへ /openai/deployments/<dep>/ で埋め込む。
+// 認証は Authorization: Bearer ではなく api-key ヘッダ
+function getAzureConfig() {
+  try {
+    return {
+      apiKey: sanitizeHeaderToken(localStorage.getItem("azureApiKey")),
+      baseUrl: (localStorage.getItem("azureBaseUrl") || "").trim().replace(/\/+$/, ""),
+      deployment: (localStorage.getItem("azureDeployment") || "").trim(),
+      apiVersion: (localStorage.getItem("azureApiVersion") || "").trim() || "2024-10-21",
+    };
+  } catch (e) {
+    return { apiKey: "", baseUrl: "", deployment: "", apiVersion: "2024-10-21" };
   }
 }
 
@@ -2843,23 +3613,88 @@ function chatHistoryToOpenAI(history) {
       }
       messages.push(msg);
     } else {
+      // テキスト＋画像（inlineData）を1つの user メッセージへまとめる。
+      // 画像無しの従来どおり文字列 content のままにする（エンドポイント互換維持）
+      const blocks = [];
       for (const p of parts) {
-        if (p.text) messages.push({ role: "user", content: p.text });
-        else if (p.functionResponse) {
+        if (p.text) blocks.push({ type: "text", text: p.text });
+        else if (p.inlineData?.data) {
+          blocks.push({ type: "image_url", image_url: { url: `data:${p.inlineData.mimeType || "image/png"};base64,${p.inlineData.data}` } });
+        } else if (p.functionResponse) {
           messages.push({ role: "tool", tool_call_id: pendingIds.shift() || `call_${callSeq++}`, content: JSON.stringify(p.functionResponse.response ?? {}) });
         }
+      }
+      if (blocks.length) {
+        messages.push(blocks.every(b => b.type === "text") && blocks.length === 1
+          ? { role: "user", content: blocks[0].text }
+          : { role: "user", content: blocks });
       }
     }
   }
   return messages;
 }
 
+// 履歴の正本（Gemini contents形式）を Anthropic messages 形式へ変換する。
+// functionCall → tool_use、functionResponse → tool_result（user ロール内ブロック）
+function chatHistoryToAnthropic(history) {
+  const messages = [];
+  let callSeq = 0;
+  const pendingIds = [];
+  // Anthropic は user/assistant の交互が必須。system ロールのスキップ等で
+  // 連続した同ロールは content をマージして正規化する
+  const push = (role, content) => {
+    if (!content.length) return;
+    const last = messages[messages.length - 1];
+    if (last?.role === role) last.content.push(...content);
+    else messages.push({ role, content });
+  };
+  for (const entry of history) {
+    const parts = Array.isArray(entry?.parts) ? entry.parts : [];
+    if (entry.role === "model") {
+      const content = [];
+      for (const p of parts) {
+        if (p.text) content.push({ type: "text", text: p.text });
+        else if (p.functionCall) {
+          const id = `call_${callSeq++}`;
+          pendingIds.push(id);
+          content.push({ type: "tool_use", id, name: p.functionCall.name, input: p.functionCall.args || {} });
+        }
+      }
+      push("assistant", content);
+    } else {
+      const content = [];
+      for (const p of parts) {
+        if (p.text) content.push({ type: "text", text: p.text });
+        else if (p.inlineData?.data) {
+          content.push({ type: "image", source: { type: "base64", media_type: p.inlineData.mimeType || "image/png", data: p.inlineData.data } });
+        } else if (p.functionResponse) {
+          content.push({ type: "tool_result", tool_use_id: pendingIds.shift() || `call_${callSeq++}`, content: JSON.stringify(p.functionResponse.response ?? {}) });
+        }
+      }
+      push("user", content);
+    }
+  }
+  return messages;
+}
+
+// activeChatTools の functionDeclarations を Anthropic tools 形式へ変換する
+function chatToolsAnthropic() {
+  return (activeChatTools()[0]?.functionDeclarations || []).map(d => ({
+    name: d.name,
+    description: d.description || "",
+    input_schema: chatSchemaToJsonSchema(d.parameters || { type: "OBJECT", properties: {} }),
+  }));
+}
+
 // OpenAI互換 chat/completions を呼び、tool calling の往復を処理する。
 // ツール往復はブラウザ内で行い、履歴の正本（contents形式）にも同内容を追記して
 // プロバイダを切り替えても会話が破綻しないようにする
-async function callOpenAICompat(history) {
-  const { apiKey, baseUrl, model } = getOpenAIConfig();
+async function callOpenAICompat(history, request = null) {
+  const { apiKey, baseUrl, model } = request || getOpenAIConfig();
+  const url = request?.url || `${baseUrl}/chat/completions`;
+  const headers = request?.headers || { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` };
   const executed = [];
+  const usage = { input: 0, output: 0, model };
   const messages = [
     { role: "system", content: chatSystemInstruction() },
     ...chatHistoryToOpenAI(history),
@@ -2871,18 +3706,20 @@ async function callOpenAICompat(history) {
       // 上限到達 — Gemini 側と同じく、続行するかユーザーに確認する
       const increment = getChatMaxToolSteps();
       if (!window.confirm(t("chat.toolLimitContinue", { steps: increment }))) {
-        return { text: t("chat.toolLimit"), executed };
+        return { text: t("chat.toolLimit"), executed, usage };
       }
       maxSteps += increment;
     }
-    const response = await fetch(`${baseUrl}/chat/completions`, {
+    const response = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+      headers,
       signal: AbortSignal.timeout(CHAT_LLM_TIMEOUT_MS),
       body: JSON.stringify({ model, messages, tools, tool_choice: "auto" }),
     });
     const data = await response.json();
     if (!response.ok) throw new Error(data?.error?.message || `HTTP ${response.status}`);
+    usage.input += Number(data?.usage?.prompt_tokens) || 0;
+    usage.output += Number(data?.usage?.completion_tokens) || 0;
     const msg = data?.choices?.[0]?.message;
     if (!msg) throw new Error(t("chat.noResponse"));
     messages.push(msg);
@@ -2897,7 +3734,7 @@ async function callOpenAICompat(history) {
     history.push({ role: "model", parts: canonicalParts });
     if (!calls.length) {
       const text = (typeof msg.content === "string" ? msg.content : "").trim();
-      return { text: text || t("chat.noResponse"), executed };
+      return { text: text || t("chat.noResponse"), executed, usage };
     }
     const responseParts = [];
     for (const c of calls) {
@@ -2929,6 +3766,7 @@ async function callGemini(history) {
   if (proxy && window.kasugaiAuth?.token) {
     headers["Authorization"] = `Bearer ${window.kasugaiAuth.token}`;
   }
+  const usage = { input: 0, output: 0, model };
   let maxSteps = getChatMaxToolSteps();
   for (let step = 0; ; step++) {
     if (step >= maxSteps) {
@@ -2936,7 +3774,7 @@ async function callGemini(history) {
       // ループ中に AI が setToolMaxSteps で上限を変えていれば新しい値がここで効く
       const increment = getChatMaxToolSteps();
       if (!window.confirm(t("chat.toolLimitContinue", { steps: increment }))) {
-        return { text: t("chat.toolLimit"), executed };
+        return { text: t("chat.toolLimit"), executed, usage };
       }
       maxSteps += increment;
     }
@@ -2954,11 +3792,13 @@ async function callGemini(history) {
     const data = await response.json();
     if (!response.ok) throw new Error(data?.error?.message || `HTTP ${response.status}`);
     const parts = data?.candidates?.[0]?.content?.parts || [];
+    usage.input += Number(data?.usageMetadata?.promptTokenCount) || 0;
+    usage.output += Number(data?.usageMetadata?.candidatesTokenCount) || 0;
     history.push({ role: "model", parts });
     const calls = parts.filter(part => part.functionCall);
     if (!calls.length) {
       const text = parts.map(part => part.text || "").join("").trim();
-      return { text: text || t("chat.noResponse"), executed };
+      return { text: text || t("chat.noResponse"), executed, usage };
     }
     const responseParts = [];
     for (const part of calls) {
@@ -2966,6 +3806,82 @@ async function callGemini(history) {
       executed.push(`${part.functionCall.name}(${JSON.stringify(part.functionCall.args || {})})`);
       responseParts.push({ functionResponse: { name: part.functionCall.name, response: { result } } });
     }
+    history.push({ role: "user", parts: responseParts });
+  }
+}
+
+// Azure OpenAI の chat/completions。OpenAI互換ボディをそのまま使い、
+// URL を /openai/deployments/<dep>/chat/completions?api-version=… に、
+// 認証を api-key ヘッダに変えたもの。モデル名はデプロイ名が担う
+async function callAzureOpenAI(history) {
+  const c = getAzureConfig();
+  const request = {
+    url: `${c.baseUrl}/openai/deployments/${encodeURIComponent(c.deployment)}/chat/completions?api-version=${encodeURIComponent(c.apiVersion)}`,
+    headers: { "Content-Type": "application/json", "api-key": c.apiKey },
+    model: c.deployment,
+  };
+  return callOpenAICompat(history, request);
+}
+
+// Anthropic Messages API を呼び、tool_use の往復を処理する。
+// ブラウザ直叩きのため anthropic-dangerous-direct-browser-access ヘッダを付ける
+// （APIキーが Anthropic へ直接送られる点は BYO キーでユーザーが許容する前提）
+async function callAnthropic(history) {
+  const { apiKey, baseUrl, model } = getAnthropicConfig();
+  const headers = {
+    "Content-Type": "application/json",
+    "x-api-key": apiKey,
+    "anthropic-version": "2023-06-01",
+    "anthropic-dangerous-direct-browser-access": "true",
+  };
+  const executed = [];
+  const usage = { input: 0, output: 0, model };
+  const messages = chatHistoryToAnthropic(history);
+  const tools = chatToolsAnthropic();
+  let maxSteps = getChatMaxToolSteps();
+  for (let step = 0; ; step++) {
+    if (step >= maxSteps) {
+      const increment = getChatMaxToolSteps();
+      if (!window.confirm(t("chat.toolLimitContinue", { steps: increment }))) {
+        return { text: t("chat.toolLimit"), executed, usage };
+      }
+      maxSteps += increment;
+    }
+    const response = await fetch(`${baseUrl}/v1/messages`, {
+      method: "POST",
+      headers,
+      signal: AbortSignal.timeout(CHAT_LLM_TIMEOUT_MS),
+      body: JSON.stringify({ model, max_tokens: 8192, system: chatSystemInstruction(), messages, tools }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data?.error?.message || `HTTP ${response.status}`);
+    usage.input += Number(data?.usage?.input_tokens) || 0;
+    usage.output += Number(data?.usage?.output_tokens) || 0;
+    const content = Array.isArray(data?.content) ? data.content : [];
+    messages.push({ role: "assistant", content });
+    const canonicalParts = [];
+    const calls = [];
+    for (const block of content) {
+      if (block?.type === "text" && block.text) canonicalParts.push({ text: block.text });
+      else if (block?.type === "tool_use") {
+        canonicalParts.push({ functionCall: { name: block.name, args: block.input || {} } });
+        calls.push(block);
+      }
+    }
+    history.push({ role: "model", parts: canonicalParts });
+    if (!calls.length) {
+      const text = content.filter(b => b?.type === "text").map(b => b.text || "").join("").trim();
+      return { text: text || t("chat.noResponse"), executed, usage };
+    }
+    const responseParts = [];
+    const resultBlocks = [];
+    for (const block of calls) {
+      const result = await executeChatTool(block.name, block.input || {});
+      executed.push(`${block.name}(${JSON.stringify(block.input || {})})`);
+      resultBlocks.push({ type: "tool_result", tool_use_id: block.id, content: JSON.stringify(result ?? null) });
+      responseParts.push({ functionResponse: { name: block.name, response: { result } } });
+    }
+    messages.push({ role: "user", content: resultBlocks });
     history.push({ role: "user", parts: responseParts });
   }
 }
@@ -2979,44 +3895,274 @@ export function setupChatPanel() {
   const input = document.querySelector("#chat-input");
   const history = [];
 
-  // チャット履歴はプロジェクト単位で localStorage に保存する
-  const historyKey = `kasugaiChatHistory_${chatProjectId()}`;
-  const loadChatLog = () => {
+  // ---- チャットセッション ----
+  // 複数セッションをプロジェクト単位で localStorage へ保存する
+  // （LIVE ハーネスのチャット保存・復元に相当）。
+  // 旧仕様の単一ログ kasugaiChatHistory_<project> は初回読み込み時にセッションへ移行する。
+  // セッション: {id, title, created, updated, usage:{in,out}, log:[{role,text,images?}]}
+  const sessionsKey = `kasugaiChatSessions_${chatProjectId()}`;
+  const activeKey = `kasugaiChatSession_${chatProjectId()}`;
+  const legacyKey = `kasugaiChatHistory_${chatProjectId()}`;
+  const newSessionId = () => `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+  const sanitizeSession = (s) => (s && typeof s === "object" ? {
+    id: typeof s.id === "string" && s.id ? s.id : newSessionId(),
+    title: typeof s.title === "string" ? s.title : "",
+    created: Number(s.created) || Date.now(),
+    updated: Number(s.updated) || Date.now(),
+    usage: { in: Number(s.usage?.in) || 0, out: Number(s.usage?.out) || 0 },
+    log: Array.isArray(s.log) ? s.log : [],
+  } : null);
+  const loadSessions = () => {
+    let sessions = [];
     try {
-      const saved = JSON.parse(localStorage.getItem(historyKey) || "[]");
-      return Array.isArray(saved) ? saved : [];
-    } catch (e) { return []; }
+      const parsed = JSON.parse(localStorage.getItem(sessionsKey) || "[]");
+      if (Array.isArray(parsed)) sessions = parsed.map(sanitizeSession).filter(Boolean);
+    } catch (e) {}
+    // 旧単一ログの移行（移行できた時だけ元キーを消す）
+    try {
+      const legacy = JSON.parse(localStorage.getItem(legacyKey) || "null");
+      if (Array.isArray(legacy) && legacy.length) {
+        sessions.unshift({ id: newSessionId(), title: "", created: Date.now(), updated: Date.now(), usage: { in: 0, out: 0 }, log: legacy });
+        localStorage.removeItem(legacyKey);
+      }
+    } catch (e) {}
+    if (!sessions.length) sessions = [sanitizeSession({})];
+    return sessions;
   };
-  const saveChatLog = (role, text) => {
+  let chatSessions = loadSessions();
+  let activeSessionId = (() => {
     try {
-      const log = loadChatLog();
-      log.push({ role, text });
-      localStorage.setItem(historyKey, JSON.stringify(log.slice(-200)));
+      const saved = localStorage.getItem(activeKey);
+      if (saved && chatSessions.some(s => s.id === saved)) return saved;
+    } catch (e) {}
+    return chatSessions[0].id;
+  })();
+  const activeSession = () => chatSessions.find(s => s.id === activeSessionId) || chatSessions[0];
+  const persistSessions = () => {
+    try {
+      localStorage.setItem(activeKey, activeSessionId);
+      try {
+        localStorage.setItem(sessionsKey, JSON.stringify(chatSessions));
+      } catch (e) {
+        // 容量超過時は画像データを削って再試行する
+        const stripped = chatSessions.map(s => ({ ...s, log: s.log.map(m => ({ ...m, images: undefined })) }));
+        try { localStorage.setItem(sessionsKey, JSON.stringify(stripped)); } catch (e2) {}
+      }
     } catch (e) {}
   };
+  const loadChatLog = () => activeSession()?.log || [];
+  const sessionSelect = document.querySelector("#chat-session-select");
+  function refreshSessionSelect() {
+    if (!sessionSelect) return;
+    const cur = sessionSelect.value;
+    sessionSelect.textContent = "";
+    for (const s of chatSessions) {
+      const o = document.createElement("option");
+      o.value = s.id;
+      o.textContent = s.title || t("chat.sessionUntitled");
+      sessionSelect.append(o);
+    }
+    sessionSelect.value = chatSessions.some(s => s.id === cur) ? cur : activeSessionId;
+  }
+  const saveChatLog = (role, text, images) => {
+    const session = activeSession();
+    if (!session) return;
+    const entry = { role, text };
+    if (Array.isArray(images) && images.length) entry.images = images.slice(0, 6);
+    session.log.push(entry);
+    session.log = session.log.slice(-200);
+    session.updated = Date.now();
+    // 最初のユーザーメッセージをセッション名にする
+    if (!session.title && role === "user" && text) session.title = text.slice(0, 40);
+    persistSessions();
+    refreshSessionSelect();
+  };
 
-  const addMessage = (role, text, { persist = true, anchor = null } = {}) => {
+  // ---- トークン使用量 ----
+  // 各プロバイダ呼び出しが返す usage{input,output,model} をセッションへ累積し、
+  // セッションバーの #chat-usage へ合計、応答へ1回分の内訳を表示する。
+  // 料金は MODEL_PRICE_TABLE による概算（〜表記）
+  const usageEl = document.querySelector("#chat-usage");
+  const refreshUsageLabel = () => {
+    if (!usageEl) return;
+    const u = activeSession()?.usage;
+    usageEl.textContent = u && (u.in || u.out)
+      ? t("chat.usageTotal", { input: formatTokenCount(u.in), output: formatTokenCount(u.out) })
+      : "";
+  };
+  const addUsage = (usage) => {
+    if (!usage || !(usage.input || usage.output)) return null;
+    const session = activeSession();
+    if (session) {
+      session.usage.in += usage.input;
+      session.usage.out += usage.output;
+      persistSessions();
+    }
+    refreshUsageLabel();
+    const cost = estimateUsageCost(usage);
+    return t("chat.usage", {
+      input: formatTokenCount(usage.input),
+      output: formatTokenCount(usage.output),
+      cost: cost != null ? t("chat.usageCost", { cost: cost < 0.0001 ? "<0.0001" : cost.toFixed(4) }) : "",
+    });
+  };
+
+  const addMessage = (role, text, { persist = true, anchor = null, images = null, meta = null } = {}) => {
     const div = document.createElement("div");
     div.className = `chat-message ${role}`;
     // assistant の応答は Markdown（見出し・箇条書き・リンク・コード等）として描画。
     // renderMarkdownLite は内部で escapeHtml 済みのため安全
     if (role === "assistant") div.innerHTML = renderMarkdownLite(text);
     else div.textContent = text;
+    if (Array.isArray(images) && images.length) {
+      const strip = document.createElement("div");
+      strip.className = "chat-msg-images";
+      for (const img of images) {
+        const el = document.createElement("img");
+        el.src = `data:${img.mimeType || "image/png"};base64,${img.data}`;
+        el.alt = img.name || "image";
+        strip.append(el);
+      }
+      div.append(strip);
+    }
+    if (meta) {
+      const metaEl = document.createElement("div");
+      metaEl.className = "chat-meta";
+      metaEl.textContent = meta;
+      div.append(metaEl);
+    }
     // anchor（質問直下の「…」プレースホルダ）が有効ならその直前に挿入する。
     // キュー処理中に後続の質問が既に並んでいても回答は質問の直下に収まる
     if (anchor && anchor.parentNode === messages) messages.insertBefore(div, anchor);
     else messages.append(div);
     messages.scrollTop = messages.scrollHeight;
-    if (persist) saveChatLog(role, text);
+    if (persist) saveChatLog(role, text, images);
   };
 
-  // 保存済み履歴を復元し、Gemini の会話コンテキストも user/model ペアで再構成する
-  const savedLog = loadChatLog();
-  savedLog.forEach(entry => {
-    if (!entry || typeof entry.text !== "string") return;
-    addMessage(entry.role, entry.text, { persist: false });
-    if (entry.role === "user") history.push({ role: "user", parts: [{ text: entry.text }] });
-    else if (entry.role === "assistant") history.push({ role: "model", parts: [{ text: entry.text }] });
+  // 保存済み履歴を復元し、Gemini の会話コンテキストも user/model ペアで再構成する。
+  // 画像は表示のみ復元し、コンテキストには添付枚数の注記だけを残す
+  // （復元で大きな画像を毎回のコンテキストに戻さないため）
+  const restoreLog = (log) => {
+    messages.replaceChildren();
+    history.length = 0;
+    (log || []).forEach(entry => {
+      if (!entry || typeof entry.text !== "string") return;
+      addMessage(entry.role, entry.text, { persist: false, images: entry.images });
+      if (entry.role === "user") {
+        const note = entry.images?.length ? `\n[${t("chat.imagesAttached", { count: entry.images.length })}]` : "";
+        history.push({ role: "user", parts: [{ text: `${entry.text}${note}` }] });
+      } else if (entry.role === "assistant") {
+        history.push({ role: "model", parts: [{ text: entry.text }] });
+      }
+    });
+    messages.scrollTop = messages.scrollHeight;
+  };
+  restoreLog(loadChatLog());
+  refreshSessionSelect();
+  refreshUsageLabel();
+
+  // セッションの切替・新規・削除・エクスポート
+  const switchSession = (id) => {
+    if (!chatSessions.some(s => s.id === id) || id === activeSessionId) return;
+    activeSessionId = id;
+    persistSessions();
+    restoreLog(loadChatLog());
+    refreshSessionSelect();
+    refreshUsageLabel();
+  };
+  sessionSelect?.addEventListener("change", (e) => switchSession(e.target.value));
+  document.querySelector("#chat-session-new")?.addEventListener("click", () => {
+    const s = sanitizeSession({});
+    chatSessions.push(s);
+    activeSessionId = s.id;
+    persistSessions();
+    restoreLog([]);
+    refreshSessionSelect();
+    refreshUsageLabel();
+    input?.focus();
+  });
+  document.querySelector("#chat-session-delete")?.addEventListener("click", () => {
+    const s = activeSession();
+    if (!s || !window.confirm(t("chat.sessionDeleteConfirm", { title: s.title || t("chat.sessionUntitled") }))) return;
+    chatSessions = chatSessions.filter(item => item.id !== s.id);
+    if (!chatSessions.length) chatSessions = [sanitizeSession({})];
+    activeSessionId = chatSessions[chatSessions.length - 1].id;
+    persistSessions();
+    restoreLog(loadChatLog());
+    refreshSessionSelect();
+    refreshUsageLabel();
+  });
+  document.querySelector("#chat-session-export")?.addEventListener("click", () => {
+    const s = activeSession();
+    if (!s || !s.log.length) return;
+    const lines = [`# ${s.title || t("chat.sessionUntitled")}`, ""];
+    for (const m of s.log) {
+      lines.push(`**${m.role}**: ${m.text}`);
+      if (m.images?.length) lines.push(`(${t("chat.imagesAttached", { count: m.images.length })})`);
+      lines.push("");
+    }
+    const blob = new Blob([lines.join("\n")], { type: "text/markdown" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `${(s.title || "chat").replace(/[\\/:*?"<>|]/g, "_").slice(0, 60) || "chat"}.md`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+  });
+
+  // ---- 画像添付（ファイル選択・ペースト・ドラッグ&ドロップ）----
+  const pendingImages = []; // {mimeType, data, name}
+  const attachBar = document.querySelector("#chat-attachments");
+  const attachFile = document.querySelector("#chat-attach-file");
+  const renderAttachments = () => {
+    if (!attachBar) return;
+    attachBar.hidden = !pendingImages.length;
+    attachBar.replaceChildren();
+    pendingImages.forEach((img, i) => {
+      const chip = document.createElement("span");
+      chip.className = "chat-attach-chip";
+      const thumb = document.createElement("img");
+      thumb.src = `data:${img.mimeType};base64,${img.data}`;
+      thumb.alt = img.name || "";
+      const rm = document.createElement("button");
+      rm.type = "button";
+      rm.textContent = "×";
+      rm.addEventListener("click", () => { pendingImages.splice(i, 1); renderAttachments(); });
+      chip.append(thumb, rm);
+      attachBar.append(chip);
+    });
+  };
+  const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+  const addImageFiles = (files) => {
+    for (const file of [...(files || [])]) {
+      if (!file || !/^image\//.test(file.type)) continue;
+      if (file.size > MAX_IMAGE_BYTES) {
+        addMessage("system", t("chat.imageTooLarge", { name: file.name }), { persist: false });
+        continue;
+      }
+      const reader = new FileReader();
+      reader.onload = () => {
+        const m = /^data:(image\/[\w.+-]+);base64,(.+)$/.exec(String(reader.result || ""));
+        if (!m) return;
+        pendingImages.push({ mimeType: m[1], data: m[2], name: file.name });
+        renderAttachments();
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+  document.querySelector("#chat-attach")?.addEventListener("click", () => attachFile?.click());
+  attachFile?.addEventListener("change", () => { addImageFiles(attachFile.files); attachFile.value = ""; });
+  input?.addEventListener("paste", (e) => {
+    const files = [...(e.clipboardData?.items || [])]
+      .filter(item => item.kind === "file").map(item => item.getAsFile()).filter(Boolean);
+    if (files.length) {
+      e.preventDefault();
+      addImageFiles(files);
+    }
+  });
+  form?.addEventListener("dragover", (e) => { e.preventDefault(); });
+  form?.addEventListener("drop", (e) => {
+    e.preventDefault();
+    addImageFiles(e.dataTransfer?.files);
   });
 
   // チャットヘッダーのプロバイダドロップダウン。実際に使えるプロバイダのみが
@@ -3034,9 +4180,15 @@ export function setupChatPanel() {
 
   const clearButton = document.querySelector("#chat-clear");
   clearButton?.addEventListener("click", () => {
-    try { localStorage.removeItem(historyKey); } catch (e) {}
+    const session = activeSession();
+    if (session) {
+      session.log = [];
+      session.usage = { in: 0, out: 0 };
+      persistSessions();
+    }
     history.length = 0;
     messages.replaceChildren();
+    refreshUsageLabel();
     addMessage("system", t("chat.cleared"), { persist: false });
   });
 
@@ -3048,16 +4200,18 @@ export function setupChatPanel() {
   form?.addEventListener("submit", event => {
     event.preventDefault();
     const text = input.value.trim();
-    if (!text) return;
+    const images = pendingImages.splice(0, pendingImages.length);
+    if (!text && !images.length) return;
     input.value = "";
-    addMessage("user", text);
+    renderAttachments();
+    addMessage("user", text || t("chat.imageOnly"), { images });
     const thinking = document.createElement("div");
     thinking.className = "chat-message assistant";
     thinking.textContent = "…";
     messages.append(thinking);
     messages.scrollTop = messages.scrollHeight;
     chatChain = chatChain
-      .then(() => respondToChat(text, thinking))
+      .then(() => respondToChat(text, thinking, images))
       .catch(error => {
         // 例外はここで握りつぶさず必ず表示する。
         // 黙って「…」を消すだけだと質問だけが残り無応答に見える
@@ -3097,7 +4251,8 @@ export function setupChatPanel() {
       // ブリッジ側のローカル状態ツール（listBasemaps 等）が実値を返せるよう
       // 疑似項目（ベースマップなし/透明）を含む一覧を同梱する
       basemaps: window.kasugaiApi?.listBasemaps?.() ?? [],
-      history: loadChatLog().slice(-20),
+      // 画像データ（base64）はブリッジへ送らずテキストのみに絞る
+      history: loadChatLog().slice(-20).map(m => ({ role: m.role, text: m.text })),
       // 外部エージェントがツール一覧を必要とする場合のため宣言を同梱する
       // （Copilot ブリッジ等が functionDeclarations をそのまま登録できる）
       tools: activeChatTools()[0]?.functionDeclarations || [],
@@ -3166,8 +4321,8 @@ export function setupChatPanel() {
   // "kasugai:chat" カスタムイベントを購読し detail.reply をセットすれば外部エージェントへ橋渡しできる
   // thinking は送信時に質問直下へ挿入済みの「…」プレースホルダ。
   // 応答・実行ログはその直前に挿入し、完了時に取り除く
-  async function respondToChat(text, thinking) {
-    const say = (role, msg) => addMessage(role, msg, { anchor: thinking });
+  async function respondToChat(text, thinking, images = []) {
+    const say = (role, msg, opts = {}) => addMessage(role, msg, { anchor: thinking, ...opts });
     const detail = { text, reply: null };
     window.dispatchEvent(new CustomEvent("kasugai:chat", { detail }));
     if (typeof detail.reply === "string" && detail.reply) {
@@ -3197,22 +4352,41 @@ export function setupChatPanel() {
     const provider = getChatProvider();
     const hasKey = provider === "openai"
       ? !!getOpenAIConfig().apiKey
-      : (provider === "copilot" || provider === "devin" || provider === "antigravity" || provider === "agent")
-        ? isAgentEnabled()
-        : (!!chatGoogleApiKey() || !!aiProxyEndpoint());
+      : provider === "anthropic"
+        ? !!getAnthropicConfig().apiKey
+        : provider === "azure"
+          ? !!(getAzureConfig().apiKey && getAzureConfig().baseUrl && getAzureConfig().deployment)
+          : (provider === "copilot" || provider === "devin" || provider === "antigravity" || provider === "agent")
+            ? isAgentEnabled()
+            : (!!chatGoogleApiKey() || !!aiProxyEndpoint());
     if (!hasKey) {
       const local = await handleLocalChatCommand(text);
-      const key = provider === "openai" ? "chat.noApiKeyOpenai" : provider === "copilot" ? "chat.noApiKeyCopilot" : provider === "devin" ? "chat.noApiKeyDevin" : provider === "antigravity" ? "chat.noApiKeyAntigravity" : provider === "agent" ? "chat.noBridge" : "chat.noApiKey";
+      const key = provider === "openai" ? "chat.noApiKeyOpenai"
+        : provider === "anthropic" ? "chat.noApiKeyAnthropic"
+          : provider === "azure" ? "chat.noApiKeyAzure"
+            : provider === "copilot" ? "chat.noApiKeyCopilot"
+              : provider === "devin" ? "chat.noApiKeyDevin"
+                : provider === "antigravity" ? "chat.noApiKeyAntigravity"
+                  : provider === "agent" ? "chat.noBridge" : "chat.noApiKey";
       say("assistant", local || t(key));
       thinking.remove();
       return;
     }
     const historyBase = history.length;
     try {
-      history.push({ role: "user", parts: [{ text }] });
-      const { text: reply, executed } = provider === "openai" ? await callOpenAICompat(history) : await callGemini(history);
+      const imageParts = (images || [])
+        .filter(img => img?.data)
+        .map(img => ({ inlineData: { mimeType: img.mimeType || "image/png", data: img.data } }));
+      history.push({ role: "user", parts: [{ text: text || t("chat.imageOnly") }, ...imageParts] });
+      const { text: reply, executed, usage } = provider === "openai"
+        ? await callOpenAICompat(history)
+        : provider === "azure"
+          ? await callAzureOpenAI(history)
+          : provider === "anthropic"
+            ? await callAnthropic(history)
+            : await callGemini(history);
       executed.forEach(call => say("system", t("chat.executed", { call })));
-      say("assistant", reply);
+      say("assistant", reply, { meta: addUsage(usage) });
     } catch (error) {
       // 途中まで積まれた user/model/関数応答の往復ごとロールバックする
       history.length = historyBase;
@@ -3235,7 +4409,7 @@ const AI_CHAT_CSS = `
 .chat-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .chat-header strong { font-size: 14px; color: #31564f; }
 .chat-provider-box { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.chat-provider-switch { min-width: 0; max-width: 160px; min-height: 24px; padding: 1px 4px; border: 1px solid #cbd9de; border-radius: 4px; background: rgba(255,255,255,.85); color: #31564f; font-size: 12px; }
+.chat-provider-switch { flex: 0 0 auto; min-width: 0; max-width: 240px; min-height: 24px; padding: 1px 4px; border: 1px solid #cbd9de; border-radius: 4px; background: rgba(255,255,255,.85); color: #31564f; font-size: 12px; }
 .chat-provider-switch.unverified { background: #b03a2e; border-color: #922b21; color: #fff; }
 .chat-provider-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: normal; }
 .chat-toggle { flex: 0 0 26px; min-width: 26px; min-height: 26px; padding: 1px 4px; border: 0; border-radius: 4px; background: rgba(49,86,79,.16); color: #31564f; cursor: pointer; font-size: 18px; line-height: 1; }
@@ -3254,12 +4428,32 @@ const AI_CHAT_CSS = `
 .chat-form { display: flex; gap: 6px; }
 .chat-form input { flex: 1; min-width: 0; min-height: 30px; padding: 5px 7px; border: 1px solid #cbd9de; border-radius: 4px; background: #fff; color: #1d2b35; }
 .chat-form button { min-height: 30px; padding: 5px 10px; border: 1px solid #31564f; border-radius: 4px; background: #31564f; color: #fff; cursor: pointer; }
+.chat-sessions-bar { display: flex; align-items: center; gap: 4px; margin-top: 6px; }
+.chat-session-select { flex: 1; min-width: 0; min-height: 22px; padding: 1px 4px; border: 1px solid #cbd9de; border-radius: 4px; background: rgba(255,255,255,.85); color: #31564f; font-size: 11px; }
+.chat-sessions-bar .chat-toggle { flex: 0 0 22px; min-width: 22px; min-height: 22px; font-size: 12px; }
+.chat-usage { flex: 0 0 auto; margin-left: 2px; color: #71818d; font-size: 10px; white-space: nowrap; }
+.chat-attachments { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 6px; }
+.chat-attach-chip { position: relative; display: inline-flex; }
+.chat-attach-chip img { width: 44px; height: 44px; object-fit: cover; border: 1px solid #cbd9de; border-radius: 4px; }
+.chat-attach-chip button { position: absolute; top: -6px; right: -6px; width: 16px; height: 16px; padding: 0; border: 0; border-radius: 50%; background: #31564f; color: #fff; font-size: 11px; line-height: 1; cursor: pointer; }
+.chat-attach { flex: 0 0 auto; min-width: 30px; padding: 5px 6px !important; border: 1px solid #cbd9de !important; background: rgba(255,255,255,.85) !important; color: #31564f !important; font-size: 14px; }
+.chat-msg-images { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+.chat-msg-images img { max-width: 120px; max-height: 90px; border-radius: 4px; }
+.chat-meta { margin-top: 4px; color: #71818d; font-size: 10px; }
+.chat-message.user .chat-meta { color: rgba(255,255,255,.7); }
+.ai-instr-list { margin: 4px 0; }
+.ai-instr-row { display: flex; align-items: center; gap: 6px; font-size: 12px; margin: 3px 0; }
+.ai-instr-row button { font-size: 11px; padding: 1px 6px; }
+.ai-instr-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; align-items: center; gap: 4px; }
+.ai-instr-editor { margin-top: 8px; padding: 6px; border: 1px solid #cbd9de; border-radius: 6px; }
 .chat-panel.collapsed { width: 40px; height: 40px; padding: 7px; overflow: hidden; }
 .chat-panel.collapsed .chat-header { justify-content: center; }
 .chat-panel.collapsed .chat-header strong,
 .chat-panel.collapsed .chat-header .chat-provider-box,
 .chat-panel.collapsed .chat-header #chat-clear,
+.chat-panel.collapsed .chat-sessions-bar,
 .chat-panel.collapsed .chat-messages,
+.chat-panel.collapsed .chat-attachments,
 .chat-panel.collapsed .chat-form { display: none; }
 @media (max-width: 850px) { .chat-panel { right: 14px; left: 14px; bottom: 60px; width: auto; max-height: 45%; } }
 #setpane-ai .field-label { display: block; font-size: 12px; margin: 8px 0 3px; }
@@ -3288,8 +4482,18 @@ const CHAT_PANEL_HTML = `
       <button id="chat-panel-toggle" class="chat-toggle" type="button" aria-label="最小化" data-i18n-attr="aria-label:common.minimize">−</button>
     </span>
   </div>
+  <div class="chat-sessions-bar">
+    <select id="chat-session-select" class="chat-session-select" title="チャットセッション" data-i18n-attr="title:chat.sessionSelect"></select>
+    <button id="chat-session-new" class="chat-toggle" type="button" title="新規チャット" data-i18n-attr="title:chat.sessionNew">＋</button>
+    <button id="chat-session-export" class="chat-toggle" type="button" title="エクスポート" data-i18n-attr="title:chat.sessionExport">⤓</button>
+    <button id="chat-session-delete" class="chat-toggle" type="button" title="セッションを削除" data-i18n-attr="title:chat.sessionDelete">✕</button>
+    <span id="chat-usage" class="chat-usage"></span>
+  </div>
   <div id="chat-messages" class="chat-messages" aria-live="polite"></div>
+  <div id="chat-attachments" class="chat-attachments" hidden></div>
   <form id="chat-form" class="chat-form">
+    <button id="chat-attach" class="chat-attach" type="button" title="画像を添付" data-i18n-attr="title:chat.attach">📎</button>
+    <input id="chat-attach-file" type="file" accept="image/*" multiple hidden />
     <input id="chat-input" type="text" placeholder="メッセージを入力 (/ でコマンド)" data-i18n-attr="placeholder:chat.placeholder" autocomplete="off" />
     <button type="submit" data-i18n="chat.send">送信</button>
   </form>
@@ -3300,6 +4504,7 @@ const CHAT_PANEL_HTML = `
 const AI_SETTINGS_HTML = `
 <nav class="ai-subnav">
   <button type="button" class="active" data-manage-sub="ai-pane-chat" data-i18n="manage.section.chat">チャット (AI)</button>
+  <button type="button" data-manage-sub="ai-install-panel" data-i18n="manage.section.install">インストール</button>
   <button type="button" data-manage-sub="ai-pane-instructions" data-i18n="chat.customInstructionsLabel">追加指示</button>
   <button type="button" data-manage-sub="datasource-panel" data-i18n="manage.section.datasource">データソース</button>
   <button type="button" data-manage-sub="plugin-panel" data-i18n="google.tab.plugin">プラグイン</button>
@@ -3309,6 +4514,8 @@ const AI_SETTINGS_HTML = `
   <select id="chat-provider">
     <option value="gemini" selected data-i18n="chat.provider.gemini">【API】Gemini (Google)</option>
     <option value="openai" data-i18n="chat.provider.openai">【API】OpenAI互換 (GitHub Models 等)</option>
+    <option value="anthropic" data-i18n="chat.provider.anthropic">【API】Anthropic (Claude)</option>
+    <option value="azure" data-i18n="chat.provider.azure">【API】Azure OpenAI</option>
     <option value="copilot" data-i18n="chat.provider.copilot">【ブリッジ】GitHub Copilot</option>
     <option value="devin" data-i18n="chat.provider.devin">【ブリッジ】Devin</option>
     <option value="antigravity" data-i18n="chat.provider.antigravity">【ブリッジ】Antigravity</option>
@@ -3335,6 +4542,26 @@ const AI_SETTINGS_HTML = `
     <label class="field-label" for="openai-model" data-i18n="chat.openai.modelLabel">モデル</label>
     <input id="openai-model" type="text" placeholder="gpt-4o-mini" autocomplete="off" size="28" />
   </div>
+  <div id="anthropic-fields" hidden>
+    <p class="hint" data-i18n-html="chat.anthropic.hint"></p>
+    <label class="field-label" for="anthropic-api-key" data-i18n="chat.anthropic.keyLabel">APIキー</label>
+    <input id="anthropic-api-key" type="password" placeholder="sk-ant-..." autocomplete="off" size="28" />
+    <label class="field-label" for="anthropic-model" data-i18n="chat.anthropic.modelLabel">モデル</label>
+    <input id="anthropic-model" type="text" placeholder="claude-sonnet-4-5" autocomplete="off" size="28" />
+    <label class="field-label" for="anthropic-base-url" data-i18n="chat.anthropic.baseUrlLabel">エンドポイント ベースURL（省略可）</label>
+    <input id="anthropic-base-url" type="text" placeholder="https://api.anthropic.com" autocomplete="off" size="28" />
+  </div>
+  <div id="azure-fields" hidden>
+    <p class="hint" data-i18n-html="chat.azure.hint"></p>
+    <label class="field-label" for="azure-base-url" data-i18n="chat.azure.baseUrlLabel">リソース エンドポイントURL</label>
+    <input id="azure-base-url" type="text" placeholder="https://<resource>.openai.azure.com" autocomplete="off" size="28" />
+    <label class="field-label" for="azure-api-key" data-i18n="chat.azure.keyLabel">APIキー</label>
+    <input id="azure-api-key" type="password" autocomplete="off" size="28" />
+    <label class="field-label" for="azure-deployment" data-i18n="chat.azure.deploymentLabel">デプロイ名</label>
+    <input id="azure-deployment" type="text" placeholder="my-deployment" autocomplete="off" size="28" />
+    <label class="field-label" for="azure-api-version" data-i18n="chat.azure.apiVersionLabel">API バージョン（省略可）</label>
+    <input id="azure-api-version" type="text" placeholder="2024-10-21" autocomplete="off" size="28" />
+  </div>
   <div id="bridge-fields" hidden>
     <p class="hint provider-only" data-for="agent" data-i18n-html="agent.externalHint" hidden></p>
     <p class="hint provider-only" data-for="copilot" data-i18n-html="chat.copilot.hint" hidden></p>
@@ -3342,10 +4569,7 @@ const AI_SETTINGS_HTML = `
     <p class="hint provider-only" data-for="antigravity" data-i18n-html="chat.antigravity.hint" hidden></p>
     <label class="field-label" for="agent-endpoint" data-i18n="agent.endpointLabel">エンドポイントURL</label>
     <input id="agent-endpoint" type="text" placeholder="http://127.0.0.1:9000/agent" autocomplete="off" size="28" />
-    <p class="hint" id="bridge-hub-note" hidden>
-      <span data-i18n-html="chat.bridge.hubNote"></span>
-      <a href="../download/bridge-hub.zip" download data-i18n="chat.bridge.hubDownload">bridge-hub.zip をダウンロード</a>
-    </p>
+    <p class="hint" id="bridge-install-hint" data-i18n-html="chat.bridge.installTabHint" hidden></p>
     <div class="provider-only" data-for="agent" hidden>
       <label class="field-label" for="agent-token" data-i18n="agent.tokenLabel">トークン（任意）</label>
       <input id="agent-token" type="password" placeholder="Bearer トークン（省略可）" autocomplete="off" size="28" />
@@ -3378,12 +4602,42 @@ const AI_SETTINGS_HTML = `
   <p id="google-settings-status" class="hint" aria-live="polite"></p>
   <p id="google-proxy-status" class="hint" aria-live="polite"></p>
 </section>
+<section id="ai-install-panel" class="ai-subpane">
+  <p class="hint"><span data-i18n="env.label">環境: </span><code class="env-kind">-</code></p>
+  <div class="install-row" data-for="hub">
+    【CDN】 <strong data-i18n="chat.bridge.hubTitle">ブリッジハブ</strong> <span class="cli-state" data-provider="hub" aria-live="polite"></span><br />
+    <p class="hint" id="bridge-hub-note"><span data-i18n-html="chat.bridge.hubNote"></span></p>
+    <button type="button" id="bridge-hub-install" data-i18n="chat.bridge.hubInstall">ハブを自動インストール</button>
+    <a href="../download/bridge-hub.zip" download="bridge-hub.zip" data-i18n="chat.bridge.hubDownload">bridge-hub.zip をダウンロード</a>
+    <a href="../download/bridge-hub.exe" download="bridge-hub.exe" data-i18n="chat.bridge.hubDownloadExe">bridge-hub.exe をダウンロード</a>
+    <span id="bridge-hub-status" aria-live="polite"></span>
+  </div>
+  <div class="install-row" data-for="copilot" style="margin-top:8px;">
+    【CDN】【アプリ】 <strong>GitHub Copilot</strong> <span class="cli-state" data-provider="copilot" aria-live="polite"></span><br />
+    <button type="button" class="bridge-setup-install" data-i18n="chat.bridge.autoInstall">CLI を自動インストール</button>
+    <button type="button" class="bridge-setup-login" data-i18n="chat.bridge.login">CLI ログイン</button>
+    <span class="hint bridge-setup-note" aria-live="polite"></span>
+  </div>
+  <div class="install-row" data-for="devin" style="margin-top:8px;">
+    【CDN】【アプリ】 <strong>Devin</strong> <span class="cli-state" data-provider="devin" aria-live="polite"></span><br />
+    <button type="button" class="bridge-setup-install" data-i18n="chat.bridge.autoInstall">CLI を自動インストール</button>
+    <button type="button" class="bridge-setup-login" data-i18n="chat.bridge.login">CLI ログイン</button>
+    <span class="hint bridge-setup-note" aria-live="polite"></span>
+  </div>
+  <div class="install-row" data-for="antigravity" style="margin-top:8px;">
+    【CDN】【アプリ】 <strong>Antigravity</strong> <span class="cli-state" data-provider="antigravity" aria-live="polite"></span><br />
+    <button type="button" class="bridge-setup-install" data-i18n="chat.bridge.autoInstall">CLI を自動インストール</button>
+    <button type="button" class="bridge-setup-login" data-i18n="chat.bridge.login">CLI ログイン</button>
+    <span class="hint bridge-setup-note" aria-live="polite"></span>
+  </div>
+</section>
 <section id="ai-pane-instructions" class="ai-subpane">
   <textarea id="chat-custom-instructions" rows="6" maxlength="8000" placeholder="AIにいつも守ってほしい指示を入力" style="width:100%;box-sizing:border-box;"></textarea>
   <div style="margin-top:6px;">
     <button id="chat-instructions-save" type="button" data-i18n="common.save">保存</button>
   </div>
   <p id="chat-instructions-status" class="hint" aria-live="polite"></p>
+  <div id="ai-instr-root"></div>
 </section>
 <section id="datasource-panel" class="ai-subpane">
   <p class="hint" data-i18n-html="mcp.hint">AI チャットへ外部データソースのツールを追加します（MCP）。</p>
@@ -3451,6 +4705,7 @@ function ensureAiSettingsDom() {
     btn.addEventListener("click", () => {
       pane.querySelectorAll(".ai-subnav button").forEach(item => item.classList.toggle("active", item === btn));
       pane.querySelectorAll(".ai-subpane").forEach(panel => panel.classList.toggle("active", panel.id === btn.dataset.manageSub));
+      if (btn.dataset.manageSub === "ai-install-panel") void refreshCliSetupStates();
     });
   });
   applyI18n(pane);
