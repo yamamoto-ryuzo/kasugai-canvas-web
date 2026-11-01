@@ -14,7 +14,7 @@
 //   cam: → #z/lat/lon と setView。theme: → 可視性プリセット
 //   非対応(3dtiles 等) → 情報タブへ警告
 import {
-  loadKascProject, parseKasc, resolveKascUrl, camToZoom, zoomToCamHeight,
+  loadKascProject, NON_LAYER_TYPES, parseKasc, resolveKascUrl, camToZoom, zoomToCamHeight, heightToViewZoom, viewZoomToHeight, groundCenterFromCam,
   parseUrlView, hasUrlView, writeUrlView, geojsonExtent, splitKascTitle,
   fillThemeSelect, themeShowSet, kascTitleInTheme, rewriteKascVisibility,
   applyPanelTitle, loadKascBookmarks, downloadKascCamLines, downloadQgisBookmarksXml,
@@ -26,7 +26,8 @@ import { loadVectorItem, isViewportQueryItem } from "../shared/vector-load.js";
 import { qmlLegendSwatchDataUrl, defaultVectorLegendSpec } from "../shared/qml-2d.js";
 import { createAttrWidget, attrEntriesFromProps, renderAttrContent } from "../shared/attr-widget.js";
 import { createPlayerApi } from "../shared/player-api.js";
-import { mountEngineSwitcher, consumeEngineSwitchState } from "../shared/engine-switch.js";
+import { mountEngineSwitcher } from "../shared/engine-switch.js";
+import { matchSessionState, bindSessionState, applySessionState, sessionBootView } from "../shared/session-state.js";
 import { initAiChat } from "../shared/ai-chat.js";
 import { createKascFlyPaths } from "../shared/fly-kasc.js";
 
@@ -94,7 +95,8 @@ async function reboot() {
     // 現在視点をレイヤ再構築より先に復元する(「一度移動して戻る」対策)
     const v = parseUrlView();
     if (hasUrlView(v) && gmap) {
-      gmap.setView([v.latitude, v.longitude], Number.isFinite(v.zoom) ? v.zoom : gmap.getZoom());
+      // 正典ハッシュは zoom を持たないため、無ければ height から換算する
+      { const gc = groundCenterFromCam(v); gmap.setView([gc.latitude, gc.longitude], Number.isFinite(v.zoom) ? v.zoom : heightToViewZoom(gc.latitude, v.height, gmapH())); }
     }
     if (lastDocCtx) await buildFromDoc(lastDocCtx);
   } catch (e) { console.error(e); }
@@ -116,6 +118,8 @@ const DEFAULT_CENTER = { lat: 36.104611, lng: 140.084556 };
 const DEFAULT_ZOOM = 5;
 
 const frame = document.getElementById("gsi-frame");
+// 正典 height ⇄ 表示ズームの換算に使う実ビューポート高（iframe 内 Leaflet のサイズ）
+const gmapH = () => gmap?.getSize?.().x || frame?.clientWidth || 512;
 frame.addEventListener("load", guardFrameDoc);
 setInterval(guardFrameDoc, 2000);
 const inspectorInput = document.getElementById("inspector-input");
@@ -242,7 +246,7 @@ function syncUrlViewNow() {
     const c = gmap.getCenter();
     writeUrlView({
       latitude: c.lat, longitude: c.lng, zoom: gmap.getZoom(),
-      height: zoomToCamHeight(c.lat, gmap.getZoom()), pitch: -90, heading: 0,
+      height: viewZoomToHeight(c.lat, gmap.getZoom(), gmapH()), pitch: -90, heading: 0,
     }, lastKascUrl ? undefined : currentProjectId);
   } catch (_) { /* 視点書込失敗は無視 */ }
 }
@@ -269,11 +273,11 @@ function globeHashView() {
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
     const v0 = Number(parts[0]);
     const isZoom = parts.length <= 4;
-    const zoom = isZoom ? v0 : camToZoom({ latitude: lat, height: v0 });
+    const zoom = isZoom ? v0 : heightToViewZoom(lat, v0, gmapH());
     const heading = Number(parts[4]), pitch = Number(parts[5]);
     return {
       latitude: lat, longitude: lon, zoom,
-      height: isZoom ? zoomToCamHeight(lat, zoom) : v0,
+      height: isZoom ? viewZoomToHeight(lat, zoom, gmapH()) : v0,
       pitch: Number.isFinite(pitch) ? pitch : -90,
       heading: Number.isFinite(heading) ? heading : 0,
     };
@@ -437,7 +441,7 @@ function globeFlyTo(view = {}) {
   const lat = Number.isFinite(num(view.latitude)) ? num(view.latitude) : C.Math.toDegrees(carto.latitude);
   const lon = Number.isFinite(num(view.longitude)) ? num(view.longitude) : C.Math.toDegrees(carto.longitude);
   const height = Number.isFinite(num(view.height)) ? num(view.height)
-    : (Number.isFinite(num(view.zoom)) ? zoomToCamHeight(lat, num(view.zoom)) : carto.height);
+    : (Number.isFinite(num(view.zoom)) ? viewZoomToHeight(lat, num(view.zoom), gmapH()) : carto.height);
   const heading = Number.isFinite(num(view.heading)) ? num(view.heading) : C.Math.toDegrees(cam.heading);
   const pitch = Number.isFinite(num(view.pitch)) ? num(view.pitch) : C.Math.toDegrees(cam.pitch);
   try {
@@ -464,7 +468,7 @@ function globeViewInfo() {
   const height = carto.height;
   return {
     latitude, longitude, height,
-    zoom: camToZoom({ latitude, height }),
+    zoom: heightToViewZoom(latitude, height, gmapH()),
     heading: C.Math.toDegrees(cam.heading),
     // getCamera() は pitchDeg-90 を .kasc pitch として返すため +90 で補正する
     pitchDeg: C.Math.toDegrees(cam.pitch) + 90,
@@ -851,7 +855,14 @@ function buildLayerRow(entry, exclusive, radioName) {
 
   const cb = document.createElement("input");
   cb.type = exclusive ? "radio" : "checkbox";
+  // 未対応形式も session-state 正典の一覧どおり行は残し、グレーアウト＋
+  // 操作不可で示す(行を消すと正典のレイヤ構成と見た目が乖離する)
+  if (entry.unsupported) { cb.disabled = true; row.style.opacity = ".45"; row.title = "このエンジン未対応の形式(Cesium 版で対応)"; }
   if (exclusive) cb.name = radioName;
+  if (exclusive) {
+    cb.addEventListener("pointerdown", () => { cb._wasChecked = cb.checked; });
+    cb.addEventListener("click", () => { if (cb._wasChecked) { cb.checked = false; cb.dispatchEvent(new Event("change")); } });
+  }
   cb.checked = item.visible !== false;
   entry.cb = cb;
   cb.addEventListener("change", () => {
@@ -932,7 +943,7 @@ function renderLayerRows() {
     }
     const key = `${group}|${exclusive ? "exclusive" : "regular"}`;
     const section = document.createElement("section");
-    section.className = "layer-group";
+    section.className = "layer-group" + (exclusive ? " exclusive" : "");
     const head = document.createElement("div");
     head.className = "layer-group-title";
     const tg = document.createElement("button");
@@ -941,7 +952,8 @@ function renderLayerRows() {
     tg.textContent = expandedLayerGroups.has(key) ? "▾" : "▸";
     tg.setAttribute("aria-expanded", String(expandedLayerGroups.has(key)));
     const gcb = document.createElement("input");
-    gcb.type = "checkbox";
+    gcb.type = exclusive ? "radio" : "checkbox";
+    if (exclusive) gcb.name = `grp-excl-${key}`;
     gcb.className = "layer-group-checkbox";
     const glabel = document.createElement("span");
     glabel.className = "layer-group-label";
@@ -1054,8 +1066,9 @@ function flyToCam(cam) {
     return;
   }
   if (!gmap) return;
-  const zoom = Number.isFinite(cam.zoom) ? cam.zoom : camToZoom(cam);
-  gmap.setView([Number(cam.latitude), Number(cam.longitude)], zoom);
+  const gc = groundCenterFromCam(cam);
+  const zoom = Number.isFinite(cam.zoom) ? cam.zoom : heightToViewZoom(gc.latitude, cam.height, gmapH());
+  gmap.setView([gc.latitude, gc.longitude], zoom);
 }
 document.getElementById("cams-save-kasc")?.addEventListener("click", () => downloadKascCamLines(currentCams));
 document.getElementById("cams-save-qgis")?.addEventListener("click", () => downloadQgisBookmarksXml(currentCams));
@@ -1207,6 +1220,13 @@ function fillProjectSelect(manifest, selected) {
 }
 projectSelect?.addEventListener("change", () => { void loadProject(projectSelect.value); });
 
+// 他エンジンからの切替時、同一プロジェクトなら引き継がれたカレント状態
+// (インスペクタ内容・テーマ選択・各レイヤの可視性・ベースマップ)を適用する。
+// カレント状態ファイルは読んでも消えない常駐ドキュメントのため、モジュール
+// 評価時に1回だけ読み込んで保持し、初回の applyProject で消費する
+// (プロジェクト切替の2回目以降へ再適用しない)
+let pendingSession = matchSessionState();
+
 async function loadProject(projectId) {
   const proj = await loadKascProject(projectId);
   currentManifest = proj.manifest;
@@ -1238,34 +1258,45 @@ async function applyProject(proj) {
   lastBaseUrl = proj.baseUrl;
   lastKascUrl = proj.kascUrl || "";
   currentProjectId = proj.id;
-  inspectorInput.value = proj.raw || "";
+  // エンジン遷移のカレント状態（初回のみ消費。初期表示なら null → .kasc 初期値）
+  const sw = pendingSession; pendingSession = null;
+  // インスペクタは「現在の .kasc」（切替元の編集込み）を優先し、切替時は
+  // 初回描画の doc そのものに使う（他エンジンと同じ単一ビルド。ファイル doc で
+  // 一度描画してから inspector で建て直すと、引継ぎカメラが extent fit で
+  // 上書きされ二重構築の残渣も残る）
+  const text = sw?.inspector ?? (proj.raw || "");
+  inspectorInput.value = text;
   applyPanelTitle(proj.doc.title || proj.title);
-  // 起動用ハッシュ: URL ビュー > 最初の cam > 既定
-  const uv = parseUrlView();
-  const cam = proj.doc.cams.find(c => !c.bookmark) || proj.doc.cams[0];
-  const lat = hasUrlView(uv) ? uv.latitude : (cam?.latitude ?? DEFAULT_CENTER.lat);
-  const lng = hasUrlView(uv) ? uv.longitude : (cam?.longitude ?? DEFAULT_CENTER.lng);
-  const zoom = hasUrlView(uv) && Number.isFinite(uv.zoom) ? uv.zoom : (cam ? camToZoom(cam) : DEFAULT_ZOOM);
+  const doc = text === (proj.raw || "") ? proj.doc : parseKasc(text);
+  // 起動用ハッシュ: URL ビュー/セッションカメラ > 最初の cam > 既定
+  const uv = sessionBootView(sw);
+  const cam = doc.cams.find(c => !c.bookmark) || doc.cams[0];
+  // 正典 lat/lon はカメラ位置。pitch は座標計算にのみ使い、傾斜時は視線の地面交点が表示中心
+  const gcSrc = hasUrlView(uv) ? uv : cam;
+  const gc = gcSrc ? groundCenterFromCam(gcSrc) : null;
+  const lat = gc ? gc.latitude : DEFAULT_CENTER.lat;
+  const lng = gc ? gc.longitude : DEFAULT_CENTER.lng;
+  // 正典URLは zoom を持たないため uv.zoom 無しなら uv の height から換算する
+  const zoom = hasUrlView(uv)
+    ? (Number.isFinite(uv.height) ? heightToViewZoom(lat, uv.height, gmapH())
+      : (Number.isFinite(uv.zoom) ? uv.zoom : camToZoom(uv)))
+    : (cam ? heightToViewZoom(lat, cam.height, gmapH()) : DEFAULT_ZOOM);
   // 最初の表示 GSI ベース行 → base=。無ければ std（後で外部タイルが上に乗る）
-  const gsiBaseRow = proj.doc.bases.find(b => b.visible !== false && gsiBaseIdFromUrl(b.url));
+  const gsiBaseRow = doc.bases.find(b => b.visible !== false && gsiBaseIdFromUrl(b.url));
   const baseId = gsiBaseRow ? gsiBaseIdFromUrl(gsiBaseRow.url) : "std";
   const z = Math.max(2, Math.min(18, Math.round(zoom)));
   frame.src = `${GSI_VENDOR_URL}#${z}/${lat.toFixed(6)}/${lng.toFixed(6)}/&base=${baseId}&ls=${baseId}&disp=1`;
   lastVendorSrc = frame.src;
   await waitGsimaps();
   wireMapEvents();
-  await buildFromDoc({ doc: proj.doc, baseUrl: proj.baseUrl, noFit: hasUrlView(uv) || !!cam });
+  await buildFromDoc({ doc, baseUrl: proj.baseUrl, noFit: hasUrlView(uv) || !!cam });
   booted = true;
-  // エンジン切替時の引継ぎ状態を一度だけ消費
-  const sw = consumeEngineSwitchState();
-  if (sw?.inspector) {
-    inspectorInput.value = sw.inspector;
-    await applyInspectorText(sw.inspector);
-    if (sw.theme) {
-      const th = currentThemes.find(t => t.name === sw.theme);
-      if (th) { themeSelect.value = th.name; applyKascTheme(th); }
-    }
-  }
+  // カレント状態のレイヤ関連を復元（vis・theme・basemap。inspector は初回 doc へ反映済み）
+  applySessionState(sw, {
+    entries: layerEntries, themeSelect,
+    setVisible: (e, on) => { e.item.visible = on; if (!e.unsupported) applyEntryVisibility(e); },
+    rerender: renderLayerRows,
+  });
 }
 
 async function buildFromDoc({ doc, baseUrl, noFit = false }) {
@@ -1274,7 +1305,7 @@ async function buildFromDoc({ doc, baseUrl, noFit = false }) {
   currentDefaultStyles = doc.defaultStyles || {};
   // fly_geojson: はフライパスとして扱う（未対応警告には出さない）
   kascFlyPaths.setItems(doc.unsupported);
-  currentUnsupported = doc.unsupported.filter(i => i.type !== "fly_geojson");
+  currentUnsupported = doc.unsupported.filter(i => i.type !== "fly_geojson" && !NON_LAYER_TYPES.has(i.type));
   lastBaseUrl = baseUrl || lastBaseUrl;
 
   // base: 行（GSI は select 項目として登録、外部タイルも同様）
@@ -1293,15 +1324,17 @@ async function buildFromDoc({ doc, baseUrl, noFit = false }) {
   applyBaseSelection();
 
   // ベクター・タイル行
-  layerEntries = doc.layers
-    .filter(item => VECTOR_TYPES.has(item.type) || TILE_TYPES.has(item.type))
-    .map(item => ({ item, pending: true }));
+  // 未対応形式(doc.unsupported)も行は残す(グレーアウト)。session-state 正典の
+  // レイヤ一覧をそのまま表現するため除外しない(行順は _idx の出現順)
+  layerEntries = [...doc.layers, ...doc.unsupported.filter(i => i.type !== "fly_geojson" && !NON_LAYER_TYPES.has(i.type))]
+    .sort((a, b) => (a._idx ?? 0) - (b._idx ?? 0))
+    .map(item => ({ item, pending: true, unsupported: doc.unsupported.includes(item) || !(VECTOR_TYPES.has(item.type) || TILE_TYPES.has(item.type)) }));
   renderLayerRows();
   let done = 0;
   const total = layerEntries.length;
   for (const e of layerEntries) {
     try {
-      await mountEntry(e);
+      if (!e.unsupported) await mountEntry(e);
       e.pending = false;
     } catch (err) {
       console.warn(e.item.title, err);
@@ -1986,7 +2019,7 @@ window.kasugaiApi = createPlayerApi({
   flyToView: v => {
     if (globeMode) { globeFlyTo(v); return; }
     gmap?.setView([Number(v.latitude), Number(v.longitude)],
-      Number.isFinite(v.zoom) ? v.zoom : camToZoom(v));
+      Number.isFinite(v.zoom) ? v.zoom : heightToViewZoom(v.latitude, v.height, gmapH()));
   },
   getViewInfo: () => {
     // Globe 表示中は gmap が無いため Cesium カメラから視点を返す
@@ -1994,6 +2027,14 @@ window.kasugaiApi = createPlayerApi({
     if (!gmap) return null;
     const c = gmap.getCenter();
     return { latitude: c.lat, longitude: c.lng, zoom: gmap.getZoom(), heading: 0, pitchDeg: 0 };
+  },
+  // 正典ビュー（Cesium 規約）。Globe 中は iframe ハッシュの視点を正典変換して返す
+  viewToUrl: () => {
+    if (globeMode) return globeHashView();
+    if (!gmap) return null;
+    const c = gmap.getCenter();
+    return { latitude: c.lat, longitude: c.lng, zoom: gmap.getZoom(),
+      height: viewZoomToHeight(c.lat, gmap.getZoom(), gmapH()), pitch: -90, heading: 0 };
   },
   fitBoundsView: (w, s, e, n) => {
     if (globeMode) { globeFitBounds(w, s, e, n); return; }
@@ -2094,6 +2135,8 @@ document.getElementById("gsi-import-layers")?.addEventListener("click", async ()
   setInspectorStatus(r.message || "", !r.ok);
 });
 mountEngineSwitcher(document.querySelector("#engines"), "gsimaps");
+// カレント状態ファイル(Cesium規約)へ現在値を反映する(変化イベント駆動)
+bindSessionState("gsimaps");
 void initAiChat({ engine: "gsimaps", manageBackend: true });
 // ai-chat.js が body 直下に作る #chat-panel(fixed 浮遊)を左ドックの AI 区画へ移設。
 // 再生成・遅延生成にも対応するため MutationObserver で常時監視する

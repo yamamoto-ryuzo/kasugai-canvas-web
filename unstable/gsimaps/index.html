@@ -13,13 +13,31 @@
   // Service Worker 前提（SW 非対応環境のフォールバックは持たない）
   (function () {
     var VENDOR_URL = "../vendor/gsimaps/index_pm.html";
-    vendorGuardProbe(VENDOR_URL)
+    var domReady = new Promise(function (res) {
+      if (document.readyState !== "loading") res();
+      else document.addEventListener("DOMContentLoaded", res, { once: true });
+    });
+    // app.js は静的な <script type=module> ではなくプローブ後に注入する。
+    // 静的読み込みだと初回訪問で SW 制御前に iframe が vendor を取りに行き
+    // 404 確定するため、SW 制御の確定を待ってからモジュールを起動する
+    // (navara/index.html と同じゲート)
+    Promise.resolve(vendorGuardProbe(VENDOR_URL))
+      .catch(function () { return null; })
       .then(function () {
         if (window.parent !== window) {
           // この中間エンジンページはトップレベル専用。iframe 内に読み込まれた
           // 場合は vendored 地理院地図へ差し替えて自己修復(ネスト二重表示の根絶)
           location.replace(new URL(VENDOR_URL, location.href).href + location.hash);
+          return;
         }
+        // app.js はモジュール評価時点で body 内要素を参照するため
+        // DOM 構築完了も待ち合わせる
+        domReady.then(function () {
+          var s = document.createElement("script");
+          s.type = "module";
+          s.src = "./app.js";
+          document.head.appendChild(s);
+        });
       });
   })();
 </script>
@@ -70,7 +88,7 @@
   #tabs .tab { min-height: 26px; padding: 4px 7px; border: 0; border-radius: 4px 4px 0 0;
                background: transparent; color: #52636d; cursor: pointer; font-size: 18px; }
   #tabs .tab.active { background: rgba(49,86,79,.16); color: #31564f; font-weight: 700; }
-  .tab-pane { overflow: auto; flex: 1; min-height: 0; }
+  .tab-pane { overflow-x: hidden; overflow-y: auto; flex: 1; min-height: 0; }
   #theme-select { width: 100%; margin-bottom: 3px; }
   #panel-toggle { flex: 0 0 26px; min-width: 26px; min-height: 26px; padding: 1px 4px;
     border: 0; border-radius: 4px; background: rgba(49,86,79,.16); color: #31564f;
@@ -129,7 +147,7 @@
   .search-hit small { color: #888; display: block; }
   /* Cesium 版 .manage-window と同型のフローティング窓 */
   #settings-window { position: absolute; top: 64px; left: 370px; z-index: 1002; width: 340px;
-    max-height: calc(100% - 170px); overflow: auto; background: rgba(255,255,255,.94);
+    max-height: calc(100% - 170px); overflow-y: auto; overflow-x: hidden; background: rgba(255,255,255,.94);
     border: 1px solid #d9e4e9; border-radius: 8px; padding: 10px 12px;
     box-shadow: 0 12px 36px rgba(10,20,40,.25); font-size: 16px; }
   #settings-window .settings-head { display: flex; justify-content: space-between; align-items: center;
@@ -282,7 +300,7 @@
     document.querySelector("#settings-window").hidden = true;
   });
   document.querySelector("#share-copy").addEventListener("click", async () => {
-    try { await navigator.clipboard.writeText(location.href); } catch (e) {}
+    try { await navigator.clipboard.writeText(window.kasugaiApi?.getShareUrl?.() || location.href); } catch (e) {}
   });
   document.querySelector("#panel-toggle").addEventListener("click", e => {
     const collapsed = document.querySelector("#panel").classList.toggle("collapsed");
@@ -312,6 +330,7 @@
     window.addEventListener("mouseup", () => { dragging = false; split.classList.remove("dragging"); });
   })();
 </script>
-<script type="module" src="./app.js"></script>
+<!-- app.js は head の vendorGuardProbe 完了後に動的注入される（SW 制御確定前の
+     vendor 参照で iframe が 404 になるのを防ぐため。navara と同方式） -->
 </body>
 </html>

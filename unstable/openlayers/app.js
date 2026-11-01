@@ -9,14 +9,15 @@ import TileWMS from "https://cdn.jsdelivr.net/npm/ol@10.11.0/source/TileWMS.js";
 import VectorSource from "https://cdn.jsdelivr.net/npm/ol@10.11.0/source/Vector.js";
 import GeoJSON from "https://cdn.jsdelivr.net/npm/ol@10.11.0/format/GeoJSON.js";
 import { fromLonLat, toLonLat, transformExtent, getPointResolution } from "https://cdn.jsdelivr.net/npm/ol@10.11.0/proj.js";
-import { loadKascProject, parseKasc, resolveKascUrl, camToZoom, zoomToCamHeight, zoomToCamHeightView, parseUrlView, hasUrlView, writeUrlView, geojsonExtent, splitKascTitle, appendGroupedTitleOptions, syncBasemapList, sanitizeAttributionFragment, layerAttribution, loadKascInfoContent, buildWmtsTileTemplate, rewriteKascVisibility, rewriteKascLineOpt, themeShowSet, kascTitleInTheme, fillThemeSelect, loadKascBookmarks, parseQgisBookmarksXml, qgisBookmarkToCam, downloadQgisBookmarksXml, downloadKascCamLines, projectsBaseUrl, applyPanelTitle, resolveDefaultPointStyle, resolveDefaultLineStyle, resolveDefaultPolygonStyle, defaultPointRadius, cssColorWithAlpha } from "../shared/kasc.js";
+import { loadKascProject, NON_LAYER_TYPES, parseKasc, resolveKascUrl, camToZoom, zoomToCamHeightView, heightToViewZoom, viewZoomToHeight, groundCenterFromCam, parseUrlView, hasUrlView, writeUrlView, geojsonExtent, splitKascTitle, appendGroupedTitleOptions, syncBasemapList, sanitizeAttributionFragment, layerAttribution, loadKascInfoContent, buildWmtsTileTemplate, rewriteKascVisibility, rewriteKascLineOpt, themeShowSet, kascTitleInTheme, fillThemeSelect, loadKascBookmarks, parseQgisBookmarksXml, qgisBookmarkToCam, downloadQgisBookmarksXml, downloadKascCamLines, projectsBaseUrl, applyPanelTitle, resolveDefaultPointStyle, resolveDefaultLineStyle, resolveDefaultPolygonStyle, defaultPointRadius, cssColorWithAlpha } from "../shared/kasc.js";
 import { createKascFlyPaths } from "../shared/fly-kasc.js";
 import { backendUrl } from "../shared/backend.js";
 import { loadVectorItem, isViewportQueryItem } from "../shared/vector-load.js";
 import { createAttrWidget, renderAttrContent, attrEntriesFromProps } from "../shared/attr-widget.js";
 import { initAiChat, hasBackendFeature } from "../shared/ai-chat.js";
 import { createPlayerApi } from "../shared/player-api.js";
-import { mountEngineSwitcher, consumeEngineSwitchState } from "../shared/engine-switch.js";
+import { mountEngineSwitcher } from "../shared/engine-switch.js";
+import { matchSessionState, bindSessionState, applySessionState, sessionBootView } from "../shared/session-state.js";
 import { initPrint, compositeCanvases } from "../shared/print.js";
 
 import { groundDeckTileset } from "../shared/deck-ground.js";
@@ -138,6 +139,7 @@ let urlViewConsumed = false;
 
 // OpenLayers ビュー ⇄ URL パラメータ（Cesium 規約: pitch は直下=-90、heading は北=0・時計回り。
 // OL の2Dビューはピッチを持たないため、書き出しは -90 固定・読み込みでは無視する）
+const mapCanvasH = () => map.getSize()?.[0] || 512;
 function mapViewToUrl() {
   const view = map.getView();
   const lonlat = toLonLat(view.getCenter() || [0, 0]);
@@ -146,16 +148,18 @@ function mapViewToUrl() {
     latitude: lonlat[1],
     longitude: lonlat[0],
     zoom,
-    height: Number.isFinite(zoom) ? zoomToCamHeight(lonlat[1], zoom) : NaN,
+    height: Number.isFinite(zoom) ? viewZoomToHeight(lonlat[1], zoom, mapCanvasH()) : NaN,
     pitch: -90,
     heading: -(view.getRotation() * 180 / Math.PI),
   };
 }
 
 function urlViewToViewOptions(v) {
+  const gc = groundCenterFromCam(v); // pitch は座標計算にのみ使用
   return {
-    center: fromLonLat([v.longitude, v.latitude]),
-    zoom: Number.isFinite(v.zoom) ? v.zoom : camToZoom(v),
+    center: fromLonLat([gc.longitude, gc.latitude]),
+    zoom: Number.isFinite(v.height) ? heightToViewZoom(gc.latitude, v.height, mapCanvasH())
+      : (Number.isFinite(v.zoom) ? v.zoom : camToZoom(v)),
     rotation: Number.isFinite(v.heading) ? -v.heading * Math.PI / 180 : 0,
   };
 }
@@ -586,7 +590,12 @@ function buildLayerRow(entry, exclusive, radioName) {
 
   const cb = document.createElement("input");
   cb.type = exclusive ? "radio" : "checkbox";
+  if (entry.unsupported) { cb.disabled = true; row.style.opacity = ".45"; row.title = "このエンジン未対応の形式(Cesium 版で対応)"; }
   if (exclusive) cb.name = radioName;
+  if (exclusive) {
+    cb.addEventListener("pointerdown", () => { cb._wasChecked = cb.checked; });
+    cb.addEventListener("click", () => { if (cb._wasChecked) { cb.checked = false; cb.dispatchEvent(new Event("change")); } });
+  }
   cb.checked = item.visible;
   entry.cb = cb;
   cb.addEventListener("change", () => {
@@ -716,7 +725,7 @@ function renderLayerRows(entries, unsupported) {
     }
     const key = `${group}|${exclusive ? "exclusive" : "regular"}`;
     const section = document.createElement("section");
-    section.className = "layer-group";
+    section.className = "layer-group" + (exclusive ? " exclusive" : "");
     const head = document.createElement("div");
     head.className = "layer-group-title";
     const tg = document.createElement("button");
@@ -725,7 +734,8 @@ function renderLayerRows(entries, unsupported) {
     tg.textContent = expandedLayerGroups.has(key) ? "▾" : "▸";
     tg.setAttribute("aria-expanded", String(expandedLayerGroups.has(key)));
     const gcb = document.createElement("input");
-    gcb.type = "checkbox";
+    gcb.type = exclusive ? "radio" : "checkbox";
+    if (exclusive) gcb.name = `grp-excl-${key}`;
     gcb.className = "layer-group-checkbox";
     const glabel = document.createElement("span");
     glabel.className = "layer-group-label";
@@ -928,7 +938,7 @@ function fillCamPanel(cams) {
       btn.addEventListener("click", () => {
         const e = cam._extent;
         if (e) map.getView().fit([...fromLonLat([e.west, e.south]), ...fromLonLat([e.east, e.north])], { padding: [40, 40, 40, 40], maxZoom: 20, duration: 600 });
-        else map.getView().animate({ center: fromLonLat([cam.longitude, cam.latitude]), zoom: camToZoom(cam), duration: 600 });
+        else { const gc = groundCenterFromCam(cam); map.getView().animate({ center: fromLonLat([gc.longitude, gc.latitude]), zoom: heightToViewZoom(gc.latitude, cam.height, mapCanvasH()), duration: 600 }); }
       });
       panel.cams.append(btn);
     }
@@ -957,33 +967,15 @@ async function applyInspectorText(text) {
 // (インスペクタ内容・テーマ選択・各レイヤの可視性)を適用する。
 // 状態はモジュール評価時に即消費して保持し(データ読込完了を待たない)、
 // loadProject/renderProject の初回描画へそのまま反映する
-let pendingSwitchState = consumeEngineSwitchState();
+let pendingSwitchState = matchSessionState();
 let switchRestore = null;
 
 function applySwitchRestore(sw) {
-  if (Array.isArray(sw.vis)) {
-    // 注: このファイルの Map は ol/Map（標準Mapではない）のため globalThis.Map を使う
-    const exact = new globalThis.Map(layerEntries.map(e => [e.item.title, e]));
-    const leafOf = t => String(t).split("/").map(s => s.trim()).pop();
-    const byLeaf = new globalThis.Map();
-    for (const e of layerEntries) {
-      const k = leafOf(e.item.title);
-      byLeaf.set(k, byLeaf.has(k) ? null : e);
-    }
-    let changed = false;
-    for (const { t: title, v } of sw.vis) {
-      const e = exact.get(title) || byLeaf.get(leafOf(title));
-      if (e && !!e.item.visible !== !!v) {
-        e.item.visible = !!v;
-        applyEntryVisibility(e);
-        changed = true;
-      }
-    }
-    if (changed) renderLayerRows(layerEntries, currentUnsupported);
-  }
-  if (sw.theme && themeSelect && [...themeSelect.options].some(o => o.value === sw.theme)) {
-    themeSelect.value = sw.theme;
-  }
+  applySessionState(sw, {
+    entries: layerEntries, themeSelect,
+    setVisible: (e, on) => { e.item.visible = on; if (!e.unsupported) applyEntryVisibility(e); },
+    rerender: () => renderLayerRows(layerEntries, currentUnsupported),
+  });
 }
 
 // .kasc 文書(doc)を描画する。loadProject(ファイル読込)と
@@ -1016,7 +1008,7 @@ async function renderProject(loadedId, baseUrl, doc, manifest) {
   // 3dtiles: 行は deck.gl で対応するため未対応通知から外す
   // 3dtiles: は deck.gl、fly_geojson: はフライパスとして対応するため未対応通知から外す
   kascFlyPaths.setItems(doc.unsupported);
-  const unsupported = doc.unsupported.filter(i => i.type !== "3dtiles" && i.type !== "fly_geojson");
+  const unsupported = doc.unsupported.filter(i => i.type !== "3dtiles" && i.type !== "fly_geojson" && !NON_LAYER_TYPES.has(i.type));
 
   // base: は先頭が既定のベースマップ。transparent/none はモード指定（レイヤにしない）
   currentBaseEntries = [];
@@ -1063,7 +1055,7 @@ async function renderProject(loadedId, baseUrl, doc, manifest) {
 
   // 初期ビューはレイヤ読込を待たず即時適用する(cam/url 指定が無い場合のみ、
   // 全レイヤ読込後にデータ範囲へ fit する)
-  const urlView = urlViewConsumed ? null : parseUrlView();
+  const urlView = urlViewConsumed ? null : sessionBootView(switchRestore);
   urlViewConsumed = true;
   let needExtentFit = false;
   if (hasUrlView(urlView)) {
@@ -1074,8 +1066,9 @@ async function renderProject(loadedId, baseUrl, doc, manifest) {
     view.setRotation(opts.rotation);
   } else if (doc.cams.length) {
     const cam = doc.cams[0];
-    map.getView().setCenter(fromLonLat([cam.longitude, cam.latitude]));
-    map.getView().setZoom(camToZoom(cam));
+    const gc = groundCenterFromCam(cam);
+    map.getView().setCenter(fromLonLat([gc.longitude, gc.latitude]));
+    map.getView().setZoom(heightToViewZoom(gc.latitude, cam.height, mapCanvasH()));
   } else {
     needExtentFit = true;
   }
@@ -1083,10 +1076,11 @@ async function renderProject(loadedId, baseUrl, doc, manifest) {
   // レイヤ行を先に描画して読込状態を行ごとに表示し、データは取得できた順に
   // 正しい描画順(insertEntryLayer)で地図へ追加する。
   // `| off` のベクター行は表示 ON までデータ取得を遅延する
-  const orderedItems = [...doc.layers, ...doc.unsupported.filter(i => i.type === "3dtiles")]
+  const orderedItems = [...doc.layers, ...doc.unsupported.filter(i => i.type !== "fly_geojson" && !NON_LAYER_TYPES.has(i.type))]
     .sort((a, b) => (a._idx ?? 0) - (b._idx ?? 0));
   const entries = orderedItems.map(item => ({
     item, layer: null, pending: true,
+    unsupported: doc.unsupported.includes(item) && item.type !== "3dtiles",
     opa: item.opts?.opacity !== undefined ? Number(item.opts.opacity) : 1,
   }));
   layerEntries = entries;
@@ -1111,6 +1105,7 @@ async function renderProject(loadedId, baseUrl, doc, manifest) {
   if (total) updateLoadProgress(0, total, restLabel());
   await Promise.allSettled(entries.map((entry, index) => (async () => {
     const item = entry.item;
+    if (entry.unsupported) { entry.pending = false; syncRowStatus(entry); return; }
     if (isDeferred(item)) {
       // `| off` ベクターはここでは読まず、表示 ON 時に ensureEntryLoaded で読む
       entry.deferred = true;
@@ -1622,7 +1617,7 @@ window.kasugaiApi = createPlayerApi({
     // heading 未指定時は rotation を渡さない（undefined は現在角を壊し得るため）
     const opts = {
       center: fromLonLat([Number(v.longitude), Number(v.latitude)]),
-      zoom: Number.isFinite(v.zoom) ? v.zoom : camToZoom(v),
+      zoom: Number.isFinite(v.zoom) ? v.zoom : heightToViewZoom(v.latitude, v.height, mapCanvasH()),
       duration: 600,
     };
     if (Number.isFinite(v.heading)) opts.rotation = -v.heading * Math.PI / 180;
@@ -1640,6 +1635,7 @@ window.kasugaiApi = createPlayerApi({
     const c = toLonLat(map.getView().getCenter() || [0, 0]);
     return { latitude: c[1], longitude: c[0], zoom: map.getView().getZoom(), heading: -map.getView().getRotation() * 180 / Math.PI, pitchDeg: 0 };
   },
+  viewToUrl: () => mapViewToUrl(),
   fitBoundsView: (w, s, e, n) => map.getView().fit([...fromLonLat([w, s]), ...fromLonLat([e, n])], { padding: [50, 50, 50, 50], maxZoom: 17 }),
   mountEntry: async (entry, preloaded) => {
     const layer = await buildLayer(entry.item, lastBaseUrl, preloaded || entry.item._preloaded);
@@ -1664,6 +1660,8 @@ window.kasugaiApi = createPlayerApi({
   syncFlyPathLine: kascFlyPaths.syncFlyPathLine,
 });
 mountEngineSwitcher(document.querySelector("#engines"), "openlayers");
+// カレント状態ファイル(Cesium規約)へ現在値を反映する(変化イベント駆動)
+bindSessionState("openlayers");
 void initAiChat({ engine: "openlayers", manageBackend: true });
 
 // 印刷: rendercomplete 後に .ol-layer canvas を表示位置で合成

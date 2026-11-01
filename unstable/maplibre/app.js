@@ -1,7 +1,7 @@
 // KASUGAI Canvas — MapLibre フロント
 // .kasc プレイヤーモード: projects/<id>/ の .kasc+DATA/ を MapLibre GL で再生する
 import * as maplibregl from "https://cdn.jsdelivr.net/npm/maplibre-gl@6.16.0/dist/maplibre-gl.mjs";
-import { loadKascProject, parseKasc, resolveKascUrl, camToZoom, zoomToCamHeight, zoomToCamHeightView, parseUrlView, hasUrlView, writeUrlView, geojsonExtent, splitKascTitle, appendGroupedTitleOptions, syncBasemapList, sanitizeAttributionFragment, layerAttribution, loadKascInfoContent, buildWmsTileTemplate, buildWmtsTileTemplate, rewriteKascVisibility, rewriteKascLineOpt, themeShowSet, kascTitleInTheme, fillThemeSelect, loadKascBookmarks, parseQgisBookmarksXml, qgisBookmarkToCam, downloadQgisBookmarksXml, downloadKascCamLines, projectsBaseUrl, applyPanelTitle, defaultPointRadius, cssColorAlpha } from "../shared/kasc.js";
+import { loadKascProject, NON_LAYER_TYPES, parseKasc, resolveKascUrl, camToZoom, zoomToCamHeightView, heightToViewZoom, viewZoomToHeight, groundCenterFromCam, camFromGroundCenter, parseUrlView, hasUrlView, writeUrlView, geojsonExtent, splitKascTitle, appendGroupedTitleOptions, syncBasemapList, sanitizeAttributionFragment, layerAttribution, loadKascInfoContent, buildWmsTileTemplate, buildWmtsTileTemplate, rewriteKascVisibility, rewriteKascLineOpt, themeShowSet, kascTitleInTheme, fillThemeSelect, loadKascBookmarks, parseQgisBookmarksXml, qgisBookmarkToCam, downloadQgisBookmarksXml, downloadKascCamLines, projectsBaseUrl, applyPanelTitle, defaultPointRadius, cssColorAlpha } from "../shared/kasc.js";
 import { createKascFlyPaths } from "../shared/fly-kasc.js";
 import { backendUrl } from "../shared/backend.js";
 import { loadVectorItem, isViewportQueryItem } from "../shared/vector-load.js";
@@ -9,7 +9,8 @@ import { mountSunControls } from "../shared/sun-time.js";
 import { createAttrWidget, renderAttrContent, attrEntriesFromProps } from "../shared/attr-widget.js";
 import { initAiChat, hasBackendFeature } from "../shared/ai-chat.js";
 import { createPlayerApi } from "../shared/player-api.js";
-import { mountEngineSwitcher, consumeEngineSwitchState } from "../shared/engine-switch.js";
+import { mountEngineSwitcher } from "../shared/engine-switch.js";
+import { matchSessionState, bindSessionState, applySessionState, sessionBootView } from "../shared/session-state.js";
 import { initPrint, compositeCanvases } from "../shared/print.js";
 
 import { groundDeckTileset } from "../shared/deck-ground.js";
@@ -125,26 +126,36 @@ let currentProjectId = "";
 let urlViewConsumed = false;
 
 // MapLibre ビュー ⇄ URL パラメータ（Cesium 規約: pitch は直下=-90・水平=0、heading は北=0・時計回り）
-// URL/共有側の zoom は 256px タイル基準の正典(camToZoom と同じ。Leaflet/OL が素の値を書く)。
-// MapLibre は 512px 基準のため書き出しは +1、読み込みは -1 する
+// height は正典 height(m)。⇄ 表示ズームの換算は実キャンバス高＋正典 FOV(60°)の
+// heightToViewZoom/viewZoomToHeight で行う。MapLibre のネイティブ zoom は 512px
+// 基準のため、正典(256px 基準)との間で書き出し +1・読み込み -1 する。
+// bearing は heading と同規約（北=0・時計回り）で符号反転しない
+const mapCanvasH = () => map.getCanvas()?.clientWidth || 512;
 function mapViewToUrl() {
-  const c = map.getCenter();
+  const c = map.getCenter(); // 地面注視点（画面中心の地面交点）
   const zoom = map.getZoom() + 1;
+  const pitch = map.getPitch() - 90;   // 正典 pitch
+  const heading = map.getBearing();    // 正典 heading（同規約）
+  const slant = viewZoomToHeight(c.lat, zoom, mapCanvasH());
+  // 正典 lat/lon/height はカメラ位置: 注視点 + 正典姿勢から逆算する
+  const cam = camFromGroundCenter({ latitude: c.lat, longitude: c.lng }, pitch, heading, slant);
   return {
-    latitude: c.lat,
-    longitude: c.lng,
+    latitude: cam.latitude,
+    longitude: cam.longitude,
     zoom,
-    height: zoomToCamHeight(c.lat, zoom),
-    pitch: map.getPitch() - 90,
-    heading: -map.getBearing(),
+    height: cam.height,
+    pitch,
+    heading,
   };
 }
 
 function urlViewToMapOptions(v) {
+  const gc = groundCenterFromCam(v); // pitch は座標計算にのみ使用
   return {
-    center: [v.longitude, v.latitude],
-    zoom: (Number.isFinite(v.zoom) ? v.zoom : camToZoom(v)) - 1,
-    bearing: Number.isFinite(v.heading) ? -v.heading : 0,
+    center: [gc.longitude, gc.latitude],
+    zoom: (Number.isFinite(v.height) ? heightToViewZoom(gc.latitude, v.height, mapCanvasH())
+      : (Number.isFinite(v.zoom) ? v.zoom : camToZoom(v))) - 1,
+    bearing: Number.isFinite(v.heading) ? v.heading : 0,
     pitch: Number.isFinite(v.pitch) ? Math.max(0, Math.min(60, v.pitch + 90)) : 0,
   };
 }
@@ -583,7 +594,12 @@ function buildLayerRow(entry, exclusive, radioName) {
 
   const cb = document.createElement("input");
   cb.type = exclusive ? "radio" : "checkbox";
+  if (entry.unsupported) { cb.disabled = true; row.style.opacity = ".45"; row.title = "このエンジン未対応の形式(Cesium 版で対応)"; }
   if (exclusive) cb.name = radioName;
+  if (exclusive) {
+    cb.addEventListener("pointerdown", () => { cb._wasChecked = cb.checked; });
+    cb.addEventListener("click", () => { if (cb._wasChecked) { cb.checked = false; cb.dispatchEvent(new Event("change")); } });
+  }
   cb.checked = item.visible;
   entry.cb = cb;
   cb.addEventListener("change", () => {
@@ -712,7 +728,7 @@ function renderLayerRows(entries, unsupported) {
     }
     const key = `${group}|${exclusive ? "exclusive" : "regular"}`;
     const section = document.createElement("section");
-    section.className = "layer-group";
+    section.className = "layer-group" + (exclusive ? " exclusive" : "");
     const head = document.createElement("div");
     head.className = "layer-group-title";
     const tg = document.createElement("button");
@@ -721,7 +737,8 @@ function renderLayerRows(entries, unsupported) {
     tg.textContent = expandedLayerGroups.has(key) ? "▾" : "▸";
     tg.setAttribute("aria-expanded", String(expandedLayerGroups.has(key)));
     const gcb = document.createElement("input");
-    gcb.type = "checkbox";
+    gcb.type = exclusive ? "radio" : "checkbox";
+    if (exclusive) gcb.name = `grp-excl-${key}`;
     gcb.className = "layer-group-checkbox";
     const glabel = document.createElement("span");
     glabel.className = "layer-group-label";
@@ -923,7 +940,7 @@ function fillCamPanel(cams) {
       btn.addEventListener("click", () => {
         const e = cam._extent;
         if (e) map.fitBounds([[e.west, e.south], [e.east, e.north]], { padding: 40, duration: 800, maxZoom: 20 });
-        else map.flyTo({ center: [cam.longitude, cam.latitude], zoom: camToZoom(cam) - 1 });
+        else { const gc = groundCenterFromCam(cam); map.flyTo({ center: [gc.longitude, gc.latitude], zoom: heightToViewZoom(gc.latitude, cam.height, mapCanvasH()) - 1 }); }
       });
       panel.cams.append(btn);
     }
@@ -952,32 +969,15 @@ async function applyInspectorText(text) {
 // (インスペクタ内容・テーマ選択・各レイヤの可視性)を適用する。
 // 状態はモジュール評価時に即消費して保持し(データ読込完了を待たない)、
 // loadProject/renderProject の初回描画へそのまま反映する
-let pendingSwitchState = consumeEngineSwitchState();
+let pendingSwitchState = matchSessionState();
 let switchRestore = null;
 
 function applySwitchRestore(sw) {
-  if (Array.isArray(sw.vis)) {
-    const exact = new Map(layerEntries.map(e => [e.item.title, e]));
-    const leafOf = t => String(t).split("/").map(s => s.trim()).pop();
-    const byLeaf = new Map();
-    for (const e of layerEntries) {
-      const k = leafOf(e.item.title);
-      byLeaf.set(k, byLeaf.has(k) ? null : e);
-    }
-    let changed = false;
-    for (const { t: title, v } of sw.vis) {
-      const e = exact.get(title) || byLeaf.get(leafOf(title));
-      if (e && !!e.item.visible !== !!v) {
-        e.item.visible = !!v;
-        applyEntryVisibility(e);
-        changed = true;
-      }
-    }
-    if (changed) renderLayerRows(layerEntries, currentUnsupported);
-  }
-  if (sw.theme && themeSelect && [...themeSelect.options].some(o => o.value === sw.theme)) {
-    themeSelect.value = sw.theme;
-  }
+  applySessionState(sw, {
+    entries: layerEntries, themeSelect,
+    setVisible: (e, on) => { e.item.visible = on; if (!e.unsupported) applyEntryVisibility(e); },
+    rerender: () => renderLayerRows(layerEntries, currentUnsupported),
+  });
 }
 
 // .kasc 文書(doc)を描画する。loadProject(ファイル読込)と
@@ -1008,7 +1008,7 @@ async function renderProject(loadedId, baseUrl, doc, manifest) {
   // 未対応通知から外す。3dtiles は _idx（.kasc 上の行順）で doc.layers と
   // 混ぜてレイヤツリー順を再現する
   kascFlyPaths.setItems(doc.unsupported);
-  const unsupported = doc.unsupported.filter(i => i.type !== "3dtiles" && i.type !== "fly_geojson");
+  const unsupported = doc.unsupported.filter(i => i.type !== "3dtiles" && i.type !== "fly_geojson" && !NON_LAYER_TYPES.has(i.type));
 
   currentBaseEntries = [];
   const baseEntries = currentBaseEntries;
@@ -1053,14 +1053,14 @@ async function renderProject(loadedId, baseUrl, doc, manifest) {
 
   // 初期ビューはレイヤ読込を待たず即時適用する(cam/url 指定が無い場合のみ、
   // 全レイヤ読込後にデータ範囲へ fit する)
-  const urlView = urlViewConsumed ? null : parseUrlView();
+  const urlView = urlViewConsumed ? null : sessionBootView(switchRestore);
   urlViewConsumed = true;
   let needExtentFit = false;
   if (hasUrlView(urlView)) {
     map.jumpTo(urlViewToMapOptions(urlView));
   } else if (doc.cams.length) {
     const cam = doc.cams[0];
-    map.jumpTo({ center: [cam.longitude, cam.latitude], zoom: camToZoom(cam) - 1 });
+    { const gc = groundCenterFromCam(cam); map.jumpTo({ center: [gc.longitude, gc.latitude], zoom: heightToViewZoom(gc.latitude, cam.height, mapCanvasH()) - 1 }); }
   } else {
     needExtentFit = true;
   }
@@ -1068,10 +1068,10 @@ async function renderProject(loadedId, baseUrl, doc, manifest) {
   // レイヤ行を先に描画して読込状態を行ごとに表示し、データは取得できた順に
   // 正しい z 順(findInsertBeforeId)で地図へ追加する。
   // `| off` のベクター行は表示 ON までデータ取得を遅延する
-  const orderedItems = [...doc.layers, ...doc.unsupported.filter(i => i.type === "3dtiles")]
+  const orderedItems = [...doc.layers, ...doc.unsupported.filter(i => i.type !== "fly_geojson" && !NON_LAYER_TYPES.has(i.type))]
     .sort((a, b) => (a._idx ?? 0) - (b._idx ?? 0));
   const entries = orderedItems.map(item =>
-    ({ item, lids: [], sid: null, filters: null, opas: null, pending: true }));
+    ({ item, lids: [], sid: null, filters: null, opas: null, pending: true, unsupported: doc.unsupported.includes(item) && item.type !== "3dtiles" }));
   layerEntries = entries;
   lastBaseUrl = baseUrl;
   renderLayerRows(entries, unsupported);
@@ -1094,6 +1094,7 @@ async function renderProject(loadedId, baseUrl, doc, manifest) {
   if (total) updateLoadProgress(0, total, restLabel());
   await Promise.allSettled(entries.map((entry, index) => (async () => {
     const item = entry.item;
+    if (entry.unsupported) { entry.pending = false; syncRowStatus(entry); return; }
     if (isDeferred(item)) {
       // `| off` ベクターはここでは読まず、表示 ON 時に ensureEntryLoaded で読む
       entry.deferred = true;
@@ -1316,7 +1317,7 @@ map.on("load", () => {
         if (typeof s.lon === "number" && typeof s.lat === "number") opt.center = [s.lon, s.lat];
         // /present/state の zoom は OL 規約(256px基準)のため -1
         if (typeof s.zoom === "number") opt.zoom = s.zoom - 1;
-        if (typeof s.rotation === "number") opt.bearing = -s.rotation;
+        if (typeof s.rotation === "number") opt.bearing = s.rotation;
         map.jumpTo(opt);
       } catch (_) { /* 接続不可時は前回状態を維持 */ }
     };
@@ -1343,7 +1344,7 @@ document.querySelector("#basemap-toggle").addEventListener("click", e => {
   map.on("move", () => {
     const b = map.getBearing();
     if (compass) compass.style.transform = `rotateZ(${-b}deg)`;
-    if (rotInput && document.activeElement !== rotInput) rotInput.value = String(Math.round(-b));
+    if (rotInput && document.activeElement !== rotInput) rotInput.value = String(Math.round(b));
   });
   compass?.addEventListener("click", () => {
     map.easeTo({ bearing: 0, duration: 300 });
@@ -1370,7 +1371,7 @@ document.querySelector("#basemap-toggle").addEventListener("click", e => {
 function openGoogleEarth() {
   try {
     const c = map.getCenter();
-    const heading = ((-map.getBearing()) % 360 + 360) % 360;
+    const heading = ((map.getBearing()) % 360 + 360) % 360;
     const tilt = Math.max(0, Math.min(90, map.getPitch()));
     const tiltRad = tilt * Math.PI / 180;
     const vh = map.getCanvas().clientHeight || map.getContainer().clientHeight;
@@ -1463,7 +1464,7 @@ map.on("sourcedata", e => {
       entry.lids.forEach(lid => map.getLayer(lid) && map.setPaintProperty(lid, "raster-opacity", Number(opacity.value)));
     }
   });
-  rotation?.addEventListener("change", () => map.setBearing(-Number(rotation.value || 0)));
+  rotation?.addEventListener("change", () => map.setBearing(Number(rotation.value || 0)));
   north?.addEventListener("change", () => {
     if (north.checked) { rotation.value = "0"; map.easeTo({ bearing: 0 }); }
   });
@@ -1737,9 +1738,9 @@ window.kasugaiApi = createPlayerApi({
     // undefined キー(bearing/pitch)を渡すと maplibre-gl v5 の flyTo が
     // _calcMatrices でクラッシュしレンダーループが止まるため省略して組み立てる
     const opts = { center: [Number(v.longitude), Number(v.latitude)] };
-    // v.zoom は engine ネイティブ(getViewInfo と往復)なので素通し、camToZoom 由来は -1
-    opts.zoom = Number.isFinite(v.zoom) ? v.zoom : camToZoom(v) - 1;
-    if (Number.isFinite(v.heading)) opts.bearing = -v.heading;
+    // v.zoom は engine ネイティブ(getViewInfo と往復)なので素通し、height 由来は -1
+    opts.zoom = Number.isFinite(v.zoom) ? v.zoom : heightToViewZoom(v.latitude, v.height, mapCanvasH()) - 1;
+    if (Number.isFinite(v.heading)) opts.bearing = v.heading;
     if (Number.isFinite(v.pitch)) opts.pitch = Math.max(0, Math.min(60, v.pitch + 90));
     // instant=フライパス巡回等の高頻度更新。flyTo の逐次再起動を避け即時配置する
     if (v.instant) map.jumpTo(opts);
@@ -1747,8 +1748,9 @@ window.kasugaiApi = createPlayerApi({
   },
   getViewInfo: () => {
     const c = map.getCenter();
-    return { latitude: c.lat, longitude: c.lng, zoom: map.getZoom(), heading: -map.getBearing(), pitchDeg: map.getPitch() };
+    return { latitude: c.lat, longitude: c.lng, zoom: map.getZoom(), heading: map.getBearing(), pitchDeg: map.getPitch() };
   },
+  viewToUrl: () => mapViewToUrl(),
   fitBoundsView: (w, s, e, n) => map.fitBounds([w, s, e, n], { padding: 60, maxZoom: 17 }),
   mountEntry: async (entry, preloaded) => {
     const idx = layerEntries.indexOf(entry);
@@ -1781,6 +1783,8 @@ window.kasugaiApi = createPlayerApi({
   },
 });
 mountEngineSwitcher(document.querySelector("#engines"), "maplibre");
+// カレント状態ファイル(Cesium規約)へ現在値を反映する(変化イベント駆動)
+bindSessionState("maplibre");
 void initAiChat({ engine: "maplibre", manageBackend: true });
 
 // 印刷: タイル読み込み完了(idle)後に地図canvasを取得
