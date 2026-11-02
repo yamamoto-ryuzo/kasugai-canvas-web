@@ -11,6 +11,9 @@ import { initAiChat, hasBackendFeature } from "../shared/ai-chat.js";
 import { createPlayerApi } from "../shared/player-api.js";
 import { mountEngineSwitcher } from "../shared/engine-switch.js";
 import { matchSessionState, bindSessionState, applySessionState, sessionBootView } from "../shared/session-state.js";
+import { initNavTools } from "../shared/nav-tools.js";
+import { coordPins } from "../shared/coord-pins.js";
+import { formatLatLng } from "../shared/coords-format.js";
 import { initPrint, compositeCanvases } from "../shared/print.js";
 
 import { groundDeckTileset } from "../shared/deck-ground.js";
@@ -1200,6 +1203,10 @@ async function renderProject(loadedId, baseUrl, doc, manifest) {
     }
     if (!count) panel.searchResults.textContent = "該当なし";
   };
+
+  // プロジェクト再描画で管理レイヤーが removeManaged された分を含め、
+  // 共有ストアの状態へ座標ピンレイヤーを再同期する
+  coordPins.refresh();
 }
 
 // エントリのデータを現在の表示範囲・条件で再読み込みする。
@@ -1494,7 +1501,7 @@ map.on("sourcedata", e => {
   const coordsEl = document.querySelector("#map-coords");
   map.on("mousemove", e => {
     if (!coordsEl || !document.querySelector("#display-coords")?.checked) return;
-    coordsEl.textContent = `${e.lngLat.lng.toFixed(5)}, ${e.lngLat.lat.toFixed(5)}`;
+    coordsEl.textContent = formatLatLng(e.lngLat.lat, e.lngLat.lng);
   });
   document.querySelector("#display-coords")?.addEventListener("change", e => {
     if (coordsEl) coordsEl.style.display = e.target.checked ? "" : "none";
@@ -1807,3 +1814,74 @@ initPrint({
   },
   getNorthAngleDeg: () => -map.getBearing(),
 });
+
+// ---- ナビゲーション共通ツール（shared/nav-tools.js）----
+initNavTools({
+  el: document.getElementById("map"),
+  getView: () => ({ lat: map.getCenter().lat, lng: map.getCenter().lng, zoom: map.getZoom(), bearing: map.getBearing(), pitch: map.getPitch() }),
+  setView: v => map.jumpTo({ center: [v.lng, v.lat], zoom: v.zoom, bearing: v.bearing || 0, pitch: v.pitch || 0 }),
+  viewsEqual: (x, y) => x && y && Math.abs(x.lat - y.lat) < 1e-7 && Math.abs(x.lng - y.lng) < 1e-7 && Math.abs((x.zoom ?? 0) - (y.zoom ?? 0)) < 0.001 && Math.abs((x.bearing ?? 0) - (y.bearing ?? 0)) < 0.5 && Math.abs((x.pitch ?? 0) - (y.pitch ?? 0)) < 0.5,
+  flyTo: (lat, lng) => map.flyTo({ center: [lng, lat] }),
+  fitBounds: (w, s, e, n) => map.fitBounds([[w, s], [e, n]]),
+  isTilted: () => map.getPitch() > 0.5 || Math.abs(map.getBearing()) > 0.5,
+  centerZoom: (c, scale) => map.flyTo({ center: [c.lng, c.lat], zoom: map.getZoom() - Math.log2(scale) }),
+  onMoveStart: cb => map.on("movestart", cb),
+  onMoveEnd: cb => map.on("moveend", cb),
+  toLatLng: (x, y) => { const ll = map.unproject([x, y]); return { lat: ll.lat, lng: ll.lng }; },
+  setMarker: ll => { initNavTools._mk?.remove(); initNavTools._mk = ll ? new maplibregl.Marker().setLngLat([ll.lng, ll.lat]).addTo(map) : null; },
+  capturePng: () => new Promise(res => { map.once("render", () => map.getCanvas().toBlob(res, "image/png")); map.triggerRepaint(); }),
+  nativeBoxZoom: true,
+});
+
+// ---- 座標ピン（shared/coord-pins.js の共有 GeoJSON を一般レイヤーとして描画）----
+// layerEntries に正規エントリを持つため、レイヤ一覧・属性表示(クリック)・
+// 属性検索・属性一覧ウィジェットが通常レイヤーと同じ経路で使える
+const PIN_SID = "coord-pins";
+const PIN_LID = "coord-pins-circle";
+let pinEntry = null;
+function syncCoordPinLayer(fc) {
+  // プロジェクト再描画(removeManaged)で消えた分を含め、ストアの状態へ収束させる
+  if (pinEntry && !layerEntries.includes(pinEntry)) pinEntry = null;
+  // スタイル未ロード(sessionStorage 復元直後の初回 notify 等)では
+  // レイヤ行だけ先行登録し、地図ソースは renderProject 後の refresh で張る
+  const loaded = map.isStyleLoaded();
+  const src = loaded ? map.getSource(PIN_SID) : null;
+  if (!fc.features.length) {
+    if (loaded && map.getLayer(PIN_LID)) map.removeLayer(PIN_LID);
+    if (src) map.removeSource(PIN_SID);
+    managedLayers = managedLayers.filter(l => l !== PIN_LID);
+    managedSources = managedSources.filter(s => s !== PIN_SID);
+    if (pinEntry) {
+      const i = layerEntries.indexOf(pinEntry);
+      if (i >= 0) layerEntries.splice(i, 1);
+      pinEntry = null;
+      renderLayerRows(layerEntries, currentUnsupported);
+    }
+    return;
+  }
+  if (!pinEntry) {
+    pinEntry = { item: { title: "座標ピン", type: "geojson", visible: true }, lids: [PIN_LID], sid: PIN_SID, pending: false };
+    layerEntries.unshift(pinEntry);
+    renderLayerRows(layerEntries, currentUnsupported);
+  }
+  pinEntry.item._geojson = fc;
+  const env = geojsonExtent(fc);
+  if (env) pinEntry.item._env = env;
+  if (src) src.setData(fc);
+  else if (loaded) {
+    map.addSource(PIN_SID, { type: "geojson", data: fc });
+    map.addLayer({
+      id: PIN_LID, type: "circle", source: PIN_SID,
+      layout: { visibility: pinEntry.item.visible !== false ? "visible" : "none" },
+      paint: {
+        "circle-radius": 7,
+        "circle-color": ["coalesce", ["get", "marker-color"], "#e33d3d"],
+        "circle-stroke-color": "#fff",
+        "circle-stroke-width": 2,
+      },
+    });
+    managedSources.push(PIN_SID);
+    managedLayers.push(PIN_LID);
+  }
+}
+coordPins.setRenderer(syncCoordPinLayer);
