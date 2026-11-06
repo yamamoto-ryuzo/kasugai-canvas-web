@@ -855,5 +855,6 @@
   "instr.notFound": "Instruction not found: {id}",
   "instr.confirmDelete": "Delete instruction \"{id}\"?",
   "instr.confirmOverwrite": "Overwrite instruction \"{id}\"?",
-  "app.openInApp": "Abrir no app Canvas"
+  "app.openInApp": "Abrir no app Canvas",
+  "app.importRemote": "Importar para o app Canvas"
 }

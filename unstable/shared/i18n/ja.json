@@ -855,5 +855,6 @@
   "tools.exportFail": "エクスポートに失敗しました。",
   "tools.exportSkipped": "{count} 件スキップ",
   "tools.exportHintFormats": "CSV/TSV は WKT 列付き、Shapefile はジオメトリ種別ごとに分割して ZIP にまとめます。",
-  "app.openInApp": "アプリで開く"
+  "app.openInApp": "アプリで開く",
+  "app.importRemote": "アプリへ取り込み"
 }

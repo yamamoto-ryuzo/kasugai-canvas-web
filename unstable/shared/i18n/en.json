@@ -855,5 +855,6 @@
   "tools.exportFail": "Export failed.",
   "tools.exportSkipped": "{count} skipped",
   "tools.exportHintFormats": "CSV/TSV include a WKT column; Shapefile is split per geometry type into a ZIP.",
-  "app.openInApp": "Open in Canvas app"
+  "app.openInApp": "Open in Canvas app",
+  "app.importRemote": "Import into Canvas app"
 }

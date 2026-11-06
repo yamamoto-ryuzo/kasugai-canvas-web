@@ -8171,6 +8171,28 @@ function setupEvents() {
   openInAppBtn?.addEventListener("click", async () => {
     const setGlyph = (g) => { openInAppBtn.textContent = g; setTimeout(() => { openInAppBtn.textContent = "🖥"; }, 1500); };
     const SETUP_URL = "https://raw.githubusercontent.com/yamamoto-ryuzo/kasugai_canvas/main/download/kasugai_canvas_setup.exe";
+    // アプリ版自身: リモートプロジェクト(?kasc=/外部登録)をローカルへ軽い取り込み。
+    // .kasc を絶対参照化して /api/projects/import → projects/imported/<slug>/ +
+    // 外部プロジェクト登録 → プロジェクト一覧へ永続化して切替える
+    if (openInAppBtn.dataset.mode === "import") {
+      try {
+        const share = new URL(window.kasugaiApi.buildShareUrl());
+        const src = share.searchParams.get("kasc")
+          || rememberedKascUrl(share.searchParams.get("project") || "");
+        if (!src) return;
+        const res = await fetch(src, { cache: "no-store" });
+        if (!res.ok) throw new Error(`kasc fetch ${res.status}`);
+        const name = decodeURIComponent(new URL(src).pathname.split("/").pop() || "scene").replace(/\.kasc$/i, "") || "scene";
+        const kasc = absolutizeKascRefs(await res.text(), new URL("./", src).href);
+        const out = await fetch(backendUrl("/api/projects/import"), {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name, kasc }),
+        }).then(r => r.json().catch(() => null));
+        if (!out || !out.ok || !out.id) throw new Error((out && out.error) || "import failed");
+        window.location.href = `?project=${encodeURIComponent(out.id)}${location.hash}`;
+      } catch (e) { setGlyph("⚠"); }
+      return;
+    }
     const hubBase = "http://127.0.0.1:8514";
     let hubOk = false;
     try {
@@ -11191,13 +11213,21 @@ window.addEventListener("pagehide", () => {
   // コマンドをロングポーリングで受信し、チャットツールと同じ経路(executeChatTool)で実行する。
   // 実行結果は /api/command/results へ返す。破壊的操作はチャット同様確認ダイアログが出る
   startRemoteCommandLoop();
-  // アプリ版自身（同一オリジン＋remoteCommand 経路あり）ではハンドオフ先が
-  // 自分自身なので「アプリで開く」ボタンを出さない。CDN ホスト版・Cloud Run
-  // 等では backendBaseUrl()=127.0.0.1:8510(検出時) or 空(未検出)のまま表示
+  // アプリ版自身（同一オリジン＋remoteCommand 経路あり）では「アプリで開く」の
+  // 意味がないため、リモートプロジェクト(?kasc=/外部URL記憶)を開いている時だけ
+  // 「アプリへ取り込み」ボタンへ振り替える。ローカルプロジェクトでは非表示
   {
     const openInAppBtn = document.querySelector("#open-in-app");
     if (openInAppBtn && backendBaseUrl() === "" && hasBackendFeature("remoteCommand")) {
-      openInAppBtn.style.display = "none";
+      const cur = new URLSearchParams(location.search);
+      const remote = cur.get("kasc") || rememberedKascUrl(cur.get("project") || "");
+      if (remote) {
+        openInAppBtn.dataset.mode = "import";
+        openInAppBtn.title = t("app.importRemote");
+        openInAppBtn.setAttribute("aria-label", t("app.importRemote"));
+      } else {
+        openInAppBtn.style.display = "none";
+      }
     }
   }
   const initialCamera = await resolveInitialCamera();

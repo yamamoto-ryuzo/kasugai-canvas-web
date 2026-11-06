@@ -855,5 +855,6 @@
   "instr.notFound": "Instruction not found: {id}",
   "instr.confirmDelete": "Delete instruction \"{id}\"?",
   "instr.confirmOverwrite": "Overwrite instruction \"{id}\"?",
-  "app.openInApp": "Canvas 앱에서 열기"
+  "app.openInApp": "Canvas 앱에서 열기",
+  "app.importRemote": "Canvas 앱으로 가져오기"
 }
