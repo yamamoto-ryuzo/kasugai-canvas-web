@@ -8199,15 +8199,23 @@ function setupEvents() {
       hubOk = await fetch(`${hubBase}/health`, { signal: AbortSignal.timeout(1500), cache: "no-store" })
         .then(r => (r.ok ? r.json() : null)).then(d => !!(d && d.hub)).catch(() => false);
     } catch (e) {}
-    if (hubOk) {
+    // ?kasc= リモートプロジェクトは .kasc の到達可否を先に確認する。
+    // 配信元（QGIS geo_webview :8089 等の一時サーバー）が死んでいると
+    // アプリ側でも同じく取得に失敗するため、死んだ ?kasc= URL を開かず警告する
+    const share = new URL(window.kasugaiApi.buildShareUrl());
+    const remoteKasc = share.searchParams.get("kasc");
+    const kascUrl = remoteKasc
+      || `${projectsBaseUrl(share.searchParams.get("project") || "default")}kasugai_canvas.kasc`;
+    let kascText = null;
+    try {
+      const res = await fetch(kascUrl, { cache: "no-store" });
+      if (res.ok) kascText = await res.text();
+    } catch (e) {}
+    if (remoteKasc && !kascText) { setGlyph("⚠"); return; }
+    if (hubOk && kascText) {
       try {
-        const share = new URL(window.kasugaiApi.buildShareUrl());
-        const kascUrl = share.searchParams.get("kasc")
-          || `${projectsBaseUrl(share.searchParams.get("project") || "default")}kasugai_canvas.kasc`;
-        const res = await fetch(kascUrl, { cache: "no-store" });
-        if (!res.ok) throw new Error(`kasc fetch ${res.status}`);
         const name = decodeURIComponent(new URL(kascUrl).pathname.split("/").pop() || "scene").replace(/\.kasc$/i, "") || "scene";
-        const kasc = absolutizeKascRefs(await res.text(), new URL("./", kascUrl).href);
+        const kasc = absolutizeKascRefs(kascText, new URL("./", kascUrl).href);
         const out = await fetch(`${hubBase}/canvas/open`, {
           method: "POST", headers: { "Content-Type": "text/plain" },
           body: JSON.stringify({ name, kasc }),
