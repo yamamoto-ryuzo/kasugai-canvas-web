@@ -7,6 +7,7 @@
 // api.handleClick(pos)/handleDoubleClick(pos)/handleMouseMove(pos) は app.js の
 // クリックハンドラから呼び、処理したら true を返す（属性ピックを抑止するため）
 import { t } from "../shared/i18n.js";
+import { notifyToolMode } from "../shared/tools-dock-ux.js";
 import { exportFeatureCollection } from "../shared/export-formats.js";
 import { collectFields } from "../shared/attr-stats.js";
 import {
@@ -129,6 +130,8 @@ export function initGeoTools({ viewer, requestRender, sampleRouteTerrain, getOrd
       if (btn) btn.classList.toggle("tool-on", mode === m);
     }
     viewer.canvas.style.cursor = mode ? "crosshair" : "";
+    // ツールドック: 対話モード中はドロップダウンを畳み1行チップへ縮退する
+    notifyToolMode(mode);
   }
 
   function clearOverlay() {
@@ -158,7 +161,7 @@ export function initGeoTools({ viewer, requestRender, sampleRouteTerrain, getOrd
     // 新しい測定を始めるときは前の結果を消す
     clearAll();
     mode = next;
-    if (resultEl() && !String(next).startsWith("sel-") && !String(next).startsWith("draw-")) {
+    if (next && resultEl() && !String(next).startsWith("sel-") && !String(next).startsWith("draw-")) {
       resultEl().textContent = t(next === "los" ? "tools.losHint" : "tools.measureHint");
     }
     updateModeButtons();
