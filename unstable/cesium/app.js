@@ -8137,22 +8137,75 @@ function setupEvents() {
     setTimeout(() => { shareCopyBtn.textContent = "🔗"; }, 1500);
   });
 
-  // CDN ホスト版 → アプリ版ハンドオフ。backend.js が 127.0.0.1:8510 の
-  // 起動中アプリを検出していれば、現在の ?kasc=/?project= とビューハッシュを
-  // アプリ側オリジンへ載せて開く（アプリ側が同じ .kasc+DATA/ を再取得する）。
-  // 未検出時はインストーラのダウンロード URL を開く
+  // .kasc 行の相対参照(DATA/・./・../・ベアファイル名)を baseUrl 基準の
+  // 絶対 URL へ書き換える。CDN→アプリの hub 書き出し用（参照解決基準が
+  // 配信元 URL からローカル保存先へ変わるため）。URL スロットは `type:`
+  // 直後の先頭2パートのみ対象とし、key=value・scheme 付きは触らない
+  const absolutizeKascRefs = (text, baseUrl) => {
+    const fileExt = "(geojson|json|fgb|flatgeobuf|parquet|gpkg|zip|kml|kmz|csv|tsv|tif|tiff|png|jpe?g|webp|duckdb|qml|xml|html?|glb|gltf|b3dm|3tz|xyz|mvt|pbf|bin)";
+    const refRe = new RegExp("^(\\.{1,2}/|DATA/|[^|\\s<>\"']+\\." + fileExt.slice(1, -1) + ")$", "i");
+    const isRef = (p) => !!p && !/^[a-z][a-z0-9+.-]*:/i.test(p) && !/^[a-z0-9_-]+=/i.test(p) && refRe.test(p);
+    return String(text).split(/\r?\n/).map((line) => {
+      const t = line.trim();
+      if (!t || t.startsWith("#")) return line;
+      const ci = t.indexOf(":");
+      if (ci < 0) return line;
+      const parts = t.slice(ci + 1).split("|");
+      for (let i = 0; i < Math.min(parts.length, 2); i++) {
+        const p = parts[i].trim();
+        if (isRef(p)) {
+          parts[i] = parts[i].replace(p, new URL(p, baseUrl).href);
+          break;
+        }
+      }
+      return t.slice(0, ci + 1) + parts.join("|");
+    }).join("\n");
+  };
+
+  // CDN ホスト版 → アプリ版ハンドオフ（geosuite-hub /canvas/open 経由・
+  // GeoSuite CV ボタンと同一経路）。hub 到達時は .kasc を書き出して
+  // アプリへ渡す（起動中は register+switchProject・未起動は exe 起動・
+  // 未導入は not_installed+インストーラURL）。hub 未導入時は起動中
+  // アプリへの ?kasc=/?project= + ビューハッシュ引き渡しにフォールバック
   const openInAppBtn = document.querySelector("#open-in-app");
-  openInAppBtn?.addEventListener("click", () => {
+  openInAppBtn?.addEventListener("click", async () => {
+    const setGlyph = (g) => { openInAppBtn.textContent = g; setTimeout(() => { openInAppBtn.textContent = "🖥"; }, 1500); };
+    const SETUP_URL = "https://raw.githubusercontent.com/yamamoto-ryuzo/kasugai_canvas/main/download/kasugai_canvas_setup.exe";
+    const hubBase = "http://127.0.0.1:8514";
+    let hubOk = false;
+    try {
+      hubOk = await fetch(`${hubBase}/health`, { signal: AbortSignal.timeout(1500), cache: "no-store" })
+        .then(r => (r.ok ? r.json() : null)).then(d => !!(d && d.hub)).catch(() => false);
+    } catch (e) {}
+    if (hubOk) {
+      try {
+        const share = new URL(window.kasugaiApi.buildShareUrl());
+        const kascUrl = share.searchParams.get("kasc")
+          || `${projectsBaseUrl(share.searchParams.get("project") || "default")}kasugai_canvas.kasc`;
+        const res = await fetch(kascUrl, { cache: "no-store" });
+        if (!res.ok) throw new Error(`kasc fetch ${res.status}`);
+        const name = decodeURIComponent(new URL(kascUrl).pathname.split("/").pop() || "scene").replace(/\.kasc$/i, "") || "scene";
+        const kasc = absolutizeKascRefs(await res.text(), new URL("./", kascUrl).href);
+        const out = await fetch(`${hubBase}/canvas/open`, {
+          method: "POST", headers: { "Content-Type": "text/plain" },
+          body: JSON.stringify({ name, kasc }),
+        }).then(r => r.json().catch(() => null));
+        if (out && out.status === "opened") { setGlyph("✓"); return; }
+        if (out && out.status === "not_installed") {
+          window.open(out.download || SETUP_URL, "_blank");
+          setGlyph("⬇"); return;
+        }
+      } catch (e) { /* hub 旧版・失敗時は下のフォールバックへ */ }
+    }
     const local = backendBaseUrl();
     if (local) {
       const share = new URL(window.kasugaiApi.buildShareUrl());
       window.open(`${local}/cesium/${share.search}${share.hash}`, "_blank");
+      setGlyph("✓");
     } else {
-      window.open("https://raw.githubusercontent.com/yamamoto-ryuzo/kasugai_canvas/main/download/kasugai_canvas_setup.exe", "_blank");
+      window.open(SETUP_URL, "_blank");
+      setGlyph("⬇");
     }
-    const glyph = local ? "✓" : "⬇";
-    openInAppBtn.textContent = glyph;
-    setTimeout(() => { openInAppBtn.textContent = "🖥"; }, 1500);
   });
 
   // スクリーンショット: 地表タイルの読み込みを待ってから render→toBlob で PNG 保存
