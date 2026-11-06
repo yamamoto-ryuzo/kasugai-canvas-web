@@ -4,24 +4,35 @@ import Map from "https://cdn.jsdelivr.net/npm/ol@10.11.0/Map.js";
 import View from "https://cdn.jsdelivr.net/npm/ol@10.11.0/View.js";
 import TileLayer from "https://cdn.jsdelivr.net/npm/ol@10.11.0/layer/Tile.js";
 import VectorLayer from "https://cdn.jsdelivr.net/npm/ol@10.11.0/layer/Vector.js";
+import HeatmapLayer from "https://cdn.jsdelivr.net/npm/ol@10.11.0/layer/Heatmap.js";
+import ImageLayer from "https://cdn.jsdelivr.net/npm/ol@10.11.0/layer/Image.js";
 import XYZ from "https://cdn.jsdelivr.net/npm/ol@10.11.0/source/XYZ.js";
 import TileWMS from "https://cdn.jsdelivr.net/npm/ol@10.11.0/source/TileWMS.js";
 import VectorSource from "https://cdn.jsdelivr.net/npm/ol@10.11.0/source/Vector.js";
+import ClusterSource from "https://cdn.jsdelivr.net/npm/ol@10.11.0/source/Cluster.js";
+import StaticSource from "https://cdn.jsdelivr.net/npm/ol@10.11.0/source/ImageStatic.js";
 import GeoJSON from "https://cdn.jsdelivr.net/npm/ol@10.11.0/format/GeoJSON.js";
 import { fromLonLat, toLonLat, transformExtent, getPointResolution } from "https://cdn.jsdelivr.net/npm/ol@10.11.0/proj.js";
-import { loadKascProject, NON_LAYER_TYPES, parseKasc, resolveKascUrl, camToZoom, zoomToCamHeightView, heightToViewZoom, viewZoomToHeight, groundCenterFromCam, parseUrlView, hasUrlView, writeUrlView, geojsonExtent, splitKascTitle, appendGroupedTitleOptions, syncBasemapList, sanitizeAttributionFragment, layerAttribution, loadKascInfoContent, buildWmtsTileTemplate, rewriteKascVisibility, rewriteKascLineOpt, themeShowSet, kascTitleInTheme, fillThemeSelect, loadKascBookmarks, parseQgisBookmarksXml, qgisBookmarkToCam, downloadQgisBookmarksXml, downloadKascCamLines, projectsBaseUrl, applyPanelTitle, resolveDefaultPointStyle, resolveDefaultLineStyle, resolveDefaultPolygonStyle, defaultPointRadius, cssColorWithAlpha } from "../shared/kasc.js";
+import { loadKascProject, NON_LAYER_TYPES, parseKasc, resolveKascUrl, camToZoom, zoomToCamHeightView, heightToViewZoom, viewZoomToHeight, groundCenterFromCam, parseUrlView, hasUrlView, writeUrlView, geojsonExtent, splitKascTitle, appendGroupedTitleOptions, syncBasemapList, sanitizeAttributionFragment, layerAttribution, loadKascInfoContent, buildWmtsTileTemplate, rewriteKascVisibility, rewriteKascLineOpt, themeShowSet, kascTitleInTheme, fillThemeSelect, loadKascBookmarks, parseQgisBookmarksXml, qgisBookmarkToCam, downloadQgisBookmarksXml, downloadKascCamLines, projectsBaseUrl, applyPanelTitle, resolveDefaultPointStyle, resolveDefaultLineStyle, resolveDefaultPolygonStyle, defaultPointRadius, cssColorWithAlpha, kascOptOn, parseImageOverlay } from "../shared/kasc.js";
 import { createKascFlyPaths } from "../shared/fly-kasc.js";
 import { backendUrl } from "../shared/backend.js";
 import { loadVectorItem, isViewportQueryItem } from "../shared/vector-load.js";
+import { diagnoseHubLayerError } from "../shared/hub-diag.js";
+import { createMinimap } from "../shared/minimap.js";
+import { initGeoTools2d } from "../shared/geo-tools-2d.js";
 import { createAttrWidget, renderAttrContent, attrEntriesFromProps } from "../shared/attr-widget.js";
 import { initAiChat, hasBackendFeature } from "../shared/ai-chat.js";
 import { createPlayerApi } from "../shared/player-api.js";
 import { mountEngineSwitcher } from "../shared/engine-switch.js";
 import { matchSessionState, bindSessionState, applySessionState, sessionBootView } from "../shared/session-state.js";
 import { initPrint, compositeCanvases } from "../shared/print.js";
+import { initNavTools } from "../shared/nav-tools.js";
+import { coordPins } from "../shared/coord-pins.js";
+import { formatLatLng } from "../shared/coords-format.js";
+import { installLocalCrsUI } from "../shared/coords-local.js";
 
 import { groundDeckTileset } from "../shared/deck-ground.js";
-import { buildDeckDrapeLayers, invalidateDeckTerrainCovers } from "../shared/deck-drape.js";
+import { buildDeckDrapeLayers, invalidateDeckTerrainCovers, isGoogle3dTilesUrl, withGoogleTileKey, ensureGoogleTileKeyFetch } from "../shared/deck-drape.js";
 import { qmlLegendSwatchDataUrl, defaultVectorLegendSpec } from "../shared/qml-2d.js";
 import Style from "https://cdn.jsdelivr.net/npm/ol@10.11.0/style/Style.js";
 import Fill from "https://cdn.jsdelivr.net/npm/ol@10.11.0/style/Fill.js";
@@ -33,9 +44,13 @@ import { loadCompiledQml, olQmlStyleFunction, compiledScaleToResRange, installLa
 import { defaults as defaultControls } from "https://cdn.jsdelivr.net/npm/ol@10.11.0/control/defaults.js";
 import ScaleLine from "https://cdn.jsdelivr.net/npm/ol@10.11.0/control/ScaleLine.js";
 import MousePosition from "https://cdn.jsdelivr.net/npm/ol@10.11.0/control/MousePosition.js";
+import DoubleClickZoom from "https://cdn.jsdelivr.net/npm/ol@10.11.0/interaction/DoubleClickZoom.js";
 import { createStringXY } from "https://cdn.jsdelivr.net/npm/ol@10.11.0/coordinate.js";
+import { diagnoseHubLayerError } from "../shared/hub-diag.js";
+import { createMinimap } from "../shared/minimap.js";
+import { initGeoTools2d } from "../shared/geo-tools-2d.js";
 
-const VECTOR_TYPES = new Set(["geojson", "layer", "geoparquet", "parquet", "flatgeobuf", "fgb", "gpkg", "geopackage", "csv", "tsv", "duckdb", "sql"]);
+const VECTOR_TYPES = new Set(["geojson", "layer", "geoparquet", "parquet", "flatgeobuf", "fgb", "gpkg", "geopackage", "csv", "tsv", "duckdb", "sql", "kml", "kmz", "wfs", "shp", "shapefile"]);
 // ⏷フィルタ編集の対象（where= またはクエリ全文の再読み込みが効く形式）
 const QUERY_TYPES = new Set(["gpkg", "geopackage", "duckdb", "sql"]);
 
@@ -217,7 +232,7 @@ const deckDefs = new globalThis.Map(); // lid("deck-N") → { item, url, opacity
 // 3D Tiles ドレープ設定（deck.gl TerrainExtension。
 // Cesium 版のドレープ対象地形=3D Tiles（drape-terrain-tiles3d・
 // basemap-drape-3dtiles・drape-xyz/​geojson-tiles3d）に相当）
-const drapeTiles3d = { enabled: true, basemap: true, xyz: true, vector: true };
+const drapeTiles3d = { enabled: true, basemap: true, xyz: true, vector: true, google: false };
 
 async function ensureDeck() {
   const deck = await loadDeck();
@@ -242,7 +257,7 @@ async function ensureDeck() {
 // （地形ソースが無いと drape 先が存在しない）
 function deckDrapeActive() {
   if (!drapeTiles3d.enabled) return false;
-  for (const def of deckDefs.values()) if (def.item.visible !== false) return true;
+  for (const def of deckDefs.values()) if (def.item.visible !== false && (drapeTiles3d.google || !isGoogle3dTilesUrl(def.url))) return true;
   return false;
 }
 
@@ -282,15 +297,17 @@ function syncDeckLayers() {
       visible: def.item.visible !== false,
       opacity: def.opacity,
       // ドレープ有効時は 3D Tiles を地形ソース化する（drape レイヤーの貼り付け先）
-      operation: drapeOn ? "terrain+draw" : "draw",
+      operation: drapeOn && (drapeTiles3d.google || !isGoogle3dTilesUrl(def.url)) ? "terrain+draw" : "draw",
       pickable: true,
       onTilesetLoad: tileset => {
         try {
           const c = tileset?.cartographicCenter;
           if (Array.isArray(c) && !def.item._env) def.item._center = [c[0], c[1]];
           // テレイン不在のためバウンディングボリューム最小高で z=0 平面へ接地させる
-          // （.kasc opts: ground=off で無効化、zoffset=<m> で手動補正）
-          groundDeckTileset(tileset, def.item.opts);
+          // （.kasc opts: ground=off で無効化、zoffset=<m> で手動補正。
+          //   Google Photorealistic はジオリファレンス済みかつ全球規模の
+          //   boundingVolume が接地高推定を狂わせるため対象外）
+          if (!isGoogle3dTilesUrl(def.url)) groundDeckTileset(tileset, def.item.opts);
         } catch (_) {}
       },
     };
@@ -378,43 +395,88 @@ async function buildLayer(item, baseUrl, preloaded) {
     };
   }
   if (item.type === "wms" || item.type === "wmts") return buildOgcRasterLayer(item, baseUrl);
+  if (item.type === "image") {
+    // ジオリファレンス画像オーバーレイ(現場写真・紙図面)。corners= は外接矩形へ正規化
+    const ov = parseImageOverlay(item);
+    let env = ov.bbox;
+    if (!env && ov.corners) {
+      const lons = ov.corners.map(c => c[0]), lats = ov.corners.map(c => c[1]);
+      env = [Math.min(...lons), Math.min(...lats), Math.max(...lons), Math.max(...lats)];
+    }
+    if (!env) throw new Error("image: bbox= または corners= の指定が必要です");
+    const layer = new ImageLayer({
+      source: new StaticSource({
+        url: resolveKascUrl(item.url, baseUrl),
+        imageExtent: [...fromLonLat([env[0], env[1]]), ...fromLonLat([env[2], env[3]])],
+        attributions: layerAttribution(item) || undefined,
+        crossOrigin: "anonymous",
+      }),
+      opacity: Number(item.opts?.opacity ?? 1),
+    });
+    layer.set("kascEnv", { west: env[0], south: env[1], east: env[2], north: env[3] });
+    return layer;
+  }
   const source = xyzSource(item, baseUrl);
   if (VECTOR_TYPES.has(item.type)) {
     const loaded = preloaded || await loadVectorItem(item, baseUrl, getViewBounds());
     const geojson = loaded.geojson;
     item._geojson = geojson; // 3D Tiles ドレープコピー・属性テーブルの描画ソースとして保持
     item._viewportQuery = !!loaded.viewportQuery;
-    const layer = new VectorLayer({
-      source: new VectorSource({
-        attributions: layerAttribution(item) || undefined,
-        features: new GeoJSON().readFeatures(geojson, {
-          featureProjection: "EPSG:3857",
-          dataProjection: "EPSG:4326",
-        }),
-      }),
+    const features = new GeoJSON().readFeatures(geojson, {
+      featureProjection: "EPSG:3857",
+      dataProjection: "EPSG:4326",
     });
+    const vectorSource = new VectorSource({
+      attributions: layerAttribution(item) || undefined,
+      features,
+    });
+    const hasPoints = geojson.features?.some(f => /point/i.test(f?.geometry?.type || ""));
+    const wantCluster = hasPoints && kascOptOn(item.opts?.cluster);
+    const wantHeat = hasPoints && kascOptOn(item.opts?.heat ?? item.opts?.heatmap);
+    const layer = wantHeat
+      ? new HeatmapLayer({ source: vectorSource, blur: 15, radius: 10 })
+      : new VectorLayer({
+          source: wantCluster ? new ClusterSource({ source: vectorSource, distance: 40 }) : vectorSource,
+        });
     const env = geojsonExtent(geojson);
     if (env) layer.set("kascEnv", env);
+    // クラスタスタイル: 複数地物は件数バッジ、単体は素のスタイル関数へ委譲する
+    const clusterStyleFn = baseFn => feature => {
+      const inner = feature.get("features");
+      if (inner && inner.length > 1) {
+        const n = inner.length;
+        const color = n < 10 ? "#3a7bd5" : n < 100 ? "#e67e22" : "#c0392b";
+        return new Style({
+          image: new CircleStyle({
+            radius: Math.min(16 + Math.floor(Math.log10(n) * 4), 26),
+            fill: new Fill({ color: color + "dd" }),
+            stroke: new Stroke({ color: "#ffffff", width: 1.5 }),
+          }),
+          text: new Text({ text: String(n), fill: new Fill({ color: "#ffffff" }), scale: 1.1 }),
+        });
+      }
+      return baseFn(inner ? inner[0] : feature);
+    };
+    let baseStyleFn = makeDefaultVectorStyle();
     if (item.opts?.style) {
       try {
         const compiled = await loadCompiledQml(item.opts.style, baseUrl);
         item._qml = compiled;
         const base = olQmlStyleFunction(compiled, { Style, Fill, Stroke, Circle: CircleStyle, Icon, Text });
         // 凡例シンボル単位の表示切替: 先頭シンボル名が hidden 集合にある地物は描画しない
-        layer.setStyle(f => {
+        baseStyleFn = f => {
           const names = compiled.namesFor?.(f.getProperties() || {});
           if (names?.length && item._legendHidden?.has(names[0])) return null;
           return base(f);
-        });
+        };
         const range = compiledScaleToResRange(compiled);
         if (range) {
           layer.setMinResolution(range.minRes);
           if (Number.isFinite(range.maxRes)) layer.setMaxResolution(range.maxRes);
         }
       } catch (e) { console.warn("QML 適用失敗:", item.opts.style, e); }
-    } else {
-      layer.setStyle(makeDefaultVectorStyle());
     }
+    if (!wantHeat) layer.setStyle(wantCluster ? clusterStyleFn(baseStyleFn) : baseStyleFn);
     syncDeckLayers(); // 読込完了でドレープコピー対象(_geojson)が増えた場合に反映
     return layer;
   }
@@ -858,8 +920,10 @@ async function ensureEntryLoaded(entry) {
   } catch (err) {
     if (seq !== renderSeq) return false;
     entry.failed = true;
-    entry.error = err?.message || err;
-    currentUnsupported.push({ ...entry.item, type: `${entry.item.type}(読込失敗)` });
+    entry.error = (await diagnoseHubLayerError(entry.item, err))?.message || err?.message || err;
+    if (!currentUnsupported.some(u => u._idx != null && u._idx === entry.item._idx && /\(読込失敗\)$/.test(u.type))) {
+      currentUnsupported.push({ ...entry.item, type: `${entry.item.type}(読込失敗)` });
+    }
   }
   entry.pending = false;
   entry._loading = false;
@@ -980,8 +1044,44 @@ function applySwitchRestore(sw) {
 
 // .kasc 文書(doc)を描画する。loadProject(ファイル読込)と
 // インスペクター(テキスト適用)の共通経路
+
+// ---- Google Maps（Maps API キー + Photorealistic 3D Tiles） ----
+// 設定で ON かつキー保存済みならレイヤ一覧へ自動追加する（.kasc 宣言済みなら重複しない）
+const GOOGLE_3DTILES_ID = "google-photorealistic-3dtiles";
+const GOOGLE_3DTILES_URL = "https://tile.googleapis.com/v1/3dtiles/root.json";
+const google3dTilesEnabled = () =>
+  localStorage.getItem("googleMaps3dTiles") === "1" && !!localStorage.getItem("googleMapsApiKey");
+// Google 3D Tiles(tileset.json・タイル本体とも key= 必須)向けに fetch フックを仕込む
+ensureGoogleTileKeyFetch();
+let lastDoc = null;
+
+// doc.layers へ auto 印の Google 3D 行を注入する（既存の auto 行は張り替え、
+// 表示状態だけは直前のものを引き継ぐ）
+function injectGoogle3dTilesItem(doc) {
+  const prev = (doc.layers || []).find(i => i.id === GOOGLE_3DTILES_ID);
+  doc.layers = (doc.layers || []).filter(i => i.id !== GOOGLE_3DTILES_ID);
+  if (!google3dTilesEnabled()) return;
+  if (doc.layers.some(i => i.type === "3dtiles" && isGoogle3dTilesUrl(i.url))) return;
+  doc.layers.unshift({
+    id: GOOGLE_3DTILES_ID, type: "3dtiles",
+    title: "Google Photorealistic 3D Tiles", url: GOOGLE_3DTILES_URL,
+    visible: prev ? prev.visible !== false : true,
+    _idx: -Number.MAX_SAFE_INTEGER,
+  });
+}
+
+async function rerenderProjectKeepView() {
+  if (!lastDoc) return;
+  const v = map.getView();
+  const c = v.getCenter(), z = v.getZoom(), r = v.getRotation();
+  await renderProject(currentProjectId, lastBaseUrl, lastDoc);
+  v.setCenter(c); v.setZoom(z); v.setRotation(r);
+}
+
 async function renderProject(loadedId, baseUrl, doc, manifest) {
   const seq = ++renderSeq;
+  lastDoc = doc;
+  injectGoogle3dTilesItem(doc);
   clearTimeout(progressHideTimer);
   if (progressEl) progressEl.hidden = true;
   map.getLayers().clear();
@@ -1121,7 +1221,7 @@ async function renderProject(loadedId, baseUrl, doc, manifest) {
     } catch (err) {
       if (seq !== renderSeq) return;
       entry.failed = true;
-      entry.error = err?.message || err;
+      entry.error = (await diagnoseHubLayerError(item, err))?.message || err?.message || err;
       unsupported.push({ ...item, type: `${item.type}(読込失敗)` });
     }
     entry.pending = false;
@@ -1207,6 +1307,10 @@ async function renderProject(loadedId, baseUrl, doc, manifest) {
     }
     if (!count) panel.searchResults.textContent = "該当なし";
   };
+
+  // プロジェクト再描画で map.getLayers().clear された分を含め、
+  // 共有ストアの状態へ座標ピンレイヤーを再同期する
+  coordPins.refresh();
 }
 
 // エントリのデータを現在の表示範囲・条件で再読み込みする。
@@ -1274,6 +1378,83 @@ function requeryViewportLayers(entries) {
   }
 }
 
+// ---- ツール（計測・標高断面・見通し・緯度経度グリッド・エクスポート）----
+const toolFmt = new GeoJSON();
+const toolSrc = new VectorSource();
+const gratSrc = new VectorSource();
+const TOOL_LINE_COLORS = { line: "#ffff00", "los-line": "#ffa500", "los-ok": "#32cd32", "los-bad": "#ff0000", grat: "#888888" };
+function toolStyleFn(feature) {
+  const kind = feature.get("kind") || "line";
+  const gt = feature.getGeometry().getType();
+  const styles = [];
+  if (kind === "poly" || /Polygon/.test(gt)) {
+    styles.push(new Style({ fill: new Fill({ color: "rgba(255,255,0,.25)" }), stroke: new Stroke({ color: "#ffff00", width: 2 }) }));
+  } else if (/LineString|MultiLineString/.test(gt)) {
+    styles.push(new Style({ stroke: new Stroke({ color: TOOL_LINE_COLORS[kind] || "#ffff00", width: kind === "grat" ? 1 : 3, opacity: kind === "grat" ? 0.55 : 1 }) }));
+  } else {
+    if (kind !== "label" && kind !== "grat-label") {
+      const colors = { "los-block": "#ff0000", hover: "#00bfff" };
+      styles.push(new Style({ image: new CircleStyle({ radius: 5, fill: new Fill({ color: feature.get("color") || colors[kind] || "#ffff00" }), stroke: new Stroke({ color: "#000", width: 1.5 }) }) }));
+    }
+    if (feature.get("text")) {
+      styles.push(new Style({ text: new Text({ text: String(feature.get("text")), font: "11px sans-serif", fill: new Fill({ color: "#fff" }), stroke: new Stroke({ color: "#000", width: 3 }), offsetY: -12 }) }));
+    }
+  }
+  return styles;
+}
+map.addLayer(new VectorLayer({ source: gratSrc, style: toolStyleFn, zIndex: 900 }));
+map.addLayer(new VectorLayer({ source: toolSrc, style: toolStyleFn, zIndex: 950 }));
+const olOverlayOf = src => ({
+  update: fc => {
+    src.clear();
+    if (fc?.features?.length) {
+      src.addFeatures(toolFmt.readFeatures(fc, { featureProjection: "EPSG:3857", dataProjection: "EPSG:4326" }));
+    }
+  },
+});
+const viewBounds4326 = () => {
+  try {
+    if (!map.getSize()) return null;
+    const e = transformExtent(map.getView().calculateExtent(map.getSize()), map.getView().getProjection(), "EPSG:4326");
+    return { west: e[0], south: e[1], east: e[2], north: e[3] };
+  } catch (_) { return null; }
+};
+
+const geoTools = initGeoTools2d({
+  panel: "#pane-tools",
+  overlay: olOverlayOf(toolSrc),
+  graticuleOverlay: olOverlayOf(gratSrc),
+  getBounds: viewBounds4326,
+  setCursor: c => { map.getViewport().style.cursor = c; },
+  setInteractive: on => {
+    map.getInteractions().forEach(i => { if (i.constructor?.name === "DoubleClickZoom") i.setActive(!on); });
+  },
+  getOrderedLayerItems: () => layerEntries.map((e, i) => (e.item.id ||= String(i), e.item)),
+  isVectorLayerItem: item => !!item && VECTOR_TYPES.has(item.type),
+  isQueryLayerItem: item => !!item && (item._viewportQuery || isViewportQueryItem(item)),
+  getLayerGeoJson: id => {
+    const e = layerEntries.find(en => en.item.id === id);
+    if (!e) return null;
+    const src = e.layer?.getSource?.();
+    if (!src?.getFeatures) return e.item._geojson || null;
+    return toolFmt.writeFeaturesObject(src.getFeatures(), { featureProjection: "EPSG:3857", dataProjection: "EPSG:4326" });
+  },
+});
+
+// ミニマップ（表示>一般トグル。範囲矩形+クリック移動）
+const minimap = createMinimap({
+  container: "#minimap",
+  checkbox: "#display-minimap",
+  tileUrl: () => currentBaseEntries[Number(panel.basemapSelect?.value ?? 0)]?.item?.url || "",
+  getBounds: () => {
+    const b = viewBounds4326();
+    return b ? [[b.south, b.west], [b.north, b.east]] : null;
+  },
+  flyTo: ({ lng, lat }) => map.getView().animate({ center: fromLonLat([lng, lat]), duration: 400 }),
+});
+map.on("movestart", minimap.scheduleUpdate);
+map.on("postrender", minimap.scheduleUpdate);
+
 // 3D Tiles ドレープ品質: ズーム変化で terrain カバー FBO を現在解像度へ作り直す
 let deckCoverZoom = -1;
 map.on("moveend", () => {
@@ -1283,19 +1464,116 @@ map.on("moveend", () => {
   invalidateDeckTerrainCovers(deckInst);
 });
 
+// ---- ツール（計測・標高断面・見通し・緯度経度グリッド・エクスポート）----
+// オーバーレイは VectorLayer へ FC を流し、kind プロパティでスタイル分岐する
+const toolFmt = new GeoJSON();
+const toolSrc = new VectorSource();
+const gratSrc = new VectorSource();
+const toolStyleFn = feature => {
+  const kind = feature.get("kind");
+  const text = feature.get("text");
+  if (kind === "poly") {
+    return new Style({ fill: new Fill({ color: "rgba(255,255,0,0.25)" }), stroke: new Stroke({ color: "#ffff00", width: 2 }) });
+  }
+  if (kind === "point" || kind === "los-block" || kind === "hover") {
+    const color = kind === "los-block" ? "#ff0000" : kind === "hover" ? "#00bfff" : "#ffff00";
+    return new Style({ image: new CircleStyle({ radius: 5, fill: new Fill({ color }), stroke: new Stroke({ color: "#000000", width: 1.5 }) }) });
+  }
+  if (kind === "grat") return new Style({ stroke: new Stroke({ color: "rgba(136,136,136,0.55)", width: 1 }) });
+  if (text) {
+    return new Style({ text: new Text({ text: String(text), offsetY: kind === "grat-label" ? 0 : -12, fill: new Fill({ color: "#ffffff" }), stroke: new Stroke({ color: "#000000", width: 3 }) }) });
+  }
+  const color = kind === "los-ok" ? "#32cd32" : kind === "los-bad" ? "#ff0000" : kind === "los-line" ? "#ffa500" : "#ffff00";
+  return new Style({ stroke: new Stroke({ color, width: 3 }) });
+};
+const toolLayer = new VectorLayer({ source: toolSrc, style: toolStyleFn, zIndex: 99 });
+const gratLayer = new VectorLayer({ source: gratSrc, style: toolStyleFn, zIndex: 98 });
+map.addLayer(gratLayer);
+map.addLayer(toolLayer);
+const toolOverlayOf = src => ({
+  update: fc => {
+    try {
+      src.clear();
+      src.addFeatures(toolFmt.readFeatures(fc, { featureProjection: "EPSG:3857", dataProjection: "EPSG:4326" }));
+    } catch (_) {}
+  },
+});
+
+const geoTools = initGeoTools2d({
+  panel: "#pane-tools",
+  overlay: toolOverlayOf(toolSrc),
+  graticuleOverlay: toolOverlayOf(gratSrc),
+  getBounds: () => {
+    const b = getViewBounds();
+    if (!b) return null;
+    const west = b.ranges[0]?.west;
+    const east = b.ranges[b.ranges.length - 1]?.east;
+    return { west, south: b.south, east, north: b.north };
+  },
+  setCursor: c => { map.getTargetElement().style.cursor = c; },
+  setInteractive: on => {
+    map.getInteractions().forEach(i => { if (i instanceof DoubleClickZoom) i.setActive(!on); });
+  },
+  getOrderedLayerItems: () => layerEntries.map((e, i) => (e.item.id ||= String(i), e.item)),
+  isVectorLayerItem: item => !!item && VECTOR_TYPES.has(item.type),
+  isQueryLayerItem: item => !!item && (item._viewportQuery || isViewportQueryItem(item)),
+  getLayerGeoJson: id => layerEntries.find(e => e.item.id === id)?.item._geojson || null,
+});
+
+// ミニマップ（表示>一般トグル。範囲矩形+クリック移動）
+const minimap = createMinimap({
+  container: "#minimap",
+  checkbox: "#display-minimap",
+  tileUrl: () => currentBaseEntries[Number(panel.basemapSelect?.value ?? 0)]?.item?.url || "",
+  getBounds: () => {
+    const b = getViewBounds();
+    if (!b) return null;
+    const west = b.ranges[0]?.west;
+    const east = b.ranges[b.ranges.length - 1]?.east;
+    return [[b.south, west], [b.north, east]];
+  },
+  flyTo: ({ lng, lat }) => map.getView().animate({ center: fromLonLat([lng, lat]), duration: 400 }),
+});
+map.getView().on("change:center", minimap.scheduleUpdate);
+
 // 表示範囲の移動に追従して URL 反映 + 再クエリする
 let requeryTimer = null;
 map.on("moveend", () => {
   // 初期URLを読み取る前の初回moveendでパーマリンクを上書きしないよう消費済みを待つ
   if (urlViewConsumed) writeUrlView(mapViewToUrl(), lastKascUrl ? undefined : currentProjectId);
+  minimap.scheduleUpdate();
+  geoTools.scheduleGraticule();
   const targets = layerEntries.filter(e => e.item._viewportQuery && e.item.visible !== false);
-  if (!targets.length) return;
+  // bbox=auto / :bbox の初回読込に失敗したレイヤーは、移動後の表示範囲で自動リトライする
+  // （Cesium 版 reloadFailedVectorLayer 相当。失敗 spec は entry.failed が担う）
+  const retry = layerEntries.filter(e => e.item.visible !== false && e.failed && !e.pending && !e._loading && isViewportQueryItem(e.item));
+  if (!targets.length && !retry.length) return;
   clearTimeout(requeryTimer);
-  requeryTimer = setTimeout(() => requeryViewportLayers(targets), 400);
+  requeryTimer = setTimeout(() => {
+    if (targets.length) requeryViewportLayers(targets);
+    for (const entry of retry) {
+      entry.deferred = true; // ensureEntryLoaded 経路で再マウントする
+      entry.failed = false;
+      void ensureEntryLoaded(entry);
+    }
+  }, 400);
+});
+
+// ツールモード: ダブルクリック確定とラバーバンドプレビュー
+map.on("dblclick", e => { if (geoTools.handleDoubleClick()) e.preventDefault(); });
+map.on("pointermove", e => {
+  if (e.dragging) return;
+  const ll = toLonLat(e.coordinate);
+  geoTools.handleMouseMove({ lng: ll[0], lat: ll[1] });
 });
 
 // 地物クリック → 属性タブを自動で開いて属性を表示(Cesium 版 attr-panel と同様)
 map.on("singleclick", e => {
+  // 計測・断面・見通しツールのモードがアクティブなら属性ピックより優先して頂点拾いに使う
+  {
+    const ll = toLonLat(e.coordinate);
+    if (geoTools.handleClick({ lng: ll[0], lat: ll[1] })) return;
+  }
   // 重なった地物を全件拾い、属性タブへ表示する
   const picked = [];
   map.forEachFeatureAtPixel(e.pixel, (f, l) => { picked.push({ f, l }); }, { hitTolerance: 5 });
@@ -1427,12 +1705,19 @@ document.querySelector("#basemap-globe").addEventListener("click", openGoogleEar
   });
 
   const scaleCtl = new ScaleLine({ units: "metric", className: "ol-scale-line kasc-scale" });
-  const coordsCtl = new MousePosition({ className: "ol-mouse-position map-coords", coordinateFormat: createStringXY(5), projection: "EPSG:4326" });
+  const coordsCtl = new MousePosition({ className: "ol-mouse-position map-coords", coordinateFormat: c => formatLatLng(c[1], c[0]), projection: "EPSG:4326" });
   map.addControl(scaleCtl);
   map.addControl(coordsCtl);
   document.querySelector("#display-scalebar")?.addEventListener("change", e => {
     if (e.target.checked) map.addControl(scaleCtl);
     else map.removeControl(scaleCtl);
+  });
+  installLocalCrsUI({
+    anchor: document.querySelector("#coords-datum"),
+    pickLatLng: cb => map.once("click", e => {
+      const ll = toLonLat(e.coordinate);
+      cb({ lat: ll[1], lon: ll[0] });
+    }),
   });
   document.querySelector("#display-coords")?.addEventListener("change", e => {
     if (e.target.checked) map.addControl(coordsCtl);
@@ -1457,9 +1742,24 @@ document.querySelector("#basemap-globe").addEventListener("click", openGoogleEar
     ["#drape-tiles3d-basemap", v => { drapeTiles3d.basemap = v; }],
     ["#drape-tiles3d-xyz", v => { drapeTiles3d.xyz = v; }],
     ["#drape-tiles3d-vector", v => { drapeTiles3d.vector = v; }],
+    ["#drape-tiles3d-google", v => { drapeTiles3d.google = v; }],
   ].forEach(([sel, set]) => {
     document.querySelector(sel)?.addEventListener("change", e => { set(e.target.checked); syncDeckLayers(); });
   });
+
+  // Google Maps 設定（Maps API キー + Photorealistic 3D Tiles 表示）
+  const gmapsKeyInput = document.querySelector("#gmaps-api-key");
+  const gmapsToggle = document.querySelector("#gmaps-3dtiles-toggle");
+  const gmapsStatus = document.querySelector("#gmaps-status");
+  if (gmapsKeyInput) gmapsKeyInput.value = localStorage.getItem("googleMapsApiKey") || "";
+  if (gmapsToggle) gmapsToggle.checked = localStorage.getItem("googleMaps3dTiles") === "1";
+  document.querySelector("#gmaps-save")?.addEventListener("click", () => {
+    localStorage.setItem("googleMapsApiKey", gmapsKeyInput?.value.trim() || "");
+    localStorage.setItem("googleMaps3dTiles", gmapsToggle?.checked ? "1" : "0");
+    if (gmapsStatus) gmapsStatus.textContent = "保存しました";
+    void rerenderProjectKeepView();
+  });
+
 }
 
 // ---- テーマ（theme: 行による可視性プリセット。QGIS マップテーマ相当） ----
@@ -1569,7 +1869,7 @@ async function saveToDataDir(name, content) {
       try {
         await saveToDataDir(file.name, file);
         const ext = file.name.toLowerCase().split(".").pop() || "";
-        const type = { geojson: "geojson", json: "geojson", gpkg: "gpkg", geopackage: "gpkg", fgb: "flatgeobuf", parquet: "geoparquet" }[ext];
+        const type = { geojson: "geojson", json: "geojson", gpkg: "gpkg", geopackage: "gpkg", fgb: "flatgeobuf", parquet: "geoparquet", kml: "kml", kmz: "kmz", shp: "shp", zip: "shp", csv: "csv", tsv: "tsv" }[ext];
         if (type) {
           const title = file.name.replace(/\.[^.]+$/, "");
           inspectorInput.value = inspectorInput.value.replace(/\s*$/, "") + `\n${type}:${title} | DATA/${file.name}\n`;
@@ -1654,10 +1954,12 @@ window.kasugaiApi = createPlayerApi({
     if (!src?.getFeatures) return entry.item._geojson || null;
     return new GeoJSON().writeFeaturesObject(src.getFeatures(), { featureProjection: "EPSG:3857", dataProjection: "EPSG:4326" });
   },
+  geoTools: () => geoTools,
   setBaseEntryVisible: (entry, on) => { entry.layer?.setVisible?.(on); updateMapAttribution(); },
   getFlyPaths: kascFlyPaths.getFlyPaths,
   persistFlyPath: kascFlyPaths.persistFlyPath,
   syncFlyPathLine: kascFlyPaths.syncFlyPathLine,
+  geoTools: () => geoTools,
 });
 mountEngineSwitcher(document.querySelector("#engines"), "openlayers");
 // カレント状態ファイル(Cesium規約)へ現在値を反映する(変化イベント駆動)
@@ -1681,3 +1983,79 @@ initPrint({
   },
   getNorthAngleDeg: () => map.getView().getRotation() * 180 / Math.PI,
 });
+
+// ---- ナビゲーション共通ツール（shared/nav-tools.js）----
+import("https://cdn.jsdelivr.net/npm/ol@10.11.0/Overlay.js").then(() => {});
+initNavTools({
+  el: document.getElementById("map"),
+  getView: () => { const c = toLonLat(map.getView().getCenter()); return { lat: c[1], lng: c[0], zoom: map.getView().getZoom(), rotation: map.getView().getRotation() }; },
+  setView: v => { map.getView().setCenter(fromLonLat([v.lng, v.lat])); map.getView().setZoom(v.zoom); map.getView().setRotation(v.rotation || 0); },
+  viewsEqual: (x, y) => x && y && Math.abs(x.lat - y.lat) < 1e-7 && Math.abs(x.lng - y.lng) < 1e-7 && Math.abs((x.zoom ?? 0) - (y.zoom ?? 0)) < 0.001 && Math.abs((x.rotation ?? 0) - (y.rotation ?? 0)) < 0.01,
+  flyTo: (lat, lng) => map.getView().animate({ center: fromLonLat([lng, lat]), duration: 500 }),
+  fitBounds: (w, s, e, n) => map.getView().fit(transformExtent([w, s, e, n], "EPSG:4326", map.getView().getProjection()), { duration: 300 }),
+  onMoveStart: cb => map.on("movestart", cb),
+  onMoveEnd: cb => map.on("moveend", cb),
+  toLatLng: (x, y) => { const c = map.getCoordinateFromPixel([x, y]); if (!c) return null; const ll = toLonLat(c); return { lat: ll[1], lng: ll[0] }; },
+  setMarker: ll => {
+    if (initNavTools._ov) { map.removeOverlay(initNavTools._ov); initNavTools._ov = null; }
+    if (ll) {
+      const el = document.createElement("div");
+      el.textContent = "📍"; el.style.cssText = "font-size:22px;pointer-events:none;text-shadow:0 0 3px #fff;";
+      import("https://cdn.jsdelivr.net/npm/ol@10.11.0/Overlay.js").then(m => {
+        initNavTools._ov = new m.default({ element: el, position: fromLonLat([ll.lng, ll.lat]), positioning: "bottom-center", stopEvent: false });
+        map.addOverlay(initNavTools._ov);
+      });
+    }
+  },
+  capturePng: () => new Promise(res => {
+    map.once("rendercomplete", () => { const c = compositeCanvases(map.getViewport()); c ? c.toBlob(res, "image/png") : res(null); });
+    map.renderSync();
+  }),
+});
+
+// ---- 座標ピン（shared/coord-pins.js の共有 GeoJSON を一般レイヤーとして描画）----
+// layerEntries に正規エントリを持つため、レイヤ一覧・属性表示(クリック)・
+// 属性検索・属性一覧ウィジェットが通常レイヤーと同じ経路で使える
+let pinEntry = null;
+const pinSource = new VectorSource();
+const pinLayer = new VectorLayer({
+  source: pinSource,
+  style: f => new Style({
+    image: new CircleStyle({
+      radius: 7,
+      fill: new Fill({ color: f.get("marker-color") || "#e33d3d" }),
+      stroke: new Stroke({ color: "#fff", width: 2 }),
+    }),
+  }),
+});
+const pinLayerOnMap = () => map.getLayers().getArray().includes(pinLayer);
+function syncCoordPinLayer(fc) {
+  // プロジェクト再描画(map.getLayers().clear)で消えた分を含め、ストアの状態へ収束させる
+  if (pinEntry && !layerEntries.includes(pinEntry)) {
+    pinEntry = null;
+    if (pinLayerOnMap()) map.removeLayer(pinLayer);
+  }
+  if (!fc.features.length) {
+    if (pinEntry) {
+      const i = layerEntries.indexOf(pinEntry);
+      if (i >= 0) layerEntries.splice(i, 1);
+      pinEntry = null;
+      renderLayerRows(layerEntries, currentUnsupported);
+    }
+    if (pinLayerOnMap()) map.removeLayer(pinLayer);
+    pinSource.clear();
+    return;
+  }
+  if (!pinEntry) {
+    pinEntry = { item: { title: "座標ピン", type: "geojson", visible: true }, layer: pinLayer, pending: false, opa: 1 };
+    layerEntries.unshift(pinEntry);
+    renderLayerRows(layerEntries, currentUnsupported);
+  }
+  pinEntry.item._geojson = fc;
+  const env = geojsonExtent(fc);
+  if (env) { pinEntry.item._env = env; pinLayer.set("kascEnv", env); }
+  pinSource.clear();
+  pinSource.addFeatures(new GeoJSON().readFeatures(fc, { featureProjection: "EPSG:3857", dataProjection: "EPSG:4326" }));
+  if (!pinLayerOnMap()) insertEntryLayer(pinEntry, layerEntries.indexOf(pinEntry));
+}
+coordPins.setRenderer(syncCoordPinLayer);

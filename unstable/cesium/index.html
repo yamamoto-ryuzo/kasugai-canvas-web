@@ -43,6 +43,7 @@
             <div class="project-row">
               <select id="project-select" aria-label="プロジェクト" data-i18n-attr="aria-label:settings.project.label"></select>
               <button id="share-copy" class="panel-manage" type="button" title="現在位置URLをコピー" data-i18n-attr="title:share.copy;aria-label:share.copy">🔗</button>
+              <button id="screenshot-button" class="panel-manage" type="button" title="画面をPNG画像で保存" data-i18n-attr="title:share.screenshot;aria-label:share.screenshot">📷</button>
               <button id="print-open" class="panel-manage" type="button" title="印刷" data-i18n-attr="title:print.open;aria-label:print.open"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M2.5 8a.5.5 0 1 0 0-1 .5.5 0 0 0 0 1"/><path d="M5 1a2 2 0 0 0-2 2v2H2a2 2 0 0 0-2 2v3a2 2 0 0 0 2 2h1v1a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2v-1h1a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-1V3a2 2 0 0 0-2-2zM4 3a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2H4zm1 5a2 2 0 0 0-2 2v1H2a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1h-1v-1a2 2 0 0 0-2-2zm7 2v3a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1"/></svg></button>
             </div>
             <nav class="panel-tabs" aria-label="Plugin panels">
@@ -53,6 +54,7 @@
               <button class="panel-tab" type="button" data-panel="camera-panel" data-i18n="tab.camera">カメラ</button>
               <button class="panel-tab" type="button" data-panel="display-panel" data-i18n="tab.display">表示</button>
               <button class="panel-tab" type="button" data-panel="info-panel" data-i18n="tab.info">情報</button>
+              <button class="panel-tab" type="button" data-panel="tools-panel" data-i18n="tab.tools">ツール</button>
             </nav>
             <section id="layers-panel" class="plugin-panel active">
               <select id="theme-select" hidden></select>
@@ -162,8 +164,13 @@
                 <span class="field-label" data-i18n="settings.layer.drapeBasemap">ベースマップ</span>
                 <div class="drape-sub-group">
                   <label><input id="basemap-drape-dem" type="checkbox" checked /> DEM</label>
-                  <label><input id="basemap-drape-3dtiles" type="checkbox" /> 3D Tiles</label>
+                  <label><input id="basemap-drape-3dtiles" type="checkbox" checked /> 3D Tiles</label>
                 </div>
+                <span class="field-label" data-i18n="settings.layer.drapeGoogle3d">Google 3D Tiles</span>
+                <div class="drape-sub-group">
+                  <label><input id="drape-google-3dtiles" type="checkbox" /> <span data-i18n="settings.layer.drapeGoogle3dTarget">ドレープ対象に含める</span></label>
+                </div>
+                <p class="hint" data-i18n-html="settings.layer.drapeGoogle3dHint">Google 3D Tiles へのドレープは他の 3D Tiles と分離できないため、このスイッチは →3D Tiles の各設定と同じ状態に同期します。</p>
                 <span class="field-label">XYZ</span>
                 <div class="drape-sub-group">
                   <label><input id="drape-xyz-dem" type="checkbox" checked /> DEM</label>
@@ -246,7 +253,23 @@
                 <div class="terrain-options">
                   <label><input id="display-scalebar" type="checkbox" checked /><span data-i18n="display.scalebar"> スケールバーを表示</span></label>
                   <label><input id="display-coords" type="checkbox" checked /><span data-i18n="display.coords"> カーソル座標を表示</span></label>
+                  <label class="field-label" for="coords-format" data-i18n="display.coordsFormat">座標表示形式</label>
+                  <select id="coords-format">
+                    <option value="deg" selected data-i18n="display.coordsDeg">度 (10進)</option>
+                    <option value="dms" data-i18n="display.coordsDms">度分秒 (DMS)</option>
+                    <option value="utm" data-i18n="display.coordsUtm">UTM</option>
+                    <option value="jpx" data-i18n="display.coordsJpx">平面直角座標系</option>
+                    <option value="local" data-i18n="display.coordsLocal">ローカル座標</option>
+                  </select>
+                  <label class="field-label" for="coords-datum" data-i18n="display.coordsDatum">測地系</label>
+                  <select id="coords-datum">
+                    <option value="jgd2024" selected>JGD2024 / JGD2011</option>
+                    <option value="jgd2000">JGD2000</option>
+                    <option value="tokyo" data-i18n="display.datumTokyo">日本測地系</option>
+                  </select>
                   <label><input id="display-popup" type="checkbox" /><span data-i18n="display.popup"> 地物クリックで属性ポップアップ</span></label>
+                  <label><input id="display-graticule" type="checkbox" /><span data-i18n="display.graticule"> 緯度経度グリッド</span></label>
+                  <label><input id="display-minimap" type="checkbox" /><span data-i18n="display.minimap"> ミニマップを表示</span></label>
                 </div>
               </section>
             </section>
@@ -260,6 +283,61 @@
               <div class="section-title" data-i18n="attr.title">属性</div>
               <button id="attr-vector-attr-list-btn" type="button" style="width:100%;font-size:0.9em;margin-bottom:3px;" data-i18n="vector.attrList">選択中のレイヤ属性一覧</button>
               <div id="attr-content" class="attr-content" data-i18n="attr.empty">地物を選択すると属性を表示します。</div>
+            </section>
+            <section id="tools-panel" class="plugin-panel">
+              <nav class="settings-tabs" aria-label="Tools">
+                <button class="settings-tab active" type="button" data-settings-panel="tools-measure-panel" data-i18n="tools.measure">計測</button>
+                <button class="settings-tab" type="button" data-settings-panel="tools-profile-panel" data-i18n="tools.profile">標高断面</button>
+                <button class="settings-tab" type="button" data-settings-panel="tools-los-panel" data-i18n="tools.los">見通し判定</button>
+                <button class="settings-tab" type="button" data-settings-panel="tools-export-panel" data-i18n="tools.export">エクスポート</button>
+              </nav>
+              <section id="tools-measure-panel" class="settings-subpanel active">
+                <div class="tool-btnrow">
+                  <button id="tool-m-distance" type="button" data-i18n="tools.distance">距離</button>
+                  <button id="tool-m-area" type="button" data-i18n="tools.area">面積</button>
+                  <button id="tool-m-bearing" type="button" data-i18n="tools.bearing">方位</button>
+                  <button id="tool-clear" type="button" class="danger-button" data-i18n="tools.clear">クリア</button>
+                </div>
+                <p class="hint" data-i18n="tools.measureHint">左クリックで頂点を追加、ダブルクリックで確定します。</p>
+                <div id="tools-measure-result" class="tool-result" aria-live="polite"></div>
+              </section>
+              <section id="tools-profile-panel" class="settings-subpanel">
+                <div class="tool-btnrow">
+                  <button id="tool-profile-draw" type="button" data-i18n="tools.profileDraw">ラインを描く</button>
+                  <label class="tool-inline"><span data-i18n="tools.profileSamples">サンプル数</span><input id="tool-profile-samples" type="number" min="10" max="500" value="100" /></label>
+                </div>
+                <p class="hint" data-i18n="tools.profileHint">断面を取るラインを描き、ダブルクリックで実行します。</p>
+                <div id="profile-box" hidden>
+                  <canvas id="profile-chart" width="280" height="150"></canvas>
+                  <div id="profile-stats" class="tool-result"></div>
+                </div>
+              </section>
+              <section id="tools-los-panel" class="settings-subpanel">
+                <p class="hint" data-i18n="tools.losHint">観測点→対象点の順にクリックします。</p>
+                <div class="tool-btnrow">
+                  <button id="tool-los" type="button" data-i18n="tools.losPick">2点を指定</button>
+                  <label class="tool-inline"><span data-i18n="tools.losObserverHeight">観測点高(m)</span><input id="los-observer-h" type="number" step="0.5" value="1.5" /></label>
+                  <label class="tool-inline"><span data-i18n="tools.losTargetHeight">対象点高(m)</span><input id="los-target-h" type="number" step="0.5" value="0" /></label>
+                </div>
+                <div id="tools-los-result" class="tool-result" aria-live="polite"></div>
+              </section>
+              <section id="tools-export-panel" class="settings-subpanel">
+                <div class="tool-btnrow">
+                  <select id="tool-export-layer"></select>
+                  <select id="tool-export-format">
+                    <option value="geojson">GeoJSON</option>
+                    <option value="csv">CSV (WKT)</option>
+                    <option value="tsv">TSV (WKT)</option>
+                    <option value="kml">KML</option>
+                    <option value="fgb">FlatGeobuf</option>
+                    <option value="shp">Shapefile (.zip)</option>
+                  </select>
+                  <button id="tool-export-run" type="button" data-i18n="tools.export">出力</button>
+                </div>
+                <div id="tool-export-status" class="tool-result" aria-live="polite"></div>
+                <p class="hint" data-i18n="tools.exportHint">* 付きのレイヤーは読み込み済み（表示範囲）のデータのみ出力されます。</p>
+                <p class="hint" data-i18n="tools.exportHintFormats">CSV/TSV は WKT 列付き、Shapefile はジオメトリ種別ごとに分割して ZIP にまとめます。</p>
+              </section>
             </section>
             <div id="engines"></div>
           </aside>
@@ -320,6 +398,7 @@
                     <select id="chat-provider">
                       <option value="gemini" selected data-i18n="chat.provider.gemini">【API】Gemini (Google)</option>
                       <option value="openai" data-i18n="chat.provider.openai">【API】OpenAI互換 (GitHub Models 等)</option>
+                      <option value="sakura" data-i18n="chat.provider.sakura">【API】さくらAIEngine</option>
                       <option value="anthropic" data-i18n="chat.provider.anthropic">【API】Anthropic (Claude)</option>
                       <option value="azure" data-i18n="chat.provider.azure">【API】Azure OpenAI</option>
                       <option value="copilot" data-i18n="chat.provider.copilot">【ブリッジ】GitHub Copilot</option>
@@ -343,12 +422,36 @@
                     <div id="openai-fields" hidden>
                       <p class="hint" data-i18n-html="chat.openai.hint">AIチャットに使う OpenAI 互換 API の設定です。<a href="https://models.github.ai" target="_blank" rel="noopener noreferrer">GitHub Models</a>（GitHub PAT を使用）のほか、OpenAI・Azure OpenAI・Ollama・LM Studio など OpenAI 互換のエンドポイントに接続できます。GitHub Copilot を使う場合はプロバイダを GitHub Copilot に変更し、表示されるブリッジ欄で Copilot ブリッジ（copilot CLI 経由）を接続してください。</p>
                       <p class="hint" data-i18n-html="chat.openai.security"><strong>セキュリティについて</strong>：キーはブラウザの localStorage にのみ保存され、送信先は上のエンドポイントのみです。http（非HTTPS）のエンドポイントを指定するとキーが平文で送信されるため、localhost/127.0.0.1 以外では https を使ってください。キー自体を共有ファイル（.kasc等）やコードに書き込まないでください。</p>
-                      <label class="field-label" for="openai-base-url" data-i18n="chat.openai.baseUrlLabel">エンドポイント ベースURL</label>
+                      <label class="field-label" for="openai-preset" data-i18n="chat.openai.presetLabel">接続プリセット</label>
+                      <select id="openai-preset">
+                        <option value="" data-i18n="chat.openai.presetCustom">カスタム（手動入力）</option>
+                        <option value="https://models.github.ai/inference">GitHub Models</option>
+                        <option value="https://api.openai.com/v1">OpenAI</option>
+                        <option value="http://localhost:11434/v1">Ollama (localhost:11434)</option>
+                        <option value="http://localhost:1234/v1">LM Studio (localhost:1234)</option>
+                      </select>
+                      <label class="field-label" for="openai-base-url" style="margin-top:3px;" data-i18n="chat.openai.baseUrlLabel">エンドポイント ベースURL</label>
                       <input id="openai-base-url" type="text" placeholder="https://models.github.ai/inference" data-i18n-attr="placeholder:chat.openai.baseUrlPlaceholder" autocomplete="off" size="28" />
                       <label class="field-label" for="openai-api-key" style="margin-top:3px;" data-i18n="chat.openai.keyLabel">APIキー / トークン</label>
                       <input id="openai-api-key" type="text" class="secret" data-1p-ignore data-lpignore="true" data-bwignore placeholder="GitHub PAT 等" data-i18n-attr="placeholder:chat.openai.keyPlaceholder" autocomplete="off" size="28" />
                       <label class="field-label" for="openai-model" style="margin-top:3px;" data-i18n="chat.openai.modelLabel">モデル</label>
-                      <input id="openai-model" type="text" placeholder="gpt-4o-mini" data-i18n-attr="placeholder:chat.openai.modelPlaceholder" autocomplete="off" size="28" />
+                      <select id="openai-model"></select>
+                      <div style="display:flex;gap:6px;margin-top:6px;">
+                        <button id="openai-fetch-models" type="button" data-i18n="chat.openai.fetchModels">モデル一覧を取得</button>
+                      </div>
+                      <p id="openai-models-status" class="hint" aria-live="polite"></p>
+                    </div>
+                    <div id="sakura-fields" hidden>
+                      <p class="hint" data-i18n-html="chat.sakura.hint"></p>
+                      <p class="hint" data-i18n-html="chat.openai.security"></p>
+                      <label class="field-label" for="sakura-api-key" data-i18n="chat.openai.keyLabel">APIキー / トークン</label>
+                      <input id="sakura-api-key" type="text" class="secret" data-1p-ignore data-lpignore="true" data-bwignore placeholder="アカウントトークン" data-i18n-attr="placeholder:chat.sakura.keyPlaceholder" autocomplete="off" size="28" />
+                      <label class="field-label" for="sakura-model" style="margin-top:3px;" data-i18n="chat.openai.modelLabel">モデル</label>
+                      <select id="sakura-model"></select>
+                      <div style="display:flex;gap:6px;margin-top:6px;">
+                        <button id="sakura-fetch-models" type="button" data-i18n="chat.openai.fetchModels">モデル一覧を取得</button>
+                      </div>
+                      <p id="sakura-models-status" class="hint" aria-live="polite"></p>
                     </div>
                     <div id="anthropic-fields" hidden>
                       <p class="hint" data-i18n-html="chat.anthropic.hint"></p>
@@ -735,6 +838,16 @@
             </button>
             <button id="top-down-button" type="button" aria-label="3D表示" title="3D表示" data-i18n-attr="aria-label:nav.topDown;title:nav.topDown">3D</button>
             <button id="mode-select" class="mode-select" type="button" value="orbit" aria-label="オービット表示" data-i18n="nav.orbitMode" data-i18n-attr="aria-label:nav.orbit">オービット</button>
+            <div class="nav-history-row">
+              <button id="view-back" class="nav-extra" type="button" disabled title="前の表示" data-i18n-attr="title:nav.back;aria-label:nav.back">◀</button>
+              <button id="view-forward" class="nav-extra" type="button" disabled title="次の表示" data-i18n-attr="title:nav.forward;aria-label:nav.forward">▶</button>
+            </div>
+            <div class="nav-extra-grid">
+              <button id="rectzoom-button" class="nav-extra" type="button" title="矩形ズーム (Shift+ドラッグ)" data-i18n-attr="title:nav.rectzoom;aria-label:nav.rectzoom">▭</button>
+              <button id="coordpick-button" class="nav-extra" type="button" title="地点座標の取得" data-i18n-attr="title:nav.coordpick;aria-label:nav.coordpick">⌖</button>
+              <button id="locate-button" class="nav-extra" type="button" title="現在地へ移動" data-i18n-attr="title:nav.locate;aria-label:nav.locate">📍</button>
+              <button id="fullscreen-button" class="nav-extra" type="button" title="フルスクリーン" data-i18n-attr="title:nav.fullscreen;aria-label:nav.fullscreen">⛶</button>
+            </div>
             <button id="navigation-toggle" class="navigation-toggle" type="button" aria-label="最小化" data-i18n-attr="aria-label:common.minimize">−</button>
           </aside>
           <aside class="chat-panel" id="chat-panel" aria-label="AIチャット" data-i18n-attr="aria-label:chat.ariaLabel">
@@ -764,9 +877,20 @@
               <button type="submit" data-i18n="chat.send">送信</button>
             </form>
           </aside>
+          <div id="minimap" hidden></div>
           <div id="cesium-scalebar" hidden></div>
           <div id="cesium-coords" hidden></div>
           <div id="attr-popup" hidden></div>
+          <div id="coord-popup" hidden>
+            <div id="coord-popup-text" class="coord-popup-text"></div>
+            <div id="coord-popup-address" class="coord-popup-address"></div>
+            <div class="coord-popup-actions">
+              <button id="coord-popup-copy" type="button" data-i18n="coordpick.copy">コピー</button>
+              <button id="coord-popup-pin" type="button" data-i18n="coordpick.pin">ピン</button>
+              <button id="coord-popup-clear" type="button" data-i18n="coordpick.clear">クリア</button>
+              <button id="coord-popup-close" type="button" aria-label="閉じる" data-i18n-attr="aria-label:manage.close">×</button>
+            </div>
+          </div>
           <small id="map-attribution" class="map-attribution"></small>
         </div>
       </section>
@@ -781,6 +905,11 @@
         <div class="vector-attr-widget-filter">
           <select id="vector-attr-widget-layer" class="vector-attr-widget-layer" title="レイヤを選択" data-i18n-attr="title:vattr.layerTitle"></select>
           <input id="vector-attr-widget-search" type="text" placeholder="属性または値で検索" data-i18n-attr="placeholder:vattr.search" />
+          <button id="vector-attr-export-csv" type="button" title="表示中の行をCSVで出力" data-i18n-attr="title:vattr.exportCsv">CSV</button>
+          <button id="vector-attr-export-tsv" type="button" title="表示中の行をTSVで出力" data-i18n-attr="title:vattr.exportTsv">TSV</button>
+          <button id="vector-attr-widget-stats" type="button" title="属性を集計（GROUP BY）" data-i18n-attr="title:vattr.statsTitle">Σ</button>
+          <select id="vector-attr-widget-group" title="集計キー" data-i18n-attr="title:vattr.statsGroup" hidden></select>
+          <select id="vector-attr-widget-value" title="集計する数値属性" data-i18n-attr="title:vattr.statsValue" hidden></select>
         </div>
         <div class="vector-attr-widget-table-wrap">
           <table class="vector-attr-widget-table">

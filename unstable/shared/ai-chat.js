@@ -81,7 +81,7 @@ function escapeHtml(value) {
 // "local:" 始まりは api 不要のローカル実装ツール。エンジンが api メソッドを
 // 実装していないツールは AI に公開しない（2D プレイヤーで 3D 操作を出さない等）
 const CHAT_TOOL_API = {
-  flyTo: "flyTo", flyToFeature: "flyToFeature",
+  flyTo: "flyTo", flyToFeature: "flyToFeature", zoomToExtent: "zoomToExtent",
   setLayerVisible: "setLayerVisible", setLayerLegendVisible: "setLayerLegendVisible",
   listLayers: "listLayers", focusLayer: "focusLayer", getCamera: "getCamera",
   listBasemaps: "listBasemaps", setBasemap: "setBasemap",
@@ -97,6 +97,7 @@ const CHAT_TOOL_API = {
   checkUpdate: "checkUpdate", installUpdate: "installUpdate",
   bridgeSetup: "local:bridgeSetup",
   runCode: "local:runCode",
+  speak: "local:speak",
   addLayer: "addLayer", addGeoJsonLayer: "addGeoJsonLayer",
   shutdownApp: "shutdownApp",
   savePlugin: "saveStoragePlugin", listPlugins: "listStoragePlugins",
@@ -160,7 +161,9 @@ const PROVIDER_ENDPOINT_KEYS = {
   antigravity: "agentEndpoint.antigravity",
   agent: "agentEndpoint.agent",
 };
-const PROVIDER_ORDER = ["gemini", "openai", "anthropic", "azure", "copilot", "devin", "antigravity", "agent"];
+const PROVIDER_ORDER = ["gemini", "openai", "sakura", "anthropic", "azure", "copilot", "devin", "antigravity", "agent"];
+// さくらのAI Engine（専用プロバイダ）の固定エンドポイント。OpenAI互換API
+const SAKURA_BASE_URL = "https://api.ai.sakura.ad.jp/v1";
 // ---- bridge-hub 検出 ----
 // 常駐の bridge-hub（bridge-hub.exe）が起動していれば /health が hub:true を返す。
 // ハブはアプリ版・ブラウザ WebGIS 共通で 8511 に一本化（アプリはハブを内蔵せず、
@@ -630,6 +633,7 @@ export function updateChatPanelVisibility() {
     let hasKey = false;
     try {
       hasKey = !!localStorage.getItem("googleApiKey") || !!localStorage.getItem("openaiApiKey")
+        || !!localStorage.getItem("sakuraApiKey")
         || !!localStorage.getItem("anthropicApiKey")
         || !!(localStorage.getItem("azureApiKey") && localStorage.getItem("azureBaseUrl"));
     } catch (e) {}
@@ -739,9 +743,12 @@ export function setupAiSettings() {
   const providerSelect = document.querySelector("#chat-provider");
   const geminiFields = document.querySelector("#gemini-fields");
   const openaiFields = document.querySelector("#openai-fields");
+  const openaiPresetSelect = document.querySelector("#openai-preset");
   const openaiBaseUrlInput = document.querySelector("#openai-base-url");
   const openaiKeyInput = document.querySelector("#openai-api-key");
   const openaiModelInput = document.querySelector("#openai-model");
+  const openaiFetchButton = document.querySelector("#openai-fetch-models");
+  const openaiModelsStatus = document.querySelector("#openai-models-status");
   const anthropicFields = document.querySelector("#anthropic-fields");
   const anthropicBaseUrlInput = document.querySelector("#anthropic-base-url");
   const anthropicKeyInput = document.querySelector("#anthropic-api-key");
@@ -751,6 +758,11 @@ export function setupAiSettings() {
   const azureKeyInput = document.querySelector("#azure-api-key");
   const azureDeploymentInput = document.querySelector("#azure-deployment");
   const azureApiVersionInput = document.querySelector("#azure-api-version");
+  const sakuraFields = document.querySelector("#sakura-fields");
+  const sakuraKeyInput = document.querySelector("#sakura-api-key");
+  const sakuraModelInput = document.querySelector("#sakura-model");
+  const sakuraFetchButton = document.querySelector("#sakura-fetch-models");
+  const sakuraModelsStatus = document.querySelector("#sakura-models-status");
   const bridgeFields = document.querySelector("#bridge-fields");
   const endpointInput = document.querySelector("#agent-endpoint");
   const tokenInput = document.querySelector("#agent-token");
@@ -915,6 +927,7 @@ export function setupAiSettings() {
     const v = providerSelect?.value || "gemini";
     if (geminiFields) geminiFields.hidden = v !== "gemini";
     if (openaiFields) openaiFields.hidden = v !== "openai";
+    if (sakuraFields) sakuraFields.hidden = v !== "sakura";
     if (anthropicFields) anthropicFields.hidden = v !== "anthropic";
     if (azureFields) azureFields.hidden = v !== "azure";
     const isBridge = v === "copilot" || v === "devin" || v === "antigravity" || v === "agent";
@@ -968,7 +981,31 @@ export function setupAiSettings() {
     if (v === "agent" && !suppressSettingsVerify) void refreshAgentStatus();
     updateChatProviderLabel();
   };
+  // モデル欄は select（Gemini・ブリッジ系と同じ単一コントロール）。
+  // 保存値（無ければ既定モデル）を初期選択肢にし、
+  // 「モデル一覧を取得」で実モデル一覧へ入れ替える
+  const seedModelSelect = (sel, saved, fallback) => {
+    if (!sel) return;
+    const v = (saved || "").trim() || fallback;
+    sel.textContent = "";
+    const o = document.createElement("option");
+    o.value = v;
+    o.textContent = v;
+    sel.appendChild(o);
+    sel.value = v;
+  };
   try {
+    // OpenAI互換の接続プリセットだった頃のさくら設定を専用プロバイダへ移す。
+    // openai 欄のベースURLがさくら固定URLと一致する場合はその設定一式を移行する
+    const openaiSavedUrl = (localStorage.getItem("openaiBaseUrl") || "").trim().replace(/\/+$/, "");
+    if (openaiSavedUrl === SAKURA_BASE_URL) {
+      if (!localStorage.getItem("sakuraApiKey")) localStorage.setItem("sakuraApiKey", localStorage.getItem("openaiApiKey") || "");
+      if (!localStorage.getItem("sakuraModel")) localStorage.setItem("sakuraModel", localStorage.getItem("openaiModel") || "");
+      if (localStorage.getItem("chatProvider") === "openai") localStorage.setItem("chatProvider", "sakura");
+      localStorage.removeItem("openaiApiKey");
+      localStorage.removeItem("openaiBaseUrl");
+      localStorage.removeItem("openaiModel");
+    }
     keyInput.value = localStorage.getItem("googleApiKey") || "";
     const savedModel = localStorage.getItem("googleGeminiModel");
     if (savedModel && modelSelect) modelSelect.value = savedModel;
@@ -977,7 +1014,9 @@ export function setupAiSettings() {
     updateBridgeProviderOptions();
     if (openaiBaseUrlInput) openaiBaseUrlInput.value = localStorage.getItem("openaiBaseUrl") || "";
     if (openaiKeyInput) openaiKeyInput.value = localStorage.getItem("openaiApiKey") || "";
-    if (openaiModelInput) openaiModelInput.value = localStorage.getItem("openaiModel") || "";
+    seedModelSelect(openaiModelInput, localStorage.getItem("openaiModel"), "gpt-4o-mini");
+    if (sakuraKeyInput) sakuraKeyInput.value = localStorage.getItem("sakuraApiKey") || "";
+    seedModelSelect(sakuraModelInput, localStorage.getItem("sakuraModel"), "gpt-oss-120b");
     if (anthropicBaseUrlInput) anthropicBaseUrlInput.value = localStorage.getItem("anthropicBaseUrl") || "";
     if (anthropicKeyInput) anthropicKeyInput.value = localStorage.getItem("anthropicApiKey") || "";
     if (anthropicModelInput) anthropicModelInput.value = localStorage.getItem("anthropicModel") || "";
@@ -994,8 +1033,89 @@ export function setupAiSettings() {
     // 保存値・既定オプションだけ先に埋めておく
     for (const p of BRIDGE_PROVIDERS) void refreshBridgeModels(p, "");
     syncProviderFields();
+    syncOpenaiPreset();
   } catch (e) {}
   providerSelect?.addEventListener("change", () => syncProviderFields(true));
+  // OpenAI互換プロバイダの接続プリセット。選択でベースURL欄を埋め、
+  // ベースURLの手編集時は一致するプリセットがあれば選択を同期する（無ければカスタム）
+  const OPENAI_PRESET_MODEL_HINTS = {
+    "https://models.github.ai/inference": "gpt-4o-mini",
+    "https://api.openai.com/v1": "gpt-4o-mini",
+  };
+  function syncOpenaiPreset() {
+    if (!openaiPresetSelect || !openaiBaseUrlInput) return;
+    const url = openaiBaseUrlInput.value.trim().replace(/\/+$/, "");
+    openaiPresetSelect.value = [...openaiPresetSelect.options].some(o => o.value === url) ? url : "";
+  }
+  openaiPresetSelect?.addEventListener("change", () => {
+    const url = openaiPresetSelect.value;
+    if (url && openaiBaseUrlInput) openaiBaseUrlInput.value = url;
+    // プリセットの代表モデルを選択肢へ追加する（現在値は変えない）
+    const hint = OPENAI_PRESET_MODEL_HINTS[url];
+    if (hint && openaiModelInput && ![...openaiModelInput.options].some(o => o.value === hint)) {
+      const o = document.createElement("option");
+      o.value = hint;
+      o.textContent = hint;
+      openaiModelInput.appendChild(o);
+    }
+  });
+  openaiBaseUrlInput?.addEventListener("input", syncOpenaiPreset);
+  // 「モデル一覧取得」= GET {base}/models。接続・キー・CORS の疎通確認と
+  // モデル欄（select）の選択肢投入を兼ねるスモークテストボタン
+  const fetchModelList = async ({ base, key, statusEl, modelInput }) => {
+    if (!statusEl) return;
+    statusEl.style.color = "";
+    statusEl.textContent = t("chat.openai.modelsFetching");
+    try {
+      const r = await fetch(`${base}/models`, {
+        headers: key ? { Authorization: `Bearer ${key}` } : undefined,
+        signal: AbortSignal.timeout(30000),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        const detail = d?.error?.message || d?.message || "";
+        statusEl.style.color = "#c0392b";
+        statusEl.textContent = t("chat.openai.modelsFetchError", { error: `HTTP ${r.status}${detail ? `: ${detail}` : ""}` });
+        return;
+      }
+      const ids = (Array.isArray(d?.data) ? d.data : []).map(m => m?.id).filter(Boolean);
+      // 一覧に無い設定値は選択肢として残し、取得した全件へ入れ替える
+      if (modelInput) {
+        const cur = modelInput.value.trim();
+        modelInput.textContent = "";
+        const seen = new Set();
+        const add = (id) => {
+          if (!id || seen.has(id)) return;
+          seen.add(id);
+          const o = document.createElement("option");
+          o.value = id;
+          o.textContent = id;
+          modelInput.appendChild(o);
+        };
+        if (cur && !ids.includes(cur)) add(cur);
+        for (const id of ids) add(id);
+        modelInput.value = seen.has(cur) ? cur : (ids[0] || "");
+      }
+      statusEl.textContent = t("chat.openai.modelsFetched", { count: ids.length });
+    } catch (e) {
+      // fetch の TypeError = CORS 拒否・DNS・オフライン等の接続失敗
+      statusEl.style.color = "#c0392b";
+      statusEl.textContent = t("chat.openai.modelsFetchError", { error: `${t("chat.openai.modelsFetchCors")} (${e.message})` });
+    }
+  };
+  openaiFetchButton?.addEventListener("click", () => {
+    const base = ((openaiBaseUrlInput?.value || "").trim() || "https://models.github.ai/inference").replace(/\/+$/, "");
+    void fetchModelList({
+      base, key: sanitizeHeaderToken(openaiKeyInput?.value || ""),
+      statusEl: openaiModelsStatus, modelInput: openaiModelInput,
+    });
+  });
+  sakuraFetchButton?.addEventListener("click", () => {
+    void fetchModelList({
+      base: SAKURA_BASE_URL, key: sanitizeHeaderToken(sakuraKeyInput?.value || ""),
+      statusEl: sakuraModelsStatus, modelInput: sakuraModelInput,
+    });
+  });
   saveButton.addEventListener("click", () => {
     try {
       localStorage.setItem("googleApiKey", keyInput.value.trim());
@@ -1004,6 +1124,8 @@ export function setupAiSettings() {
       if (openaiBaseUrlInput) localStorage.setItem("openaiBaseUrl", openaiBaseUrlInput.value.trim());
       if (openaiKeyInput) localStorage.setItem("openaiApiKey", openaiKeyInput.value.trim());
       if (openaiModelInput) localStorage.setItem("openaiModel", openaiModelInput.value.trim());
+      if (sakuraKeyInput) localStorage.setItem("sakuraApiKey", sakuraKeyInput.value.trim());
+      if (sakuraModelInput) localStorage.setItem("sakuraModel", sakuraModelInput.value.trim());
       if (anthropicBaseUrlInput) localStorage.setItem("anthropicBaseUrl", anthropicBaseUrlInput.value.trim());
       if (anthropicKeyInput) localStorage.setItem("anthropicApiKey", anthropicKeyInput.value.trim());
       if (anthropicModelInput) localStorage.setItem("anthropicModel", anthropicModelInput.value.trim());
@@ -1509,6 +1631,20 @@ const CHAT_TOOLS = [{
       },
     },
     {
+      name: "zoomToExtent",
+      description: "緯度経度の矩形範囲(west/south/east/north)が画面に収まるようカメラを移動する(矩形ズーム相当)",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          west: { type: "NUMBER", description: "西端経度(度)" },
+          south: { type: "NUMBER", description: "南端緯度(度)" },
+          east: { type: "NUMBER", description: "東端経度(度)" },
+          north: { type: "NUMBER", description: "北端緯度(度)" },
+        },
+        required: ["west", "south", "east", "north"],
+      },
+    },
+    {
       name: "flyToPreset",
       description: "登録済みのカメラプリセット名を指定して移動する。listCameraPresetsで一覧を確認できる",
       parameters: {
@@ -1774,15 +1910,27 @@ const CHAT_TOOLS = [{
       },
     },
     {
+      name: "speak",
+      description: "テキストを音声で読み上げる。AIチャットのプロバイダに音声合成(TTS)キーがあればそのエンドポイント(さくらAIEngine=VOICEVOX系ボイス/OpenAI互換=tts)で生成し、無ければブラウザ内蔵のWeb Speech APIで読み上げる(無料・常時利用可)。案内文のナレーションやフライパス中の音声ガイドに使う",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          text: { type: "STRING", description: "読み上げるテキスト" },
+          voice: { type: "STRING", description: "省略可。ボイス名(さくら: ずんだもん/春日部つむぎ/冥鳴ひまり等・OpenAI互換: alloy等)" },
+        },
+        required: ["text"],
+      },
+    },
+    {
       name: "addLayer",
-      description: "ベクターレイヤを追加して即座に適用する。type: geojson(既定)/layer/geoparquet/flatgeobuf/gpkg/duckdb/sql。target は duckdb 以外はURLまたは DATA/相対パス、sql は SELECT 文。duckdb には options で where=/limit=/format=/bbox=auto 等を指定可。http(s) URL は実行前に実在確認され、到達不能なものは拒否されるため確実に存在するURLのみ指定する。追加はインスペクター設定に反映されるのでユーザーが明示した場合のみ使う",
+      description: "ベクターレイヤを追加して即座に適用する。type: geojson(既定)/layer/geoparquet/flatgeobuf/gpkg/duckdb/sql/kml/kmz/wfs/shp/csv/tsv。target は duckdb・sql 以外はURLまたは DATA/相対パス、sql は SELECT 文。wfs は options に typename= が必須(version=/maxfeatures=/cql_filter= も指定可)、shp は .zip 一式または .shp+sidecar のURL。duckdb には options で where=/limit=/format=/bbox=auto 等を指定可。http(s) URL は実行前に実在確認され、到達不能なものは拒否されるため確実に存在するURLのみ指定する。追加はインスペクター設定に反映されるのでユーザーが明示した場合のみ使う",
       parameters: {
         type: "OBJECT",
         properties: {
           title: { type: "STRING", description: "レイヤ名" },
           target: { type: "STRING", description: "データのURLまたは DATA/ファイル名(sql: の場合は SELECT 文)" },
-          type: { type: "STRING", description: "geojson/layer/geoparquet/flatgeobuf/gpkg/duckdb/sql (省略時 geojson)" },
-          options: { type: "STRING", description: "省略可。duckdb: の where=/limit=/format=/bbox=auto/proxy=on、render=primitive、attr=出典 等(|区切り)" },
+          type: { type: "STRING", description: "geojson/layer/geoparquet/flatgeobuf/gpkg/duckdb/sql/kml/kmz/wfs/shp/csv/tsv (省略時 geojson)" },
+          options: { type: "STRING", description: "省略可。wfs: の typename=/version=/maxfeatures=/cql_filter=、duckdb: の where=/limit=/format=/bbox=auto/proxy=on、render=primitive、attr=出典 等(|区切り)" },
         },
         required: ["title", "target"],
       },
@@ -1887,6 +2035,18 @@ const CHAT_TOOLS = [{
         type: "OBJECT",
         properties: {
           name: { type: "STRING", description: "レイヤ名またはID(listLayersで確認)" },
+        },
+        required: ["name"],
+      },
+    },
+    {
+      name: "exportLayer",
+      description: "レイヤーをファイルとしてダウンロード出力する（ブラウザのダウンロードに保存）。format: geojson(既定)/csv/tsv/kml/fgb/shp。csv・tsv はジオメトリを WKT 列として出力（QGIS の CSV エクスポート互換）、kml は GoogleEarth 向け、fgb は FlatGeobuf バイナリ、shp はジオメトリ種別ごとの Shapefile を .zip に同梱",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          name: { type: "STRING", description: "レイヤ名またはID(listLayersで確認)" },
+          format: { type: "STRING", description: "出力形式 geojson/csv/tsv/kml/fgb/shp（省略時 geojson）" },
         },
         required: ["name"],
       },
@@ -2232,6 +2392,88 @@ const CHAT_TOOLS = [{
           ids: { type: "ARRAY", description: "有効化する agents の指示書ID一覧", items: { type: "STRING" } },
         },
         required: ["ids"],
+      },
+    },
+    {
+      name: "measureDistance",
+      description: "折れ線の測地線距離を計算し、結果ラインを地図へ描画する。座標は [[lng,lat],...]（度）",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          coordinates: { type: "ARRAY", items: { type: "ARRAY", items: { type: "NUMBER" } }, description: "[[lng,lat],...] の頂点列（2点以上・度）" },
+        },
+        required: ["coordinates"],
+      },
+    },
+    {
+      name: "measureArea",
+      description: "ポリゴンの面積と周囲長を測地線近似で計算し、結果を地図へ描画する。座標は [[lng,lat],...]（度・3点以上）",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          coordinates: { type: "ARRAY", items: { type: "ARRAY", items: { type: "NUMBER" } }, description: "[[lng,lat],...] の頂点列（3点以上・度）" },
+        },
+        required: ["coordinates"],
+      },
+    },
+    {
+      name: "measureBearing",
+      description: "2点間の測地線方位角（初方位・終方位）と距離を計算し、ラインを地図へ描画する",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          from: { type: "ARRAY", items: { type: "NUMBER" }, description: "始点 [lng,lat]（度）" },
+          to: { type: "ARRAY", items: { type: "NUMBER" }, description: "終点 [lng,lat]（度）" },
+        },
+        required: ["from", "to"],
+      },
+    },
+    {
+      name: "elevationProfile",
+      description: "ラインに沿った地形標高をサンプリングし、距離-標高の断面データを返す。断面グラフとラインも地図上に表示する。地形OFF時は地理院標高API（日本域）へフォールバック",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          coordinates: { type: "ARRAY", items: { type: "ARRAY", items: { type: "NUMBER" } }, description: "[[lng,lat],...] のライン頂点列（2点以上・度）" },
+          samples: { type: "NUMBER", description: "サンプル数（省略時100・10-500）" },
+        },
+        required: ["coordinates"],
+      },
+    },
+    {
+      name: "lineOfSight",
+      description: "観測点から対象点への地形を考慮した見通し（LOS）可否を判定し、視線・遮蔽点を地図へ描画する。高度は地表からのオフセット(m)",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          from: { type: "ARRAY", items: { type: "NUMBER" }, description: "観測点 [lng,lat]（度）" },
+          to: { type: "ARRAY", items: { type: "NUMBER" }, description: "対象点 [lng,lat]（度）" },
+          observerHeight: { type: "NUMBER", description: "観測点の地表からの高さ(m・省略時0)" },
+          targetHeight: { type: "NUMBER", description: "対象点の地表からの高さ(m・省略時0)" },
+        },
+        required: ["from", "to"],
+      },
+    },
+    {
+      name: "setGraticule",
+      description: "緯度経度グリッド（緯線・経線と度ラベル）の表示をON/OFFする",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          on: { type: "BOOLEAN", description: "true で表示・false で非表示" },
+        },
+        required: ["on"],
+      },
+    },
+    {
+      name: "setMinimap",
+      description: "画面左下のミニマップ（現在の表示範囲を示すオーバービュー地図）の表示をON/OFFする",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          on: { type: "BOOLEAN", description: "true で表示・false で非表示" },
+        },
+        required: ["on"],
       },
     },
   ],
@@ -2724,6 +2966,10 @@ export async function executeChatTool(name, args = {}) {
     await flyToFeatureOrView(Number(merged.latitude), Number(merged.longitude), merged);
     return { ok: true };
   }
+  if (name === "zoomToExtent") {
+    const ok = window.kasugaiApi.zoomToExtent(args.west, args.south, args.east, args.north);
+    return { ok: ok !== false };
+  }
   if (name === "setLayerVisible") {
     const ok = window.kasugaiApi.setLayerVisible(args.name, args.visible);
     return { ok, message: ok ? undefined : t("tool.layerNotFound", { name: args.name }) };
@@ -2847,6 +3093,48 @@ export async function executeChatTool(name, args = {}) {
       return { ok: false, message: String(error && error.message || error) };
     }
   }
+  if (name === "speak") {
+    const text = String(args.text || "").trim();
+    if (!text) return { ok: false, message: "text is empty" };
+    try {
+      // チャットプロバイダの TTS キーがあれば API 音声合成、無ければ
+      // ブラウザ内蔵の Web Speech API へフォールバック（無料・常時デモ可）
+      const provider = getChatProvider();
+      const tts = provider === "sakura" && getSakuraConfig().apiKey
+        ? { base: SAKURA_BASE_URL, key: getSakuraConfig().apiKey,
+            model: localStorage.getItem("sakuraTtsModel") || "voicevox",
+            voice: args.voice || localStorage.getItem("sakuraTtsVoice") || "ずんだもん" }
+        : provider === "openai" && getOpenAIConfig().apiKey
+        ? { base: getOpenAIConfig().baseUrl, key: getOpenAIConfig().apiKey,
+            model: localStorage.getItem("openaiTtsModel") || "tts-1",
+            voice: args.voice || localStorage.getItem("openaiTtsVoice") || "alloy" }
+        : null;
+      if (!tts) {
+        const u = new SpeechSynthesisUtterance(text);
+        u.lang = "ja-JP";
+        window.speechSynthesis.cancel();
+        window.speechSynthesis.speak(u);
+        return { ok: true, engine: "webspeech" };
+      }
+      const res = await fetch(`${tts.base}/audio/speech`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${tts.key}` },
+        body: JSON.stringify({ model: tts.model, input: text, voice: tts.voice }),
+        signal: AbortSignal.timeout(60000),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        return { ok: false, message: `TTS HTTP ${res.status}: ${err?.error?.message || err?.message || ""}` };
+      }
+      const blob = await res.blob();
+      const audio = new Audio(URL.createObjectURL(blob));
+      audio.onended = () => URL.revokeObjectURL(audio.src);
+      await audio.play().catch(() => {});
+      return { ok: true, engine: provider, model: tts.model, voice: tts.voice, bytes: blob.size };
+    } catch (e) {
+      return { ok: false, message: String(e?.message || e) };
+    }
+  }
   if (name === "addLayer") {
     const check = await verifyToolTargetUrl(args.target, args.options);
     if (!check.ok) return { ok: false, message: t("tool.urlUnreachable", { status: check.status }) };
@@ -2929,6 +3217,14 @@ export async function executeChatTool(name, args = {}) {
     }
     return { geojson };
   }
+  if (name === "exportLayer") {
+    try {
+      const r = await window.kasugaiApi.exportLayer(args.name, args.format || "geojson");
+      return r && r.ok ? r : { ok: false, message: t("tool.layerDataNotFound", { name: args.name }) };
+    } catch (error) {
+      return { ok: false, message: String(error && error.message || error) };
+    }
+  }
   if (name === "addDataLayer") {
     const item = await window.kasugaiApi.addDataLayer(args.title, args.geojson);
     return item ? { ok: true, id: item.id } : { ok: false, message: t("tool.invalidGeoJson") };
@@ -2966,6 +3262,13 @@ export async function executeChatTool(name, args = {}) {
   if (name === "getGsiElevation") return await window.kasugaiApi.getGsiElevation(args.latitude, args.longitude);
   if (name === "getGsiShareUrl") return window.kasugaiApi.getGsiShareUrl();
   if (name === "setGsiGlobe") return window.kasugaiApi.setGsiGlobe(args.on);
+  if (name === "measureDistance") return window.kasugaiApi.measureDistance(args.coordinates);
+  if (name === "measureArea") return window.kasugaiApi.measureArea(args.coordinates);
+  if (name === "measureBearing") return window.kasugaiApi.measureBearing(args.from, args.to);
+  if (name === "elevationProfile") return await window.kasugaiApi.elevationProfile(args.coordinates, args.samples);
+  if (name === "lineOfSight") return await window.kasugaiApi.lineOfSight(args.from, args.to, args);
+  if (name === "setGraticule") { window.kasugaiApi.setGraticule(!!args.on); return { ok: true }; }
+  if (name === "setMinimap") { window.kasugaiApi.setMinimap(!!args.on); return { ok: true }; }
   return { ok: false, message: t("tool.unknown", { name }) };
 }
 
@@ -3166,6 +3469,7 @@ async function usableChatProviders() {
   try {
     if (localStorage.getItem("googleApiKey") || hasBackendFeature("aiProxy")) set.add("gemini");
     if (localStorage.getItem("openaiApiKey")) set.add("openai");
+    if (localStorage.getItem("sakuraApiKey")) set.add("sakura");
     if (localStorage.getItem("anthropicApiKey")) set.add("anthropic");
     // Azure はキーとリソースURL・デプロイ名の3点が揃っているときだけ有効
     if (localStorage.getItem("azureApiKey") && localStorage.getItem("azureBaseUrl")
@@ -3410,6 +3714,8 @@ function updateChatProviderLabel() {
   let model = "";
   if (provider === "openai") {
     model = getOpenAIConfig().model;
+  } else if (provider === "sakura") {
+    model = getSakuraConfig().model;
   } else if (provider === "anthropic") {
     model = getAnthropicConfig().model;
   } else if (provider === "azure") {
@@ -3507,7 +3813,7 @@ function modelOptionLabel(m) {
 export function getChatProvider() {
   try {
     const p = localStorage.getItem("chatProvider");
-    if (["gemini", "openai", "anthropic", "azure", "copilot", "devin", "antigravity", "agent"].includes(p)) return p;
+    if (["gemini", "openai", "sakura", "anthropic", "azure", "copilot", "devin", "antigravity", "agent"].includes(p)) return p;
     // 移行前の利用形態を推定（プロバイダ未保存＋エージェント有効 → agent 相当）
     if (!p) {
       const enabledFlag = localStorage.getItem("agentEnabled");
@@ -3531,6 +3837,20 @@ function getOpenAIConfig() {
     };
   } catch (e) {
     return { apiKey: "", baseUrl: "https://models.github.ai/inference", model: "gpt-4o-mini" };
+  }
+}
+
+// さくらのAI Engine プロバイダの接続情報。OpenAI互換APIだが専用プロバイダとして
+// エンドポイントは固定し、アカウントトークンとモデルのみを設定対象にする
+function getSakuraConfig() {
+  try {
+    return {
+      apiKey: sanitizeHeaderToken(localStorage.getItem("sakuraApiKey")),
+      baseUrl: SAKURA_BASE_URL,
+      model: (localStorage.getItem("sakuraModel") || "").trim() || "gpt-oss-120b",
+    };
+  } catch (e) {
+    return { apiKey: "", baseUrl: SAKURA_BASE_URL, model: "gpt-oss-120b" };
   }
 }
 
@@ -3819,6 +4139,12 @@ async function callAzureOpenAI(history) {
     model: c.deployment,
   };
   return callOpenAICompat(history, request);
+}
+
+// さくらのAI Engine の chat/completions。OpenAI互換ボディをそのまま使い、
+// 固定エンドポイント・専用キー/モデルで呼ぶ
+async function callSakura(history) {
+  return callOpenAICompat(history, getSakuraConfig());
 }
 
 // Anthropic Messages API を呼び、tool_use の往復を処理する。
@@ -4350,7 +4676,9 @@ export function setupChatPanel() {
     const provider = getChatProvider();
     const hasKey = provider === "openai"
       ? !!getOpenAIConfig().apiKey
-      : provider === "anthropic"
+      : provider === "sakura"
+        ? !!getSakuraConfig().apiKey
+        : provider === "anthropic"
         ? !!getAnthropicConfig().apiKey
         : provider === "azure"
           ? !!(getAzureConfig().apiKey && getAzureConfig().baseUrl && getAzureConfig().deployment)
@@ -4360,6 +4688,7 @@ export function setupChatPanel() {
     if (!hasKey) {
       const local = await handleLocalChatCommand(text);
       const key = provider === "openai" ? "chat.noApiKeyOpenai"
+        : provider === "sakura" ? "chat.noApiKeySakura"
         : provider === "anthropic" ? "chat.noApiKeyAnthropic"
           : provider === "azure" ? "chat.noApiKeyAzure"
             : provider === "copilot" ? "chat.noApiKeyCopilot"
@@ -4378,7 +4707,9 @@ export function setupChatPanel() {
       history.push({ role: "user", parts: [{ text: text || t("chat.imageOnly") }, ...imageParts] });
       const { text: reply, executed, usage } = provider === "openai"
         ? await callOpenAICompat(history)
-        : provider === "azure"
+        : provider === "sakura"
+          ? await callSakura(history)
+          : provider === "azure"
           ? await callAzureOpenAI(history)
           : provider === "anthropic"
             ? await callAnthropic(history)
@@ -4512,6 +4843,7 @@ const AI_SETTINGS_HTML = `
   <select id="chat-provider">
     <option value="gemini" selected data-i18n="chat.provider.gemini">【API】Gemini (Google)</option>
     <option value="openai" data-i18n="chat.provider.openai">【API】OpenAI互換 (GitHub Models 等)</option>
+    <option value="sakura" data-i18n="chat.provider.sakura">【API】さくらAIEngine</option>
     <option value="anthropic" data-i18n="chat.provider.anthropic">【API】Anthropic (Claude)</option>
     <option value="azure" data-i18n="chat.provider.azure">【API】Azure OpenAI</option>
     <option value="copilot" data-i18n="chat.provider.copilot">【ブリッジ】GitHub Copilot</option>
@@ -4533,12 +4865,36 @@ const AI_SETTINGS_HTML = `
   </div>
   <div id="openai-fields" hidden>
     <p class="hint" data-i18n-html="chat.openai.hint">AIチャットに使う OpenAI 互換 API の設定です。</p>
+    <label class="field-label" for="openai-preset" data-i18n="chat.openai.presetLabel">接続プリセット</label>
+    <select id="openai-preset">
+      <option value="" data-i18n="chat.openai.presetCustom">カスタム（手動入力）</option>
+      <option value="https://models.github.ai/inference">GitHub Models</option>
+      <option value="https://api.openai.com/v1">OpenAI</option>
+      <option value="http://localhost:11434/v1">Ollama (localhost:11434)</option>
+      <option value="http://localhost:1234/v1">LM Studio (localhost:1234)</option>
+    </select>
     <label class="field-label" for="openai-base-url" data-i18n="chat.openai.baseUrlLabel">エンドポイント ベースURL</label>
     <input id="openai-base-url" type="text" placeholder="https://models.github.ai/inference" autocomplete="off" size="28" />
     <label class="field-label" for="openai-api-key" data-i18n="chat.openai.keyLabel">APIキー / トークン</label>
     <input id="openai-api-key" type="password" placeholder="GitHub PAT 等" autocomplete="off" size="28" />
     <label class="field-label" for="openai-model" data-i18n="chat.openai.modelLabel">モデル</label>
-    <input id="openai-model" type="text" placeholder="gpt-4o-mini" autocomplete="off" size="28" />
+    <select id="openai-model"></select>
+    <div style="display:flex;gap:6px;margin-top:6px;">
+      <button id="openai-fetch-models" type="button" data-i18n="chat.openai.fetchModels">モデル一覧を取得</button>
+    </div>
+    <p id="openai-models-status" class="hint" aria-live="polite"></p>
+  </div>
+  <div id="sakura-fields" hidden>
+    <p class="hint" data-i18n-html="chat.sakura.hint"></p>
+    <p class="hint" data-i18n-html="chat.openai.security"></p>
+    <label class="field-label" for="sakura-api-key" data-i18n="chat.openai.keyLabel">APIキー / トークン</label>
+    <input id="sakura-api-key" type="password" placeholder="アカウントトークン" autocomplete="off" size="28" />
+    <label class="field-label" for="sakura-model" data-i18n="chat.openai.modelLabel">モデル</label>
+    <select id="sakura-model"></select>
+    <div style="display:flex;gap:6px;margin-top:6px;">
+      <button id="sakura-fetch-models" type="button" data-i18n="chat.openai.fetchModels">モデル一覧を取得</button>
+    </div>
+    <p id="sakura-models-status" class="hint" aria-live="polite"></p>
   </div>
   <div id="anthropic-fields" hidden>
     <p class="hint" data-i18n-html="chat.anthropic.hint"></p>
