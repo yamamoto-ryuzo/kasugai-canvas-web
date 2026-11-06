@@ -153,12 +153,14 @@ function injectPanel(panel, sections) {
   if (sections.los) nav.push(['tools-los-panel', 'tools.los', '見通し判定']);
   if (sections.export) nav.push(['tools-export-panel', 'tools.export', 'エクスポート']);
   if (sections.general) nav.push(['tools-general-panel', 'display.ariaLabel', '表示']);
+  const firstId = nav.length ? nav[0][0] : null;
   if (nav.length > 1) {
     parts.push(`<nav class="settings-tabs" aria-label="Tools">` + nav.map(([id, key, ja], i) =>
       `<button class="settings-tab${i === 0 ? " active" : ""}" type="button" data-settings-panel="${id}" data-i18n="${key}">${ja}</button>`).join("") + `</nav>`);
   }
+  const hideAttr = id => id === firstId ? "" : " hidden";
   if (sections.measure) parts.push(`
-    <section id="tools-measure-panel" class="settings-subpanel${nav.length ? "" : ""}">
+    <section id="tools-measure-panel" class="settings-subpanel"${hideAttr("tools-measure-panel")}>
       <div class="tool-btnrow">
         <button id="tool-m-distance" type="button" data-i18n="tools.distance">距離</button>
         <button id="tool-m-area" type="button" data-i18n="tools.area">面積</button>
@@ -169,7 +171,7 @@ function injectPanel(panel, sections) {
       <div id="tools-measure-result" class="tool-result" aria-live="polite"></div>
     </section>`);
   if (sections.profile) parts.push(`
-    <section id="tools-profile-panel" class="settings-subpanel" hidden>
+    <section id="tools-profile-panel" class="settings-subpanel"${hideAttr("tools-profile-panel")}>
       <div class="tool-btnrow">
         <button id="tool-profile-draw" type="button" data-i18n="tools.profileDraw">ラインを描く</button>
         <label class="tool-inline"><span data-i18n="tools.profileSamples">サンプル数</span><input id="tool-profile-samples" type="number" min="10" max="500" value="100" /></label>
@@ -181,7 +183,7 @@ function injectPanel(panel, sections) {
       </div>
     </section>`);
   if (sections.los) parts.push(`
-    <section id="tools-los-panel" class="settings-subpanel" hidden>
+    <section id="tools-los-panel" class="settings-subpanel"${hideAttr("tools-los-panel")}>
       <p class="hint" data-i18n="tools.losHint">観測点→対象点の順にクリックします。</p>
       <div class="tool-btnrow">
         <button id="tool-los" type="button" data-i18n="tools.losPick">2点を指定</button>
@@ -191,7 +193,7 @@ function injectPanel(panel, sections) {
       <div id="tools-los-result" class="tool-result" aria-live="polite"></div>
     </section>`);
   if (sections.export) parts.push(`
-    <section id="tools-export-panel" class="settings-subpanel" hidden>
+    <section id="tools-export-panel" class="settings-subpanel"${hideAttr("tools-export-panel")}>
       <div class="tool-btnrow">
         <select id="tool-export-layer"></select>
         <select id="tool-export-format">
@@ -209,7 +211,7 @@ function injectPanel(panel, sections) {
       <p class="hint" data-i18n="tools.exportHintFormats">CSV/TSV は WKT 列付き、Shapefile はジオメトリ種別ごとに分割して ZIP にまとめます。</p>
     </section>`);
   if (sections.general) parts.push(`
-    <section id="tools-general-panel" class="settings-subpanel" hidden>
+    <section id="tools-general-panel" class="settings-subpanel"${hideAttr("tools-general-panel")}>
       <label class="set-row"><input id="display-minimap" type="checkbox" /><span data-i18n="display.minimap"> ミニマップを表示</span></label>
       <label class="set-row"><input id="display-graticule" type="checkbox" /><span data-i18n="display.graticule"> 緯度経度グリッド</span></label>
     </section>`);

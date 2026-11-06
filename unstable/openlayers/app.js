@@ -44,11 +44,7 @@ import { loadCompiledQml, olQmlStyleFunction, compiledScaleToResRange, installLa
 import { defaults as defaultControls } from "https://cdn.jsdelivr.net/npm/ol@10.11.0/control/defaults.js";
 import ScaleLine from "https://cdn.jsdelivr.net/npm/ol@10.11.0/control/ScaleLine.js";
 import MousePosition from "https://cdn.jsdelivr.net/npm/ol@10.11.0/control/MousePosition.js";
-import DoubleClickZoom from "https://cdn.jsdelivr.net/npm/ol@10.11.0/interaction/DoubleClickZoom.js";
 import { createStringXY } from "https://cdn.jsdelivr.net/npm/ol@10.11.0/coordinate.js";
-import { diagnoseHubLayerError } from "../shared/hub-diag.js";
-import { createMinimap } from "../shared/minimap.js";
-import { initGeoTools2d } from "../shared/geo-tools-2d.js";
 
 const VECTOR_TYPES = new Set(["geojson", "layer", "geoparquet", "parquet", "flatgeobuf", "fgb", "gpkg", "geopackage", "csv", "tsv", "duckdb", "sql", "kml", "kmz", "wfs", "shp", "shapefile"]);
 // ⏷フィルタ編集の対象（where= またはクエリ全文の再読み込みが効く形式）
@@ -1464,78 +1460,6 @@ map.on("moveend", () => {
   invalidateDeckTerrainCovers(deckInst);
 });
 
-// ---- ツール（計測・標高断面・見通し・緯度経度グリッド・エクスポート）----
-// オーバーレイは VectorLayer へ FC を流し、kind プロパティでスタイル分岐する
-const toolFmt = new GeoJSON();
-const toolSrc = new VectorSource();
-const gratSrc = new VectorSource();
-const toolStyleFn = feature => {
-  const kind = feature.get("kind");
-  const text = feature.get("text");
-  if (kind === "poly") {
-    return new Style({ fill: new Fill({ color: "rgba(255,255,0,0.25)" }), stroke: new Stroke({ color: "#ffff00", width: 2 }) });
-  }
-  if (kind === "point" || kind === "los-block" || kind === "hover") {
-    const color = kind === "los-block" ? "#ff0000" : kind === "hover" ? "#00bfff" : "#ffff00";
-    return new Style({ image: new CircleStyle({ radius: 5, fill: new Fill({ color }), stroke: new Stroke({ color: "#000000", width: 1.5 }) }) });
-  }
-  if (kind === "grat") return new Style({ stroke: new Stroke({ color: "rgba(136,136,136,0.55)", width: 1 }) });
-  if (text) {
-    return new Style({ text: new Text({ text: String(text), offsetY: kind === "grat-label" ? 0 : -12, fill: new Fill({ color: "#ffffff" }), stroke: new Stroke({ color: "#000000", width: 3 }) }) });
-  }
-  const color = kind === "los-ok" ? "#32cd32" : kind === "los-bad" ? "#ff0000" : kind === "los-line" ? "#ffa500" : "#ffff00";
-  return new Style({ stroke: new Stroke({ color, width: 3 }) });
-};
-const toolLayer = new VectorLayer({ source: toolSrc, style: toolStyleFn, zIndex: 99 });
-const gratLayer = new VectorLayer({ source: gratSrc, style: toolStyleFn, zIndex: 98 });
-map.addLayer(gratLayer);
-map.addLayer(toolLayer);
-const toolOverlayOf = src => ({
-  update: fc => {
-    try {
-      src.clear();
-      src.addFeatures(toolFmt.readFeatures(fc, { featureProjection: "EPSG:3857", dataProjection: "EPSG:4326" }));
-    } catch (_) {}
-  },
-});
-
-const geoTools = initGeoTools2d({
-  panel: "#pane-tools",
-  overlay: toolOverlayOf(toolSrc),
-  graticuleOverlay: toolOverlayOf(gratSrc),
-  getBounds: () => {
-    const b = getViewBounds();
-    if (!b) return null;
-    const west = b.ranges[0]?.west;
-    const east = b.ranges[b.ranges.length - 1]?.east;
-    return { west, south: b.south, east, north: b.north };
-  },
-  setCursor: c => { map.getTargetElement().style.cursor = c; },
-  setInteractive: on => {
-    map.getInteractions().forEach(i => { if (i instanceof DoubleClickZoom) i.setActive(!on); });
-  },
-  getOrderedLayerItems: () => layerEntries.map((e, i) => (e.item.id ||= String(i), e.item)),
-  isVectorLayerItem: item => !!item && VECTOR_TYPES.has(item.type),
-  isQueryLayerItem: item => !!item && (item._viewportQuery || isViewportQueryItem(item)),
-  getLayerGeoJson: id => layerEntries.find(e => e.item.id === id)?.item._geojson || null,
-});
-
-// ミニマップ（表示>一般トグル。範囲矩形+クリック移動）
-const minimap = createMinimap({
-  container: "#minimap",
-  checkbox: "#display-minimap",
-  tileUrl: () => currentBaseEntries[Number(panel.basemapSelect?.value ?? 0)]?.item?.url || "",
-  getBounds: () => {
-    const b = getViewBounds();
-    if (!b) return null;
-    const west = b.ranges[0]?.west;
-    const east = b.ranges[b.ranges.length - 1]?.east;
-    return [[b.south, west], [b.north, east]];
-  },
-  flyTo: ({ lng, lat }) => map.getView().animate({ center: fromLonLat([lng, lat]), duration: 400 }),
-});
-map.getView().on("change:center", minimap.scheduleUpdate);
-
 // 表示範囲の移動に追従して URL 反映 + 再クエリする
 let requeryTimer = null;
 map.on("moveend", () => {
@@ -1959,7 +1883,6 @@ window.kasugaiApi = createPlayerApi({
   getFlyPaths: kascFlyPaths.getFlyPaths,
   persistFlyPath: kascFlyPaths.persistFlyPath,
   syncFlyPathLine: kascFlyPaths.syncFlyPathLine,
-  geoTools: () => geoTools,
 });
 mountEngineSwitcher(document.querySelector("#engines"), "openlayers");
 // カレント状態ファイル(Cesium規約)へ現在値を反映する(変化イベント駆動)
