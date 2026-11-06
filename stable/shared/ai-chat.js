@@ -185,6 +185,10 @@ async function probeWebgisHub() {
         webgisHub = {
           endpoint: `http://127.0.0.1:${port}/agent`,
           providers: d.providers || {},
+          // version は 6.5.5〜、vector フィールドは /vector 追加ビルド（6.19〜）のみ。
+          // 無い＝旧ハブとして更新導線へ回す判定材料に使う
+          version: typeof d.version === "string" ? d.version : null,
+          hasVector: "vector" in d,
         };
         return webgisHub;
       }
@@ -194,12 +198,15 @@ async function probeWebgisHub() {
   return null;
 }
 // /health をポーリングしてハブの立ち上がりを待つ（自己インストール exe の
-// 実行待ち用。TTL を無視して都度疎通する）
-async function waitForWebgisHub(timeoutMs) {
+// 実行待ち用。TTL を無視して都度疎通する）。
+// until を渡すとそれを満たすハブだけを返す — 旧ハブの更新待ちでは、
+// 更新前にすでに応答している旧ハブで即完了しないよう条件を絞る
+async function waitForWebgisHub(timeoutMs, until) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     webgisHub = undefined;
-    if (await probeWebgisHub()) return webgisHub;
+    const hub = await probeWebgisHub();
+    if (hub && (!until || until(hub))) return hub;
     await new Promise(r => setTimeout(r, 2000));
   }
   return null;
@@ -211,12 +218,19 @@ async function waitForWebgisHub(timeoutMs) {
 // ブラウザから exe を直接起動することはできないため、ユーザー操作は
 // 「DL した exe を実行」の1回のみ（以後はログイン時自動起動）
 let hubInstallWait = null; // 重複実行ガード
-async function offerHubInstall(provider, auto) {
+// prev = 更新元の旧ハブ情報 {version}（旧ハブ検出からの更新導線で渡す。
+// 未定義なら新規インストール待ち＝最初に応答したハブを返す）
+async function offerHubInstall(provider, auto, prev) {
   const note = document.querySelector("#bridge-hub-note");
   const btn = document.querySelector("#bridge-hub-install");
   const status = document.querySelector("#bridge-hub-status");
   if (!note || !btn) return;
   note.hidden = false;
+  // 更新待ち: 旧ハブは実行前から応答しているため「応答した」だけでは完了と
+  // みなせない。/vector 対応フィールドの出現（新ビルドの標識）か、
+  // version の変化をもって新版へ置き換わったと判定する
+  const until = prev === undefined ? null
+    : (h) => h.hasVector || (h.version !== null && h.version !== prev.version);
   const start = async () => {
     // exe のダウンロードは常に発火する（待機中の再クリック＝再DL・再案内
     // のリトライ導線。ポーリング自体は1本に保つ）
@@ -229,7 +243,7 @@ async function offerHubInstall(provider, auto) {
     if (status) status.textContent = t("chat.bridge.hubWaitExe");
     if (hubInstallWait) return hubInstallWait;
     hubInstallWait = (async () => {
-      const hub = await waitForWebgisHub(180000);
+      const hub = await waitForWebgisHub(180000, until);
       if (hub) {
         const input = document.querySelector("#agent-endpoint");
         if (input && !input.value.trim()) input.value = hub.endpoint;
@@ -873,13 +887,17 @@ export function setupAiSettings() {
     const fallback = configured || bridgeCandidates(provider)[0];
     setBridgeStatus(ui, t(`chat.${provider}.endpoint`, { endpoint: fallback }), true);
     const found = configured ? await pingBridge(configured, provider) : await detectBridge(provider);
-    // /health に version が無いハブは旧版（fallback 判定等に非対応）なので
+    // /health に version が無いハブ（fallback 判定等に非対応）や
+    // /vector フィールドの無いハブ（新機能が使えない）は旧版なので
     // 接続OK扱いせず「要更新」として明示し接続状態も NG にする
-    const outdatedHub = found && found.hub === true && typeof found.version !== "string";
+    const outdatedHub = found && found.hub === true && (!found.version || !found.hasVector);
     if (outdatedHub) {
       providerConnDetail[provider] = t("chat.bridge.hubOld", { endpoint: found.endpoint });
       providerConnState = { provider, state: "ng", detail: providerConnDetail[provider] };
       setBridgeStatus(ui, providerConnDetail[provider], false);
+      // 更新導線を開く（ボタン → bridge-hub.zip 再DL → 実行で自己インストールが
+      // 旧ハブを停止して新版へ置き換える。待機は更新後の応答まで絞る）
+      void offerHubInstall(provider, false, { version: found.version });
     } else {
       setBridgeStatus(ui,
         found
@@ -1923,14 +1941,14 @@ const CHAT_TOOLS = [{
     },
     {
       name: "addLayer",
-      description: "ベクターレイヤを追加して即座に適用する。type: geojson(既定)/layer/geoparquet/flatgeobuf/gpkg/duckdb/sql。target は duckdb 以外はURLまたは DATA/相対パス、sql は SELECT 文。duckdb には options で where=/limit=/format=/bbox=auto 等を指定可。http(s) URL は実行前に実在確認され、到達不能なものは拒否されるため確実に存在するURLのみ指定する。追加はインスペクター設定に反映されるのでユーザーが明示した場合のみ使う",
+      description: "ベクターレイヤを追加して即座に適用する。type: geojson(既定)/layer/geoparquet/flatgeobuf/gpkg/duckdb/sql/kml/kmz/wfs/shp/csv/tsv/image/model/geotiff(cog/tiff)。target は duckdb・sql 以外はURLまたは DATA/相対パス、sql は SELECT 文。wfs は options に typename= が必須(version=/maxfeatures=/cql_filter= も指定可)、shp は .zip 一式または .shp+sidecar のURL。duckdb には options で where=/limit=/format=/bbox=auto 等を指定可。geotiff/cog/tiff は GeoTIFF・COG ラスタをオーバーレイ表示する(Cesium エンジンのみ・options で mode=auto|tiles|overlay・opacity=・maxsize= 等)。http(s) URL は実行前に実在確認され、到達不能なものは拒否されるため確実に存在するURLのみ指定する。追加はインスペクター設定に反映されるのでユーザーが明示した場合のみ使う",
       parameters: {
         type: "OBJECT",
         properties: {
           title: { type: "STRING", description: "レイヤ名" },
           target: { type: "STRING", description: "データのURLまたは DATA/ファイル名(sql: の場合は SELECT 文)" },
-          type: { type: "STRING", description: "geojson/layer/geoparquet/flatgeobuf/gpkg/duckdb/sql (省略時 geojson)" },
-          options: { type: "STRING", description: "省略可。duckdb: の where=/limit=/format=/bbox=auto/proxy=on、render=primitive、attr=出典 等(|区切り)" },
+          type: { type: "STRING", description: "geojson/layer/geoparquet/flatgeobuf/gpkg/duckdb/sql/kml/kmz/wfs/shp/csv/tsv/image/model/geotiff/cog/tiff (省略時 geojson)" },
+          options: { type: "STRING", description: "省略可。wfs: の typename=/version=/maxfeatures=/cql_filter=、duckdb: の where=/limit=/format=/bbox=auto/proxy=on、render=primitive、geotiff: の mode=/opacity=/maxsize=/bands=、attr=出典 等(|区切り)" },
         },
         required: ["title", "target"],
       },
@@ -2037,6 +2055,55 @@ const CHAT_TOOLS = [{
           name: { type: "STRING", description: "レイヤ名またはID(listLayersで確認)" },
         },
         required: ["name"],
+      },
+    },
+    {
+      name: "exportLayer",
+      description: "レイヤーをファイルとしてダウンロード出力する（ブラウザのダウンロードに保存）。format: geojson(既定)/csv/tsv/kml/fgb/shp。csv・tsv はジオメトリを WKT 列として出力（QGIS の CSV エクスポート互換）、kml は GoogleEarth 向け、fgb は FlatGeobuf バイナリ、shp はジオメトリ種別ごとの Shapefile を .zip に同梱",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          name: { type: "STRING", description: "レイヤ名またはID(listLayersで確認)" },
+          format: { type: "STRING", description: "出力形式 geojson/csv/tsv/kml/fgb/shp（省略時 geojson）" },
+        },
+        required: ["name"],
+      },
+    },
+    {
+      name: "spatialSelect",
+      description: "範囲（ポリゴン/矩形/円）内にある読込済みベクター地物を選択する。region は GeoJSON Polygon/MultiPolygon/Feature、{bbox:[西,南,東,北]}、{center:[lng,lat],radiusMeters} のいずれか。省略時はユーザーが最後に描いた範囲を使う。結果は地図上でハイライトされる",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          layer: { type: "STRING", description: "対象レイヤ名またはID（省略時は全ベクターレイヤ）" },
+          region: { type: "STRING", description: "範囲指定（GeoJSON polygon / {\"bbox\":[w,s,e,n]} / {\"center\":[lng,lat],\"radiusMeters\":m}）" },
+        },
+      },
+    },
+    {
+      name: "aggregateWithin",
+      description: "範囲内の地物を属性で集計（ポリゴン内集計・空間結合）。件数だけでなく groupField 指定でカテゴリ別、valueField 指定で sum/avg/min/max も取れる。region 指定は spatialSelect と同じ",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          layer: { type: "STRING", description: "対象レイヤ名またはID（省略時は全ベクターレイヤ）" },
+          region: { type: "STRING", description: "範囲指定（GeoJSON polygon / {\"bbox\":[w,s,e,n]} / {\"center\":[lng,lat],\"radiusMeters\":m}）" },
+          groupField: { type: "STRING", description: "グループ化する属性名（省略時は全体集計）" },
+          valueField: { type: "STRING", description: "合計/平均/最小/最大を取る数値属性名" },
+        },
+      },
+    },
+    {
+      name: "createBuffer",
+      description: "地物・描画範囲に一定距離のバッファ（帯）を生成し新規レイヤーとして追加する。geometry は GeoJSON geometry/Feature。範囲指定（bbox/center+radiusMeters）も可。省略時は最後の選択範囲をバッファする。生成物は spatialSelect/aggregateWithin の region として続けて使える",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          geometry: { type: "STRING", description: "対象ジオメトリ（GeoJSON geometry/Feature、または {\"center\":[lng,lat]}・{\"bbox\":[w,s,e,n]} 形式）" },
+          radiusMeters: { type: "NUMBER", description: "バッファ距離(m)" },
+          title: { type: "STRING", description: "生成レイヤー名" },
+        },
+        required: ["radiusMeters"],
       },
     },
     {
@@ -2380,6 +2447,88 @@ const CHAT_TOOLS = [{
           ids: { type: "ARRAY", description: "有効化する agents の指示書ID一覧", items: { type: "STRING" } },
         },
         required: ["ids"],
+      },
+    },
+    {
+      name: "measureDistance",
+      description: "折れ線の測地線距離を計算し、結果ラインを地図へ描画する。座標は [[lng,lat],...]（度）",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          coordinates: { type: "ARRAY", items: { type: "ARRAY", items: { type: "NUMBER" } }, description: "[[lng,lat],...] の頂点列（2点以上・度）" },
+        },
+        required: ["coordinates"],
+      },
+    },
+    {
+      name: "measureArea",
+      description: "ポリゴンの面積と周囲長を測地線近似で計算し、結果を地図へ描画する。座標は [[lng,lat],...]（度・3点以上）",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          coordinates: { type: "ARRAY", items: { type: "ARRAY", items: { type: "NUMBER" } }, description: "[[lng,lat],...] の頂点列（3点以上・度）" },
+        },
+        required: ["coordinates"],
+      },
+    },
+    {
+      name: "measureBearing",
+      description: "2点間の測地線方位角（初方位・終方位）と距離を計算し、ラインを地図へ描画する",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          from: { type: "ARRAY", items: { type: "NUMBER" }, description: "始点 [lng,lat]（度）" },
+          to: { type: "ARRAY", items: { type: "NUMBER" }, description: "終点 [lng,lat]（度）" },
+        },
+        required: ["from", "to"],
+      },
+    },
+    {
+      name: "elevationProfile",
+      description: "ラインに沿った地形標高をサンプリングし、距離-標高の断面データを返す。断面グラフとラインも地図上に表示する。地形OFF時は地理院標高API（日本域）へフォールバック",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          coordinates: { type: "ARRAY", items: { type: "ARRAY", items: { type: "NUMBER" } }, description: "[[lng,lat],...] のライン頂点列（2点以上・度）" },
+          samples: { type: "NUMBER", description: "サンプル数（省略時100・10-500）" },
+        },
+        required: ["coordinates"],
+      },
+    },
+    {
+      name: "lineOfSight",
+      description: "観測点から対象点への地形を考慮した見通し（LOS）可否を判定し、視線・遮蔽点を地図へ描画する。高度は地表からのオフセット(m)",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          from: { type: "ARRAY", items: { type: "NUMBER" }, description: "観測点 [lng,lat]（度）" },
+          to: { type: "ARRAY", items: { type: "NUMBER" }, description: "対象点 [lng,lat]（度）" },
+          observerHeight: { type: "NUMBER", description: "観測点の地表からの高さ(m・省略時0)" },
+          targetHeight: { type: "NUMBER", description: "対象点の地表からの高さ(m・省略時0)" },
+        },
+        required: ["from", "to"],
+      },
+    },
+    {
+      name: "setGraticule",
+      description: "緯度経度グリッド（緯線・経線と度ラベル）の表示をON/OFFする",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          on: { type: "BOOLEAN", description: "true で表示・false で非表示" },
+        },
+        required: ["on"],
+      },
+    },
+    {
+      name: "setMinimap",
+      description: "画面左下のミニマップ（現在の表示範囲を示すオーバービュー地図）の表示をON/OFFする",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          on: { type: "BOOLEAN", description: "true で表示・false で非表示" },
+        },
+        required: ["on"],
       },
     },
   ],
@@ -2970,7 +3119,7 @@ export async function executeChatTool(name, args = {}) {
   if (name === "showReport") return window.kasugaiApi.showReport(args);
   if (name === "listProjects") return { projects: window.kasugaiApi.listProjects() };
   if (name === "switchProject") {
-    const ok = window.kasugaiApi.switchProject(args.projectId);
+    const ok = await window.kasugaiApi.switchProject(args.projectId);
     return { ok, message: ok ? undefined : t("tool.projectNotFound", { name: args.projectId }) };
   }
   if (name === "toggleDrawMode") return window.kasugaiApi.toggleDrawMode();
@@ -3123,6 +3272,41 @@ export async function executeChatTool(name, args = {}) {
     }
     return { geojson };
   }
+  if (name === "exportLayer") {
+    try {
+      const r = await window.kasugaiApi.exportLayer(args.name, args.format || "geojson");
+      return r && r.ok ? r : { ok: false, message: t("tool.layerDataNotFound", { name: args.name }) };
+    } catch (error) {
+      return { ok: false, message: String(error && error.message || error) };
+    }
+  }
+  if (name === "spatialSelect" || name === "aggregateWithin" || name === "createBuffer") {
+    try {
+      const parseRegion = v => {
+        if (v == null) return undefined;
+        if (typeof v === "string") { try { return JSON.parse(v); } catch { return undefined; } }
+        return v;
+      };
+      const opts = {
+        layer: args.layer,
+        region: parseRegion(args.region),
+        geometry: parseRegion(args.geometry),
+        polygon: parseRegion(args.polygon),
+        bbox: args.bbox,
+        center: args.center,
+        radiusMeters: args.radiusMeters ?? args.radius,
+        groupField: args.groupField,
+        valueField: args.valueField,
+        title: args.title,
+      };
+      const api = window.kasugaiApi;
+      if (!api?.[name]) return { ok: false, message: t("tool.unsupported") };
+      const r = await api[name](opts);
+      return r && typeof r === "object" ? r : { ok: !!r };
+    } catch (error) {
+      return { ok: false, message: String(error && error.message || error) };
+    }
+  }
   if (name === "addDataLayer") {
     const item = await window.kasugaiApi.addDataLayer(args.title, args.geojson);
     return item ? { ok: true, id: item.id } : { ok: false, message: t("tool.invalidGeoJson") };
@@ -3160,6 +3344,13 @@ export async function executeChatTool(name, args = {}) {
   if (name === "getGsiElevation") return await window.kasugaiApi.getGsiElevation(args.latitude, args.longitude);
   if (name === "getGsiShareUrl") return window.kasugaiApi.getGsiShareUrl();
   if (name === "setGsiGlobe") return window.kasugaiApi.setGsiGlobe(args.on);
+  if (name === "measureDistance") return window.kasugaiApi.measureDistance(args.coordinates);
+  if (name === "measureArea") return window.kasugaiApi.measureArea(args.coordinates);
+  if (name === "measureBearing") return window.kasugaiApi.measureBearing(args.from, args.to);
+  if (name === "elevationProfile") return await window.kasugaiApi.elevationProfile(args.coordinates, args.samples);
+  if (name === "lineOfSight") return await window.kasugaiApi.lineOfSight(args.from, args.to, args);
+  if (name === "setGraticule") { window.kasugaiApi.setGraticule(!!args.on); return { ok: true }; }
+  if (name === "setMinimap") { window.kasugaiApi.setMinimap(!!args.on); return { ok: true }; }
   return { ok: false, message: t("tool.unknown", { name }) };
 }
 
@@ -3224,7 +3415,13 @@ async function pingBridge(endpoint, expect) {
     if (r.ok && d?.ok) {
       // ブリッジハブ（hub:true）は全プロバイダを統合して受けるため expect に適合
       if (expect && d?.bridge && d.bridge !== expect && !d?.hub) return null;
-      return { endpoint, model: d?.model || "?", bridge: d?.bridge || "", providers: d?.providers || null };
+      return {
+        endpoint, model: d?.model || "?", bridge: d?.bridge || "", providers: d?.providers || null,
+        // 旧ハブ判定用（version 無し=6.5.5 より前、vector 無し=/vector 追加前）
+        hub: d?.hub === true,
+        version: typeof d?.version === "string" ? d.version : null,
+        hasVector: "vector" in d,
+      };
     }
   } catch (e) {}
   return null;
@@ -3528,8 +3725,16 @@ async function verifyBridgeProviderConnection(v, token) {
   // 疎通するエンドポイントを決める。保存済みが死んでいても他候補が生きていれば
   // そちらへ自己修復する（healBridgeEndpoint と同じ効果）
   let endpoint = "";
+  let staleHub = null;
   for (const candidate of bridgeCandidates(v)) {
-    if (await pingBridge(candidate, v)) { endpoint = candidate; break; }
+    const found = await pingBridge(candidate, v);
+    if (found) {
+      endpoint = candidate;
+      // /vector 未対応の旧ハブは接続自体は生きているため ok 扱いとしつつ、
+      // 詳細メッセージ（ホバー表示）へ「要更新」を残す
+      if (found.hub === true && (!found.version || !found.hasVector)) staleHub = found;
+      break;
+    }
     if (providerVerifyToken !== token || getChatProvider() !== v) return false;
   }
   if (!endpoint) return false;
@@ -3553,7 +3758,10 @@ async function verifyBridgeProviderConnection(v, token) {
       const d = await r.json().catch(() => ({}));
       if (d?.model) detectedBridgeModels[v] = d.model;
       if (d?.error) providerConnDetail[v] = String(d.error);
-      if (r.ok && !d?.error && !d?.pending) { providerConnDetail[v] = ""; return true; }
+      if (r.ok && !d?.error && !d?.pending) {
+        providerConnDetail[v] = staleHub ? t("chat.bridge.hubOld", { endpoint }) : "";
+        return true;
+      }
     } catch (e) { /* リトライ */ }
     if (attempt < 5) await new Promise(resolve => setTimeout(resolve, 8000));
   }
@@ -4981,6 +5189,11 @@ export function startRemoteCommandLoop() {
         const res = await fetch(backendUrl(`/api/command?since=${remoteCommandSince}&wait=25`), { cache: "no-store" });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json().catch(() => ({}));
+        // サーバー再起動でコマンド id が振り直された場合は since を巻き戻す
+        // (巻き戻さないと新 id が常に since 以下となり全コマンドを取りこぼす)
+        if (remoteCommandInitialized && (Number(data?.latest) || 0) < remoteCommandSince) {
+          remoteCommandSince = 0;
+        }
         if (!remoteCommandInitialized) {
           // ページ読込前に滞留したコマンドは実行せず、以降の新規分のみ処理する
           remoteCommandSince = Number(data?.latest) || 0;

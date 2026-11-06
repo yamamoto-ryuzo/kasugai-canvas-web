@@ -15,12 +15,16 @@ import { mountEngineSwitcher } from "../shared/engine-switch.js";
 import { matchSessionState, bindSessionState, applySessionState, sessionBootView, sessionVisChanges } from "../shared/session-state.js";
 import { initNavTools } from "../shared/nav-tools.js";
 import { formatLatLng } from "../shared/coords-format.js";
+import { installLocalCrsUI } from "../shared/coords-local.js";
+import { diagnoseHubLayerError } from "../shared/hub-diag.js";
+import { createMinimap } from "../shared/minimap.js";
+import { initGeoTools2d } from "../shared/geo-tools-2d.js";
 import { initPrint } from "../shared/print.js";
 import { loadCompiledQml, specToStyle, qmlLegendSwatchDataUrl, defaultVectorLegendSpec } from "../shared/qml-2d.js";
 import { mountSunControls } from "../shared/sun-time.js";
 
 const TERRAIN_URL = "https://terrain.reearth.land/cesium-mesh/ellipsoid/{z}/{x}/{y}.terrain";
-const VECTOR_TYPES = new Set(["geojson", "layer", "geoparquet", "parquet", "flatgeobuf", "fgb", "gpkg", "geopackage", "csv", "tsv", "duckdb", "sql"]);
+const VECTOR_TYPES = new Set(["geojson", "layer", "geoparquet", "parquet", "flatgeobuf", "fgb", "gpkg", "geopackage", "csv", "tsv", "duckdb", "sql", "kml", "kmz", "wfs", "shp", "shapefile"]);
 const RASTER_TYPES = new Set(["xyz", "tile"]);
 // ⏷フィルタ編集の対象（where= またはクエリ全文の再読み込みが効く形式）
 const QUERY_TYPES = new Set(["gpkg", "geopackage", "duckdb", "sql"]);
@@ -189,7 +193,11 @@ async function maybeLoadEntry(entry) {
       // （OFF→ON→OFF 等の競合で、非表示のはずのレイヤが残るのを防ぐ）
       navaraSetShow(entry, entry.item.visible !== false);
     }
-  } catch (e) { entry.failed = true; entry.error = String(e?.message || e); console.warn("layer failed", entry.item.title, e); }
+  } catch (e) {
+    entry.failed = true;
+    entry.error = String((await diagnoseHubLayerError(entry.item, e))?.message || e?.message || e);
+    console.warn("layer failed", entry.item.title, e);
+  }
   entry.loading = false; syncRowStatus(entry);
 }
 
@@ -770,7 +778,7 @@ async function renderLayers(doc, baseUrl) {
     try {
       const r = await addKascLayer(item, baseUrl);
       if (r) { entry.src = r.src; entry.layer = r.layer; entry.desc = r.desc; }
-    } catch (e) { entry.failed = true; entry.error = String(e?.message || e); console.warn("layer failed", item.title, e); }
+    } catch (e) { entry.failed = true; entry.error = String((await diagnoseHubLayerError(item, e))?.message || e?.message || e); console.warn("layer failed", item.title, e); }
     progress(++done, visibleCount, item.title || item.url);
   }
   const notes = unsupported.map(u => `${u.type}: ${u.title || u.url || ""}`).join(" / ");
@@ -1175,6 +1183,7 @@ async function saveToDataDir(name, content) {
     viewToUrl: () => { syncCamFromView(); return urlViewFromCam(); },
     flyToView: v => { if (Number.isFinite(v.latitude) && Number.isFinite(v.longitude)) flyTo({ longitude: v.longitude, latitude: v.latitude, height: v.height ?? (Number.isFinite(v.zoom) ? viewZoomToHeight(v.latitude, v.zoom, 512) : undefined), heading: v.heading, pitch: v.pitch ?? (Number.isFinite(v.pitchDeg) ? v.pitchDeg - 90 : undefined) }); },
     getEntryGeoJson: e => e.item._geojson,
+    geoTools: () => geoTools,
     getCams: () => currentCams,
     getThemes: () => currentThemes,
     applyThemeByName: name => {
@@ -1212,6 +1221,60 @@ window.addEventListener("popstate", applyUrlView);
 window.addEventListener("hashchange", applyUrlView);
 
 // ---- ナビゲーション共通ツール（shared/nav-tools.js）----
+installLocalCrsUI({ anchor: document.querySelector("#coords-datum") });
+
+// ミニマップ（表示>一般トグル。Navara は表示範囲矩形が取れないため中心マーカー表示）
+// ---- ツール（計測・標高断面・見通しは API 専用、エクスポートはパネル操作）----
+// Navara はピッキング未対応のため対話描画は無し。API(measure*/elevationProfile/
+// lineOfSight)の結果は色別の geojson ベクターレイヤーとして重ねる
+const navaraToolLayers = new Map(); // color → {src, layer}
+function navaraToolUpdate(fc) {
+  const groups = {};
+  for (const f of fc?.features || []) {
+    const k = f.properties?.kind;
+    if (k === "grat" || k === "grat-label") continue;
+    const color = f.properties?.color
+      || (k === "los-ok" ? "#32cd32" : (k === "los-bad" || k === "los-block") ? "#ff0000" : "#ffff00");
+    (groups[color] ||= []).push(f);
+  }
+  for (const [, cur] of navaraToolLayers) {
+    try { cur?.layer?.delete(); } catch (_) {}
+    try { cur?.src?.delete(); } catch (_) {}
+  }
+  navaraToolLayers.clear();
+  for (const [color, feats] of Object.entries(groups)) {
+    if (!feats.length) continue;
+    const src = view.addSource({ type: "geojson", data: { type: "FeatureCollection", features: feats }, tiled: false });
+    const layer = view.addLayer({ type: "vector", source: src,
+      polygon: { color: css2hex(color), clampToGround: true, opacity: 0.25, transparent: true },
+      polyline: { color: css2hex(color), width: 3, clampToGround: true, opacity: 1 },
+      point: { color: css2hex(color), clampToGround: true, opacity: 1 } });
+    navaraToolLayers.set(color, { src, layer });
+  }
+}
+const geoTools = initGeoTools2d({
+  sections: { measure: false, spatial: false, draw: false, profile: false, los: false, export: true, general: false },
+  overlay: { update: navaraToolUpdate },
+  graticuleOverlay: { update: () => {} },
+  getOrderedLayerItems: () => layerEntries.map((e, i) => (e.item.id ||= String(i), e.item)),
+  isVectorLayerItem: item => !!item && VECTOR_TYPES.has(item.type),
+  isQueryLayerItem: () => false,
+  getLayerGeoJson: id => layerEntries.find(e => e.item.id === id)?.item._geojson || null,
+});
+
+const minimap = createMinimap({
+  container: "#minimap",
+  checkbox: "#display-minimap",
+  tileUrl: () => baseDocs[currentBasemapIdx]?.url || "",
+  getCenter: () => ({ lat: lastCam.lat, lng: lastCam.lng }),
+  // クリックした地点へ現在の高さ・姿勢のまま移動
+  flyTo: ({ lng, lat }) => flyTo({ longitude: lng, latitude: lat }),
+});
+try {
+  view.camera.on("move", minimap.scheduleUpdate);
+  view.camera.on("moveend", minimap.scheduleUpdate);
+} catch (_) {}
+
 initNavTools({
   el: document.getElementById("map"),
   getView: () => ({ lat: lastCam.lat, lng: lastCam.lng, height: lastCam.height, heading: lastCam.heading, pitch: lastCam.pitch }),

@@ -188,7 +188,7 @@
   #basemap-toggle { width: 24px; min-width: 24px; min-height: 24px; padding: 1px 4px;
     border: 0; border-radius: 4px; background: rgba(49,86,79,.16); color: #31564f;
     cursor: pointer; font-size: 17px; line-height: 1; }
-  #load-progress { position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+  #load-progress { position: absolute; bottom: 56px; left: 50%; transform: translateX(-50%);
     z-index: 1005; display: flex; align-items: center; gap: 8px; padding: 5px 12px;
     background: rgba(255,255,255,.95); border-radius: 14px; font-size: 12px;
     box-shadow: 0 2px 8px rgba(0,0,0,.25); max-width: 70vw; }
@@ -225,6 +225,7 @@
   <div class="project-row">
     <select id="project-select"></select>
     <button id="share-copy" type="button" title="現在位置URLをコピー">🔗</button>
+    <button id="tools-open" type="button" title="ツール" aria-label="ツール">🧰</button>
   </div>
   <button id="globe-back" type="button" hidden>← 2D地図に戻る（Globe表示中）</button>
   <div id="tabs">
@@ -277,6 +278,7 @@
 </div>
 <div id="map-wrap">
 <iframe id="gsi-frame" title="地理院地図" allow="geolocation" data-ui-bridge></iframe>
+<div id="minimap" hidden></div>
 <div id="gsi-missing" hidden>
   <div>地理院地図を初期化できませんでした。<br>
   通常は Service Worker 経由で CDN(kasugai-canvas-web) から供給されるか、

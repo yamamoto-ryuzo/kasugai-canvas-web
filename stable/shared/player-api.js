@@ -565,7 +565,22 @@ export function createPlayerApi(hooks) {
     async switchProject(projectId) {
       const sel = document.querySelector("#project-select");
       const exists = [...(sel?.options || [])].some(o => o.value === projectId);
-      if (!exists) return false;
+      if (!exists) {
+        // /api/projects/register 等で起動後に登録された外部プロジェクトは
+        // 選択肢未反映のため、直接ロードを試みてから選択肢へ追加する
+        try { await hooks.loadProject(projectId); } catch (_) { return false; }
+        if (sel) {
+          if (![...sel.options].some(o => o.value === projectId)) {
+            const opt = document.createElement("option");
+            opt.value = projectId;
+            opt.textContent = projectId;
+            sel.append(opt);
+          }
+          sel.value = projectId;
+        }
+        this.emit("project-changed", { projectId });
+        return true;
+      }
       await hooks.loadProject(projectId);
       if (sel) sel.value = projectId;
       this.emit("project-changed", { projectId });
@@ -859,5 +874,22 @@ export function createPlayerApi(hooks) {
     },
     getAuth() { return window.kasugaiAuth || null; },
   };
+
+  // ---- 計測・断面・見通し・グリッド（geo-tools フック。エンジンが
+  // shared/geo-tools-2d.js（または Cesium geo-tools.js）の api を渡す。
+  // ツール公開可否は api メソッドの有無で決まるため、フック無しでは追加しない）----
+  if (hooks.geoTools) {
+    const gt = () => (typeof hooks.geoTools === "function" ? hooks.geoTools() : hooks.geoTools);
+    api.measureDistance = coords => (gt()?.measureDistance(coords) ?? { ok: false });
+    api.measureArea = coords => (gt()?.measureArea(coords) ?? { ok: false });
+    api.measureBearing = (from, to) => (gt()?.measureBearing(from, to) ?? { ok: false });
+    api.elevationProfile = async (coords, samples) => (gt() ? await gt().elevationProfile(coords, samples) : { ok: false });
+    api.lineOfSight = async (from, to, opts) => (gt() ? await gt().lineOfSight(from, to, opts) : { ok: false });
+    api.setGraticule = on => { gt()?.setGraticule(on); return true; };
+    api.exportLayer = (name, format) => (gt() ? gt().exportLayer(name, format || "geojson") : Promise.resolve({ ok: false }));
+    api.spatialSelect = opts => (gt()?.spatialSelect ? gt().spatialSelect(opts || {}) : { ok: false });
+    api.aggregateWithin = opts => (gt()?.aggregateWithin ? gt().aggregateWithin(opts || {}) : { ok: false });
+    api.createBuffer = async opts => (gt()?.createBuffer ? await gt().createBuffer(opts || {}) : { ok: false });
+  }
   return api;
 }
