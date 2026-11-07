@@ -289,9 +289,24 @@ function makePattern(canvas) {
   return _patternCtx.createPattern(canvas, "repeat");
 }
 
+// invertedPolygonRenderer 用: 地物ジオメトリを「世界矩形 − 地物リング(穴)」へ
+// 変換する GeoJSON 変換(MapLibre/Leaflet は焼き込み時に適用)
+const _KASC_WORLD_RING = [[-180, -85], [180, -85], [180, 85], [-180, 85], [-180, -85]];
+export function applyInvertedMaskGeojson(geojson) {
+  for (const f of geojson?.features || []) {
+    const g = f?.geometry;
+    if (!g) continue;
+    if (g.type === "Polygon") {
+      g.coordinates = [_KASC_WORLD_RING, ...g.coordinates];
+    } else if (g.type === "MultiPolygon") {
+      g.coordinates = [[_KASC_WORLD_RING, ...g.coordinates.flat()]];
+    }
+  }
+}
+
 // --- OpenLayers: feature → ol.style.Style のスタイル関数を生成
 export function olQmlStyleFunction(compiled, OL) {
-  const { Style, Fill, Stroke, Circle: CircleStyle, Icon, Text, Point } = OL;
+  const { Style, Fill, Stroke, Circle: CircleStyle, Icon, Text, Point, Polygon } = OL;
   const strokeOf = (line) => new Stroke({
     color: rgbaToCss(line.color), width: line.widthPx ?? 1.5,
     lineDash: line.dash || undefined,
@@ -305,6 +320,17 @@ export function olQmlStyleFunction(compiled, OL) {
     const s = specToStyle(spec);
     const geomType = feature.getGeometry()?.getType() || "";
     const styleOpts = {};
+    // invertedPolygonRenderer: 地物を穴とした世界矩形ポリゴンを描く(マスク効果)
+    if (compiled.inverted && /Polygon/.test(geomType) && feature.getGeometry) {
+      styleOpts.geometry = f => {
+        const g = f.getGeometry();
+        if (!g) return null;
+        const rings = g.getType() === "Polygon" ? g.getCoordinates()
+          : g.getCoordinates().flat(1);
+        const W = [[-2e7, -1e7], [2e7, -1e7], [2e7, 1e7], [-2e7, 1e7], [-2e7, -1e7]];
+        return new Polygon([W, ...rings.map(r => [...r].reverse())]);
+      };
+    }
     // 塗りつぶし: パターン系(hatch/linePattern/pointPattern/imagePattern/gradient)は
     // タイル canvas の CanvasPattern で再現。単色のみなら従来通り色
     if (/Polygon/.test(geomType) && spec.fillParts?.length) {
@@ -479,6 +505,7 @@ let _qmlUid = 0;
 const alphaOf = rgba => (rgba && rgba.length > 3) ? Math.max(0, Math.min(1, rgba[3])) : 1;
 
 export function maplibreApplyQml(geojson, compiled) {
+  if (compiled.inverted) applyInvertedMaskGeojson(geojson);
   // このQMLで使う画像レジストリ(map.addImage する canvas/dataURL → id)
   const icons = new Map();  // id → canvas (点シンボル・centroid)
   const fills = new Map();  // id → canvas (fill-pattern タイル)

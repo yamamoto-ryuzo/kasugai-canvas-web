@@ -775,10 +775,28 @@ function compileRenderer(rendererEl, warnings) {
     case "nullSymbol":
       return { evaluate: () => [], ...ctx };
     case "invertedPolygonRenderer": {
-      // マスク描画は再現できないため、外側シンボルで全地物を描く近似
+      // 「地物の外側を塗る」マスク。内側の renderer-v2 を評価したうえで
+      // spec に inverted フラグを立て、エンジン側が
+      // 世界矩形 − 地物リング(穴)のポリゴンで描画する
+      const inner = [...rendererEl.children].find(c => c.tagName === "renderer-v2");
+      const compiledInner = inner ? compileRenderer(inner, warnings) : null;
+      if (compiledInner) {
+        const innerEval = compiledInner.evaluate;
+        return {
+          evaluate(props) {
+            const r = innerEval(props);
+            if (r == null) return r;
+            if (Array.isArray(r)) return r;
+            return r; // ルール形は {names, scale}
+          },
+          ...compiledInner,
+          inverted: true,
+        };
+      }
+      // 内側 renderer 無し: 最初のシンボルで近似
       const name = [...symbols.keys()][0];
       warnOnce(warnings, "invertedPolygonRenderer は近似描画です(外側シンボルを全面適用)");
-      return { evaluate: () => (name ? [name] : []), ...ctx };
+      return { evaluate: () => (name ? [name] : []), ...ctx, inverted: true };
     }
     case "heatmapRenderer": {
       // ヒートマップ: 半径・重み式・カラーランプを spec として保持し、
@@ -1276,9 +1294,24 @@ function resolveFillLayer(layer, props, images, warnings, tileCache) {
         : [];
       return { centroid: markers };
     }
-    case "GeometryGenerator":
-      warnOnce(warnings, "GeometryGenerator 塗りつぶしは未対応です(スキップ)");
+    case "GeometryGenerator": {
+      const mod = String(p.geometryModifier ?? p.geometry_modifier ?? "");
+      const subType = String(p.symbolType ?? p.symbol_type ?? p.type ?? "").toLowerCase()
+        || (layer.subSymbol?.geomType || "");
+      const isCentroid = /centroid|point_on_surface|pole_of_inaccessibility/i.test(mod);
+      if (isCentroid && /marker|point/i.test(subType) && layer.subSymbol) {
+        // 重心マーカー: エンジン側の centroid 描画経路をそのまま使う
+        const markers = layer.subSymbol.layers.flatMap(l =>
+          l.enabled ? resolveMarkerLayer(l, props, images, warnings) : []);
+        return { centroid: markers };
+      }
+      if (/exterior_ring/i.test(mod)) {
+        warnOnce(warnings, "GeometryGenerator exterior_ring は外周描画で近似します");
+        return { solid: null, outlineViaGenerator: true };
+      }
+      warnOnce(warnings, `GeometryGenerator(${mod.slice(0, 40) || "?"}) 塗りつぶしは未対応です(スキップ)`);
       return {};
+    }
     default:
       warnOnce(warnings, `塗りつぶしシンボル ${layer.cls} は未対応です(単色で代替)`);
       return { solid: parseQgisColor(p.color, [0.5, 0.5, 0.5, 0.7]) };
@@ -1717,7 +1750,7 @@ function parseTextStyle(textStyleEl, settingsEl = null, warnings = new Set()) {
   const bufferSize = sizeToPx(b("bufferSize") ?? 1, b("bufferSizeUnit") || b("bufferSizeUnits") || "MM");
   if (bufEl) {
     if (b("bufferBlendMode") && String(b("bufferBlendMode")) !== "0") warnOnce(warnings, "バッファのブレンドモードは未対応です");
-    if (qgisBool(b("bufferNoFill"))) warnOnce(warnings, "bufferNoFill(内側を塗らない)は未対応です");
+    if (bufferDraw && qgisBool(b("bufferNoFill"))) warnOnce(warnings, "bufferNoFill(内側を塗らない)は未対応です");
   }
   // QFont weight(0-99, >=50 が太字相当)・namedStyle も太字/斜体の決定に使う
   const namedStyle = String(a("namedStyle") || "").toLowerCase();
@@ -2029,6 +2062,7 @@ export function compileQmlStyle(xmlText, baseUrl, preloadedImages = new Map()) {
     unsupported: !!renderer.unsupported,
     heatmap: renderer.heatmap || null,
     cluster: renderer.cluster || null,
+    inverted: !!renderer.inverted,
     symbols: renderer.symbols,
     images,
     // 属性表示メタ。displayFor(props) は displayExpression を評価して

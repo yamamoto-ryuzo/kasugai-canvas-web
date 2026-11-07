@@ -25,6 +25,7 @@ import { groundDeckTileset } from "../shared/deck-ground.js";
 import { buildDeckDrapeLayers, invalidateDeckTerrainCovers, isGoogle3dTilesUrl, withGoogleTileKey, ensureGoogleTileKeyFetch } from "../shared/deck-drape.js";
 import { qmlLegendSwatchDataUrl, defaultVectorLegendSpec, specToStyle, loadCompiledQml, compiledScaleToResRange, resToZoom, installLayerVisibilityResolver, qmlLabelElement } from "../shared/qml-2d.js";
 import { markerLayersToCanvas, fillPartsToTile } from "../shared/qml-style.js";
+import { applyInvertedMaskGeojson } from "../shared/qml-2d.js";
 
 const VECTOR_TYPES = new Set(["geojson", "layer", "geoparquet", "parquet", "flatgeobuf", "fgb", "gpkg", "geopackage", "csv", "tsv", "duckdb", "sql", "kml", "kmz", "wfs", "shp", "shapefile"]);
 // ⏷フィルタ編集の対象（where= またはクエリ全文の再読み込みが効く形式）
@@ -576,6 +577,7 @@ async function addKascLayer(item, baseUrl, preloaded, paneName) {
     if (item.opts?.style) {
       try {
         item._qml = await loadCompiledQml(item.opts.style, baseUrl);
+        if (item._qml?.inverted) applyInvertedMaskGeojson(geojson);
       } catch (e) { console.warn("QML 適用失敗:", item.opts.style, e); }
     }
     // opacity=(0-1): レイヤ透過度。スタイル関数のアルファ乗算に引き継ぐ(#58)

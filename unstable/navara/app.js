@@ -11,6 +11,7 @@ import { loadVectorItem } from "../shared/vector-load.js";
 import { createAttrWidget, renderAttrContent, attrEntriesFromProps } from "../shared/attr-widget.js";
 import { initAiChat, hasBackendFeature } from "../shared/ai-chat.js";
 import { createPlayerApi } from "../shared/player-api.js";
+import { configureLive, liveUpdate, liveNotifyCamera } from "../shared/live.js";
 import { mountEngineSwitcher } from "../shared/engine-switch.js";
 import { matchSessionState, bindSessionState, applySessionState, sessionBootView, sessionVisChanges } from "../shared/session-state.js";
 import { initNavTools } from "../shared/nav-tools.js";
@@ -909,6 +910,21 @@ async function renderDoc(doc, baseUrl, presetBase) {
   // info タブ
   panel.infoLink.replaceChildren();
   void loadKascInfoContent(panel.infoLink, doc.info, baseUrl);
+
+  // QGIS ライブ双方向連携(#62): live: 行があれば live.json ポーリング開始
+  configureLive(doc, {
+    baseUrl,
+    kascUrl: lastKascUrl || null,
+    applyKascText: liveApplyText,
+    getView: () => {
+      syncCamFromView();
+      return {
+        latitude: lastCam.lat, longitude: lastCam.lng,
+        height: lastCam.height, zoom: navaraZoom(),
+        pitch: lastCam.pitch, heading: lastCam.heading,
+      };
+    },
+  });
 }
 
 // session-state の可視性を描画前の doc アイテムへ先適用する。
@@ -976,6 +992,13 @@ async function loadProject(projectId) {
 function setInspectorStatus(msg, isErr) {
   const el = $("#inspector-status");
   if (el) { el.textContent = msg; el.style.color = isErr ? "#c33" : ""; }
+}
+
+// QGIS ライブ連携(#62): 更新検出 → 全体再適用(レイヤ単位差分は
+// cesium/maplibre が対応。本エンジンは互換ビューとして全適用)
+async function liveApplyText(text) {
+  if (panel.inspector) panel.inspector.value = text;
+  await applyInspectorText(text);
 }
 
 // インスペクタ: テキスト → doc 再構築してレイヤ反映
@@ -1128,7 +1151,7 @@ async function saveToDataDir(name, content) {
   // 座標引継ぎは URL ハッシュ経由のため moveend で書き込む)
   try {
     view.camera.on("move", () => { syncCamFromView(); applyScaleVis(); window.kasugaiApi?.emit("camera-changed", window.kasugaiApi.getCamera()); });
-    view.camera.on("moveend", () => { syncCamFromView(); if (urlViewConsumed) writeUrlView(urlViewFromCam(), lastKascUrl ? undefined : currentProjectId); });
+    view.camera.on("moveend", () => { syncCamFromView(); if (urlViewConsumed) writeUrlView(urlViewFromCam(), lastKascUrl ? undefined : currentProjectId); liveNotifyCamera(); });
   } catch (_) {}
 
   await loadProject();
@@ -1222,6 +1245,8 @@ async function saveToDataDir(name, content) {
     loadProject: pid => loadProject(pid),
     focusEntry: e => focusExtent(e.item._geojson && geojsonExtent(e.item._geojson)),
     reloadEntryData,
+    // QGIS ライブ連携: /api/command の liveSync プッシュで即時反映(#62)
+    liveSync: async args => liveUpdate(args),
     rerenderLayers: () => { buildLayerList(); syncAttribution(); },
     getFlyPaths: kascFlyPaths.getFlyPaths,
     persistFlyPath: kascFlyPaths.persistFlyPath,

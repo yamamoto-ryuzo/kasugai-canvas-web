@@ -565,7 +565,15 @@ async function addKascLayer(item, baseUrl, preloaded, beforeIdFn) {
         for (const reg of [applied.icons, applied.fills]) {
           if (!reg) continue;
           for (const [id, cv] of reg) {
-            try { if (!map.hasImage(id)) map.addImage(id, cv); } catch (e) { console.warn("addImage 失敗:", id, e); }
+            try {
+              if (map.hasImage(id)) continue;
+              // MapLibre 系は HTMLCanvasElement 非対応の版があるため
+              // ImageData({width,height,data}) 形式で登録する
+              const c2d = cv.getContext?.("2d");
+              const img = c2d ? c2d.getImageData(0, 0, cv.width, cv.height)
+                : { width: cv.width, height: cv.height, data: cv };
+              map.addImage(id, img);
+            } catch (e) { console.warn("addImage 失敗:", id, e); }
           }
         }
         const range = compiledScaleToResRange(compiled);
@@ -620,9 +628,13 @@ async function addKascLayer(item, baseUrl, preloaded, beforeIdFn) {
           }] : [kind, filter, paint]);
     }
     map.addSource(sid, { type: "geojson", data: geojson, attribution: layerAttribution(item) || undefined, ...(wantCluster ? { cluster: true, clusterRadius: Math.max(item._qml?.cluster?.distancePx || 50, 5), clusterMaxZoom: 16 } : {}) });
+    const kindCount = {};
+    for (const [k] of kinds) kindCount[k] = (kindCount[k] || 0) + 1;
+    const kindSeen = {};
     for (const [kind, filter, paint, layout] of kinds) {
-      const lid = kind === "symbol" && kinds.filter(k => k[0] === "symbol").length > 1
-        ? `${sid}-${kind}-${layout?.["symbol-placement"] || "point"}` : `${sid}-${kind}`;
+      kindSeen[kind] = (kindSeen[kind] || 0) + 1;
+      const lid = kindCount[kind] > 1
+        ? `${sid}-${kind}-${kindSeen[kind]}` : `${sid}-${kind}`;
       const def = { id: lid, type: kind, source: sid, filter, paint, layout: { ...layout, visibility: item.visible ? "visible" : "none" } };
       if (zoomRange) { def.minzoom = zoomRange.minzoom; def.maxzoom = zoomRange.maxzoom; }
       // ラベル縮尺表示は symbol レイヤへだけ適用(地物描画には影響させない)
