@@ -4,7 +4,7 @@
 // UI/共通機構は shared/ を他エンジンと共用する。
 import ThreeView, { Color } from "@navaramap/three";
 import { DefaultPlugin } from "@navaramap/three-default-plugin";
-import { loadKascProject, NON_LAYER_TYPES, parseKasc, resolveKascUrl, camToZoom, zoomToCamHeight, camToZoomView, zoomToCamHeightView, heightToViewZoom, viewZoomToHeight, parseUrlView, hasUrlView, writeUrlView, geojsonExtent, splitKascTitle, appendGroupedTitleOptions, syncBasemapList, sanitizeAttributionFragment, layerAttribution, loadKascInfoContent, rewriteKascVisibility, rewriteKascLineOpt, themeShowSet, fillThemeSelect, kascTitleInTheme, loadKascBookmarks, parseQgisBookmarksXml, qgisBookmarkToCam, downloadQgisBookmarksXml, downloadKascCamLines, applyPanelTitle, resolveDefaultPointStyle, resolveDefaultLineStyle, resolveDefaultPolygonStyle, cssColorAlpha } from "../shared/kasc.js";
+import { loadKascProject, NON_LAYER_TYPES, parseKasc, resolveKascUrl, camToZoom, zoomToCamHeight, camToZoomView, zoomToCamHeightView, heightToViewZoom, viewZoomToHeight, parseUrlView, hasUrlView, writeUrlView, geojsonExtent, splitKascTitle, appendGroupedTitleOptions, syncBasemapList, sanitizeAttributionFragment, layerAttribution, loadKascInfoContent, buildWmsTileTemplate, buildWmtsTileTemplate, rewriteKascVisibility, rewriteKascLineOpt, themeShowSet, fillThemeSelect, kascTitleInTheme, loadKascBookmarks, parseQgisBookmarksXml, qgisBookmarkToCam, downloadQgisBookmarksXml, downloadKascCamLines, applyPanelTitle, resolveDefaultPointStyle, resolveDefaultLineStyle, resolveDefaultPolygonStyle, cssColorAlpha } from "../shared/kasc.js";
 import { createKascFlyPaths } from "../shared/fly-kasc.js";
 import { backendUrl } from "../shared/backend.js";
 import { loadVectorItem } from "../shared/vector-load.js";
@@ -727,8 +727,11 @@ async function addKascLayer(item, baseUrl) {
     const layer = view.addLayer(desc);
     return { src, layer, desc };
   }
-  if (RASTER_TYPES.has(item.type)) {
-    const src = view.addSource({ type: "raster-tile", url, maxZoom: Number(item.opts?.maxzoom) || 18, ...(item.opts?.minzoom ? { minZoom: Number(item.opts.minzoom) } : {}) });
+  if (RASTER_TYPES.has(item.type) || item.type === "wms" || item.type === "wmts") {
+    // wms:/wmts: はタイル URL テンプレートへ正規化してラスタタイルとして載せる
+    const turl = item.type === "wms" ? buildWmsTileTemplate(url, item.opts || {})
+      : item.type === "wmts" ? buildWmtsTileTemplate(url, item.opts || {}) : url;
+    const src = view.addSource({ type: "raster-tile", url: turl, maxZoom: Number(item.opts?.maxzoom) || 18, ...(item.opts?.minzoom ? { minZoom: Number(item.opts.minzoom) } : {}) });
     const desc = { type: "raster", source: src };
     const layer = view.addLayer(desc);
     return { src, layer, desc };
@@ -790,7 +793,9 @@ async function renderLayers(doc, baseUrl) {
   let done = 0;
   progress(0, visibleCount, "");
   for (const item of items) {
-    const entry = { item, sid: String(item._idx ?? item.url), unsupported: doc.unsupported.includes(item) && item.type !== "3dtiles" };
+    const mountable = item.type === "3dtiles" || RASTER_TYPES.has(item.type)
+      || item.type === "wms" || item.type === "wmts" || VECTOR_TYPES.has(item.type);
+    const entry = { item, sid: String(item._idx ?? item.url), unsupported: (doc.unsupported.includes(item) && item.type !== "3dtiles") || !mountable };
     layerEntries.push(entry);
     if (entry.unsupported || item.visible === false) { progress(++done, visibleCount); continue; }
     try {
