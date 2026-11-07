@@ -13,7 +13,8 @@ import ClusterSource from "https://cdn.jsdelivr.net/npm/ol@10.11.0/source/Cluste
 import StaticSource from "https://cdn.jsdelivr.net/npm/ol@10.11.0/source/ImageStatic.js";
 import GeoJSON from "https://cdn.jsdelivr.net/npm/ol@10.11.0/format/GeoJSON.js";
 import { fromLonLat, toLonLat, transformExtent, getPointResolution } from "https://cdn.jsdelivr.net/npm/ol@10.11.0/proj.js";
-import { loadKascProject, NON_LAYER_TYPES, parseKasc, resolveKascUrl, camToZoom, zoomToCamHeightView, heightToViewZoom, viewZoomToHeight, groundCenterFromCam, parseUrlView, hasUrlView, writeUrlView, geojsonExtent, splitKascTitle, appendGroupedTitleOptions, syncBasemapList, sanitizeAttributionFragment, layerAttribution, loadKascInfoContent, buildWmtsTileTemplate, rewriteKascVisibility, rewriteKascLineOpt, themeShowSet, kascTitleInTheme, fillThemeSelect, loadKascBookmarks, parseQgisBookmarksXml, qgisBookmarkToCam, downloadQgisBookmarksXml, downloadKascCamLines, projectsBaseUrl, applyPanelTitle, resolveDefaultPointStyle, resolveDefaultLineStyle, resolveDefaultPolygonStyle, defaultPointRadius, cssColorWithAlpha, kascOptOn, parseImageOverlay, kascScaleResRange } from "../shared/kasc.js";
+import { loadKascProject, NON_LAYER_TYPES, parseKasc, resolveKascUrl, camToZoom, zoomToCamHeightView, heightToViewZoom, viewZoomToHeight, groundCenterFromCam, parseUrlView, hasUrlView, writeUrlView, geojsonExtent, splitKascTitle, appendGroupedTitleOptions, syncBasemapList, sanitizeAttributionFragment, layerAttribution, loadKascInfoContent, buildWmtsTileTemplate, rewriteKascVisibility, rewriteKascLineOpt, themeShowSet, kascTitleInTheme, normKascTitle, fillThemeSelect, loadKascBookmarks, parseQgisBookmarksXml, qgisBookmarkToCam, downloadQgisBookmarksXml, downloadKascCamLines, projectsBaseUrl, applyPanelTitle, resolveDefaultPointStyle, resolveDefaultLineStyle, resolveDefaultPolygonStyle, defaultPointRadius, cssColorWithAlpha, kascOptOn, parseImageOverlay, kascScaleResRange, applyKascGroupStates } from "../shared/kasc.js";
+import { kascTimeSpec, collectTimeValues, featureInTime, buildKascTimeControl } from "../shared/kasc-time.js";
 import { createKascFlyPaths } from "../shared/fly-kasc.js";
 import { backendUrl } from "../shared/backend.js";
 import { loadVectorItem, isViewportQueryItem } from "../shared/vector-load.js";
@@ -40,6 +41,10 @@ import Stroke from "https://cdn.jsdelivr.net/npm/ol@10.11.0/style/Stroke.js";
 import CircleStyle from "https://cdn.jsdelivr.net/npm/ol@10.11.0/style/Circle.js";
 import Icon from "https://cdn.jsdelivr.net/npm/ol@10.11.0/style/Icon.js";
 import Text from "https://cdn.jsdelivr.net/npm/ol@10.11.0/style/Text.js";
+import Point from "https://cdn.jsdelivr.net/npm/ol@10.11.0/geom/Point.js";
+import MultiPoint from "https://cdn.jsdelivr.net/npm/ol@10.11.0/geom/MultiPoint.js";
+import MultiLineString from "https://cdn.jsdelivr.net/npm/ol@10.11.0/geom/MultiLineString.js";
+import Polygon from "https://cdn.jsdelivr.net/npm/ol@10.11.0/geom/Polygon.js";
 import { loadCompiledQml, olQmlStyleFunction, compiledScaleToResRange, installLayerVisibilityResolver } from "../shared/qml-2d.js";
 import { defaults as defaultControls } from "https://cdn.jsdelivr.net/npm/ol@10.11.0/control/defaults.js";
 import ScaleLine from "https://cdn.jsdelivr.net/npm/ol@10.11.0/control/ScaleLine.js";
@@ -433,12 +438,41 @@ async function buildLayer(item, baseUrl, preloaded) {
       features,
     });
     const hasPoints = geojson.features?.some(f => /point/i.test(f?.geometry?.type || ""));
-    const wantCluster = hasPoints && kascOptOn(item.opts?.cluster);
-    const wantHeat = hasPoints && kascOptOn(item.opts?.heat ?? item.opts?.heatmap);
+    // QML はレイヤ生成より先に読み、heatmap/cluster/ラベル declutter を
+    // 生成時オプションへ反映する
+    let compiled = null;
+    let qmlStyleFn = null;
+    if (item.opts?.style) {
+      try {
+        compiled = await loadCompiledQml(item.opts.style, baseUrl);
+        item._qml = compiled;
+        const base = olQmlStyleFunction(compiled, { Style, Fill, Stroke, Circle: CircleStyle, Icon, Text, Point, MultiPoint, MultiLineString, Polygon });
+        // 凡例シンボル単位の表示切替: 先頭シンボル名が hidden 集合にある地物は描画しない
+        qmlStyleFn = (f, res) => {
+          const names = compiled.namesFor?.(f.getProperties() || {});
+          if (names?.length && item._legendHidden?.has(names[0])) return null;
+          return base(f, res);
+        };
+      } catch (e) { console.warn("QML 適用失敗:", item.opts.style, e); }
+    }
+    const wantCluster = hasPoints && (kascOptOn(item.opts?.cluster) || compiled?.cluster?.kind === "cluster");
+    const wantHeat = hasPoints && (kascOptOn(item.opts?.heat ?? item.opts?.heatmap) || !!compiled?.heatmap);
     const layer = wantHeat
-      ? new HeatmapLayer({ source: vectorSource, blur: 15, radius: 10 })
+      ? new HeatmapLayer({
+          source: vectorSource, blur: 15,
+          radius: Math.max(compiled?.heatmap?.radiusPx || 10, 1),
+          weight: compiled?.heatmap?.weightFn ? f => {
+            const w = Number(compiled.heatmap.weightFn(f.getProperties() || {}));
+            const mv = compiled.heatmap.maxValue || 1;
+            return Math.min(Math.max((Number.isFinite(w) ? w : 1) / mv, 0), 1);
+          } : undefined,
+        })
       : new VectorLayer({
-          source: wantCluster ? new ClusterSource({ source: vectorSource, distance: 40 }) : vectorSource,
+          source: wantCluster
+            ? new ClusterSource({ source: vectorSource, distance: Math.max(compiled?.cluster?.distancePx || 40, 5) })
+            : vectorSource,
+          // QML <labeling> があるレイヤは declutter を有効化(=QGIS の重なり禁止相当)
+          declutter: !!compiled?.labelFor,
         });
     const env = geojsonExtent(geojson);
     if (env) layer.set("kascEnv", env);
@@ -459,26 +493,17 @@ async function buildLayer(item, baseUrl, preloaded) {
       }
       return baseFn(inner ? inner[0] : feature);
     };
-    let baseStyleFn = makeDefaultVectorStyle();
-    if (item.opts?.style) {
-      try {
-        const compiled = await loadCompiledQml(item.opts.style, baseUrl);
-        item._qml = compiled;
-        const base = olQmlStyleFunction(compiled, { Style, Fill, Stroke, Circle: CircleStyle, Icon, Text });
-        // 凡例シンボル単位の表示切替: 先頭シンボル名が hidden 集合にある地物は描画しない
-        baseStyleFn = f => {
-          const names = compiled.namesFor?.(f.getProperties() || {});
-          if (names?.length && item._legendHidden?.has(names[0])) return null;
-          return base(f);
-        };
-        const range = compiledScaleToResRange(compiled);
-        if (range) {
-          layer.setMinResolution(range.minRes);
-          if (Number.isFinite(range.maxRes)) layer.setMaxResolution(range.maxRes);
-        }
-      } catch (e) { console.warn("QML 適用失敗:", item.opts.style, e); }
+    const baseStyleFn = qmlStyleFn || makeDefaultVectorStyle();
+    if (compiled) {
+      const range = compiledScaleToResRange(compiled);
+      if (range) {
+        layer.setMinResolution(range.minRes);
+        if (Number.isFinite(range.maxRes)) layer.setMaxResolution(range.maxRes);
+      }
     }
     if (!wantHeat) layer.setStyle(wantCluster ? clusterStyleFn(baseStyleFn) : baseStyleFn);
+    // opacity=(0-1): レイヤ透過度。ベクター描画にも適用する(#58)
+    if (item.opts?.opacity !== undefined) layer.setOpacity(Number(item.opts.opacity));
     applyScaleRes(layer, item);
     syncDeckLayers(); // 読込完了でドレープコピー対象(_geojson)が増えた場合に反映
     return layer;
@@ -801,6 +826,40 @@ function buildLayerRow(entry, exclusive, radioName) {
 }
 
 const expandedLayerGroups = new Set();
+let timeCtl = null;
+
+// time=/time_end= オプション付きレイヤを収集して時刻スライダーを構築する(#57)。
+// スタイル関数をラップし、時刻外の地物へ null を返して非表示にする。
+function refreshKascTime() {
+  const specs = [];
+  for (const e of layerEntries || []) {
+    const spec = kascTimeSpec(e.item);
+    if (!spec || !e.layer || typeof e.layer.setStyle !== "function"
+        || typeof e.layer.getStyle !== "function") continue;
+    const values = collectTimeValues(e.item._geojson, spec);
+    if (!values.length) continue;
+    specs.push({
+      label: e.item.title, spec, values,
+      apply: t => {
+        try {
+          if (!e._timeBaseStyle) e._timeBaseStyle = e.layer.getStyle();
+          const base = e._timeBaseStyle;
+          e.layer.setStyle(t == null ? base : f => {
+            const inner = f.get?.("features");
+            const ok = (inner && inner.length ? inner : [f]).some(x =>
+              featureInTime(x.getProperties ? x.getProperties()
+                : (x.properties || {}), spec, t));
+            return ok ? (typeof base === "function" ? base(f) : base) : null;
+          });
+        } catch (_) {}
+      },
+    });
+  }
+  if (!timeCtl) {
+    const host = document.getElementById("map")?.parentElement || document.body;
+    timeCtl = buildKascTimeControl(host, specs);
+  } else timeCtl.setLayers(specs);
+}
 
 function renderLayerRows(entries, unsupported) {
   panel.layers.innerHTML = "";
@@ -925,6 +984,7 @@ function syncRowStatus(entry) {
 // 該当なしなら最前面(末尾)へ追加
 function insertEntryLayer(entry, index) {
   const layer = entry.layer;
+  refreshKascTime();
   const z = entry.item.type === "xyz" || entry.item.type === "tile" ? 1 : 2;
   layer.setZIndex(z);
   layer.setVisible(entry.item.visible);
@@ -1221,6 +1281,8 @@ async function renderProject(loadedId, baseUrl, doc, manifest) {
   }));
   layerEntries = entries;
   lastBaseUrl = baseUrl;
+  // group: 行の折りたたみ初期状態(#59)。QGIS レイヤーツリーの展開状態を再現
+  applyKascGroupStates(doc.groups, expandedLayerGroups);
   renderLayerRows(entries, unsupported);
   currentUnsupported = unsupported;
   updateThemeSelect(doc.themes || []);
@@ -1751,6 +1813,37 @@ function applyKascTheme(theme) {
   }
   renderLayerRows(layerEntries, currentUnsupported);
   inspectorInput.value = rewriteKascVisibility(inspectorInput.value, show);
+  void applyKascThemeStyles(theme);
+}
+
+// theme 行の `;style=` 指定でレイヤーの .qml を差し替えて再マウントする。
+// 指定が無いレイヤーは元の style= 指定(_themeBaseStyle に保存)へ戻す。
+// QGIS マップテーマが記録する名前付きスタイルの再現(Cesium と同規則)
+async function applyKascThemeStyles(theme) {
+  const styles = theme?.styles || {};
+  for (const e of layerEntries) {
+    const item = e.item;
+    if (!VECTOR_TYPES.has(item.type)) continue;
+    const key = normKascTitle(item.title || "");
+    const rel = styles[key] ?? styles[key.split("/").pop()] ?? null;
+    if (item._themeBaseStyle === undefined) item._themeBaseStyle = item.opts?.style || null;
+    const target = rel ? resolveKascUrl(rel, lastBaseUrl) : item._themeBaseStyle;
+    if ((item.opts?.style || null) === target) continue;
+    item.opts ||= {};
+    if (target) item.opts.style = target; else delete item.opts.style;
+    item._qml = null;
+    try {
+      if (e.layer && !e.layer._isDeck) map.removeLayer(e.layer);
+      e.layer = null;
+      if (item.visible !== false && !e.unsupported) {
+        const layer = await buildLayer(item, lastBaseUrl, item._preloaded);
+        e.layer = layer;
+        if (!layer._isDeck) insertEntryLayer(e, layerEntries.indexOf(e));
+        applyEntryVisibility(e);
+      }
+    } catch (err) { console.warn("テーマスタイルの適用に失敗:", err); }
+  }
+  updateMapAttribution();
 }
 
 themeSelect?.addEventListener("change", () => {

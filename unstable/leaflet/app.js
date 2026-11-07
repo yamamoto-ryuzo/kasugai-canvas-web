@@ -1,6 +1,7 @@
 // KASUGAI Canvas — Leaflet フロント
 // .kasc プレイヤーモード: projects/<id>/ の .kasc+DATA/ を Leaflet で再生する
-import { loadKascProject, NON_LAYER_TYPES, parseKasc, resolveKascUrl, camToZoom, zoomToCamHeightView, heightToViewZoom, viewZoomToHeight, groundCenterFromCam, parseUrlView, hasUrlView, writeUrlView, geojsonExtent, splitKascTitle, appendGroupedTitleOptions, syncBasemapList, sanitizeAttributionFragment, layerAttribution, loadKascInfoContent, buildWmtsTileTemplate, rewriteKascVisibility, rewriteKascLineOpt, themeShowSet, kascTitleInTheme, fillThemeSelect, loadKascBookmarks, parseQgisBookmarksXml, qgisBookmarkToCam, downloadQgisBookmarksXml, downloadKascCamLines, projectsBaseUrl, applyPanelTitle, resolveDefaultPointStyle, resolveDefaultLineStyle, resolveDefaultPolygonStyle, defaultPointRadius, kascOptOn, parseImageOverlay, kascScaleZoomRange, mergeZoomRange } from "../shared/kasc.js";
+import { loadKascProject, NON_LAYER_TYPES, parseKasc, resolveKascUrl, camToZoom, zoomToCamHeightView, heightToViewZoom, viewZoomToHeight, groundCenterFromCam, parseUrlView, hasUrlView, writeUrlView, geojsonExtent, splitKascTitle, appendGroupedTitleOptions, syncBasemapList, sanitizeAttributionFragment, layerAttribution, loadKascInfoContent, buildWmtsTileTemplate, rewriteKascVisibility, rewriteKascLineOpt, themeShowSet, kascTitleInTheme, normKascTitle, fillThemeSelect, loadKascBookmarks, parseQgisBookmarksXml, qgisBookmarkToCam, downloadQgisBookmarksXml, downloadKascCamLines, projectsBaseUrl, applyPanelTitle, resolveDefaultPointStyle, resolveDefaultLineStyle, resolveDefaultPolygonStyle, defaultPointRadius, kascOptOn, parseImageOverlay, kascScaleZoomRange, mergeZoomRange, applyKascGroupStates } from "../shared/kasc.js";
+import { kascTimeSpec, collectTimeValues, featureInTime, buildKascTimeControl } from "../shared/kasc-time.js";
 import { loadScriptOnce, loadCssOnce } from "../shared/lazy-lib.js";
 import { createKascFlyPaths } from "../shared/fly-kasc.js";
 import { backendUrl } from "../shared/backend.js";
@@ -135,16 +136,73 @@ function syncLeafletLabel(sub) {
   if (!st) return;
   const el = qmlLabelElement(st.item._qml, st.feature.properties || {});
   if (el) {
-    if (sub.getTooltip()) sub.setTooltipContent(el);
-    else sub.bindTooltip(el, { permanent: true, direction: "center", className: "kasc-label", interactive: false });
-  } else if (sub.getTooltip()) {
-    sub.unbindTooltip();
+    const spec = el._kascLabelSpec || {};
+    const [ox, oy] = spec.pixelOffsetOf ? spec.pixelOffsetOf() : [0, 0];
+    // 縮尺表示 → zoom 範囲へ変換して保持(zoomend で表示切替)
+    st.zoomRange = spec.labelScale ? labelScaleToZoomRange(spec.labelScale) : null;
+    st.spec = spec;
+    const opts = {
+      permanent: true, direction: "center", className: "kasc-label",
+      interactive: false, offset: [ox, oy],
+    };
+    if (sub.getTooltip()) {
+      const cur = sub.getTooltip();
+      if (Math.abs((cur.options.offset?.[0] || 0) - ox) > 0.5 || Math.abs((cur.options.offset?.[1] || 0) - oy) > 0.5) {
+        sub.unbindTooltip(); sub.bindTooltip(el, opts);
+      } else sub.setTooltipContent(el);
+    } else sub.bindTooltip(el, opts);
+  } else {
+    st.zoomRange = null;
+    if (sub.getTooltip()) sub.unbindTooltip();
   }
 }
+// ラベル縮尺分母 → Leaflet zoom 範囲
+function labelScaleToZoomRange(ls) {
+  const lat = map.getCenter()?.lat || 0;
+  return {
+    minZoom: ls.maxScale ? resToZoom(ls.maxScale * 0.00028, lat) : 0,
+    maxZoom: ls.minScale ? resToZoom(ls.minScale * 0.00028, lat) : 99,
+  };
+}
+// 縮尺表示範囲外のラベルは DOM クラスで隠す。あわせて DOM 矩形の重なりを
+// 検出して衝突したラベルを隠す(QGIS の「重なったラベルを隠す」近似。
+// displayAll/allowOverlap は対象外)
+function syncLabelZoomVisibility() {
+  const z = map.getZoom();
+  const candidates = [];
+  for (const entry of layerEntries) {
+    entry.layer?.eachLayer?.(sub => {
+      const st = sub._kascLabel;
+      const tipEl = sub.getTooltip?.()?.getElement?.();
+      if (!st || !tipEl) return;
+      const r = st.zoomRange;
+      const outOfRange = !!r && (z < r.minZoom || z > r.maxZoom);
+      tipEl.classList.toggle("kasc-label-hidden", outOfRange);
+      const spec = st.spec || {};
+      if (!outOfRange && !(spec.allowOverlap || spec.displayAll)) {
+        candidates.push({ tipEl, prio: (spec.zIndex || 0) * 100 + (spec.priority || 0) });
+      }
+    });
+  }
+  // 衝突回避: 優先度順に矩形を確保し、重なったものを隠す
+  candidates.sort((a, b) => b.prio - a.prio);
+  const placed = [];
+  for (const c of candidates) {
+    const r = c.tipEl.getBoundingClientRect();
+    // 0幅/高さの tooltip は判定対象外
+    if (!r.width || !r.height) { c.tipEl.classList.toggle("kasc-label-hidden", true); continue; }
+    const hit = placed.some(b => r.left < b.right && r.right > b.left && r.top < b.bottom && r.bottom > b.top);
+    c.tipEl.classList.toggle("kasc-label-hidden", hit);
+    if (!hit) placed.push(r);
+  }
+}
+map.on("zoomend", syncLabelZoomVisibility);
+map.on("moveend", syncLabelZoomVisibility);
 function refreshQmlLabels() {
   for (const entry of layerEntries) {
     entry.layer?.eachLayer?.(sub => { if (sub._kascLabel) syncLeafletLabel(sub); });
   }
+  syncLabelZoomVisibility();
 }
 let currentBaseEntries = [];
 let lastBaseUrl = "";
@@ -516,6 +574,11 @@ async function addKascLayer(item, baseUrl, preloaded, paneName) {
       try {
         item._qml = await loadCompiledQml(item.opts.style, baseUrl);
       } catch (e) { console.warn("QML 適用失敗:", item.opts.style, e); }
+    }
+    // opacity=(0-1): レイヤ透過度。スタイル関数のアルファ乗算に引き継ぐ(#58)
+    if (item.opts?.opacity !== undefined && item._opacityFactor === undefined) {
+      const _o = Number(item.opts.opacity);
+      if (Number.isFinite(_o)) item._opacityFactor = _o;
     }
     const styleFn = makeVectorStyleFn(item);
     // cluster=on / heat=on: 点レイヤーのクラスタ表示・ヒートマップ表示。
@@ -891,6 +954,37 @@ function buildLayerRow(entry, exclusive, radioName) {
 }
 
 const expandedLayerGroups = new Set();
+let timeCtl = null;
+
+// time=/time_end= オプション付きレイヤを収集して時刻スライダーを構築する(#57)。
+// setStyle で時刻外の地物を HIDDEN_STYLE にする(クラスタ/heat は対象外)。
+function refreshKascTime() {
+  const specs = [];
+  for (const e of layerEntries || []) {
+    const spec = kascTimeSpec(e.item);
+    if (!spec || !e.layer || typeof e.layer.eachLayer !== "function"
+        || typeof e.styleFn !== "function") continue;
+    const values = collectTimeValues(e.item._geojson, spec);
+    if (!values.length) continue;
+    specs.push({
+      label: e.item.title, spec, values,
+      apply: t => {
+        try {
+          e.layer.eachLayer(sub => {
+            if (typeof sub.setStyle !== "function" || !sub.feature) return;
+            const ok = t == null
+              || featureInTime(sub.feature.properties, spec, t);
+            sub.setStyle(ok ? e.styleFn(sub.feature) : HIDDEN_STYLE);
+          });
+        } catch (_) {}
+      },
+    });
+  }
+  if (!timeCtl) {
+    const host = document.getElementById("map")?.parentElement || document.body;
+    timeCtl = buildKascTimeControl(host, specs);
+  } else timeCtl.setLayers(specs);
+}
 
 function renderLayerRows(entries, unsupported) {
   panel.layers.innerHTML = "";
@@ -1022,6 +1116,7 @@ async function ensureEntryLoaded(entry) {
     if (seq !== renderSeq) return false;
     entry.layer = r.layer;
     entry.styleFn = r.styleFn;
+    refreshKascTime();
     entry.zoomRange = r.zoomRange;
     entry.baseOpacity = r.baseOpacity;
     entry.item._viewportQuery = r.viewportQuery;
@@ -1293,6 +1388,8 @@ async function renderProject(loadedId, baseUrl, doc, manifest) {
   for (let i = entries.length - 1; i >= 0; i--) if (entries[i].item.type !== "3dtiles") entries[i].paneName = newKascPane();
   layerEntries = entries;
   lastBaseUrl = baseUrl;
+  // group: 行の折りたたみ初期状態(#59)。QGIS レイヤーツリーの展開状態を再現
+  applyKascGroupStates(doc.groups, expandedLayerGroups);
   renderLayerRows(entries, unsupported);
   currentUnsupported = unsupported;
   updateThemeSelect(doc.themes || []);
@@ -1326,6 +1423,7 @@ async function renderProject(loadedId, baseUrl, doc, manifest) {
       if (seq !== renderSeq) return;
       entry.layer = r.layer;
       entry.styleFn = r.styleFn;
+      refreshKascTime();
       entry.zoomRange = r.zoomRange;
       entry.baseOpacity = r.baseOpacity;
       item._viewportQuery = r.viewportQuery;
@@ -1727,6 +1825,38 @@ function applyKascTheme(theme) {
   }
   renderLayerRows(layerEntries, currentUnsupported);
   inspectorInput.value = rewriteKascVisibility(inspectorInput.value, show);
+  void applyKascThemeStyles(theme);
+}
+
+// theme 行の `;style=` 指定でレイヤーの .qml を差し替えて再マウントする。
+// 指定が無いレイヤーは元の style= 指定(_themeBaseStyle に保存)へ戻す。
+// QGIS マップテーマが記録する名前付きスタイルの再現(Cesium と同規則)
+async function applyKascThemeStyles(theme) {
+  const styles = theme?.styles || {};
+  for (const e of layerEntries) {
+    const item = e.item;
+    if (!VECTOR_TYPES.has(item.type)) continue;
+    const key = normKascTitle(item.title || "");
+    const rel = styles[key] ?? styles[key.split("/").pop()] ?? null;
+    if (item._themeBaseStyle === undefined) item._themeBaseStyle = item.opts?.style || null;
+    const target = rel ? resolveKascUrl(rel, lastBaseUrl) : item._themeBaseStyle;
+    if ((item.opts?.style || null) === target) continue;
+    item.opts ||= {};
+    if (target) item.opts.style = target; else delete item.opts.style;
+    item._qml = null;
+    try {
+      if (e.layer && !e.layer._isDeck && map.hasLayer(e.layer)) map.removeLayer(e.layer);
+      e.layer = null;
+      if (item.visible !== false && !e.unsupported) {
+        const r = await addKascLayer(item, lastBaseUrl, item._preloaded, e.paneName);
+        e.layer = r.layer; e.styleFn = r.styleFn; e.zoomRange = r.zoomRange;
+        e.baseOpacity = r.baseOpacity; item._viewportQuery = r.viewportQuery;
+        applyEntryVisibility(e);
+        refreshKascTime();
+      }
+    } catch (err) { console.warn("テーマスタイルの適用に失敗:", err); }
+  }
+  updateMapAttribution();
 }
 
 themeSelect?.addEventListener("change", () => {
@@ -1883,6 +2013,7 @@ window.kasugaiApi = createPlayerApi({
     }
     const r = await addKascLayer(entry.item, lastBaseUrl, preloaded || entry.item._preloaded, entry.paneName);
     entry.layer = r.layer; entry.styleFn = r.styleFn; entry.zoomRange = r.zoomRange;
+    refreshKascTime();
     entry.baseOpacity = r.baseOpacity; entry.item._viewportQuery = r.viewportQuery;
     applyEntryVisibility(entry);
     updateMapAttribution();
