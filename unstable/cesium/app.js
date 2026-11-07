@@ -16,6 +16,7 @@ import {
 } from "../shared/ai-chat.js";
 import {
   detectBackend, backendUrl, isBackendAlive, getBackendCapabilities, hasBackendFeature, backendBaseUrl,
+  localNetworkPermission,
 } from "../shared/backend.js";
 import { buildViewUrl } from "../shared/kasc.js";
 import { loadQmlStyle, compileQmlStyle, setLayerVisibilityResolver, markerLayersToCanvas, fillPartsToTile, rgbaToCss } from "../shared/qml-style.js";
@@ -192,6 +193,9 @@ const vectorSourceCache = new Map();
 // style= で指定された QGIS レイヤースタイル(.qml)の取得・コンパイル結果キャッシュ。
 // URL キーで loadQmlStyle の Promise を保持し、applyInspector で破棄する
 const qmlStyleCache = new Map();
+// QML 警告は URL 単位で一度だけ出す(item は refresh ごとに作り直されるため
+// item 単位で warn すると同じ警告が何度もコンソールに出る)
+const qmlStyleWarnedUrls = new Set();
 // QML 式の is_layer_visible('名前') を KASUGAI のレイヤー表示状態に解決する。
 // QGIS ではレイヤーツリーのチェック状態を参照するため、ここでは item.visible を返す。
 // レイヤー名は QGIS 側のレイヤー名(= .kasc のタイトル末端)と照合し、
@@ -372,7 +376,8 @@ async function ensureQmlStyle(item) {
     qmlStyleCache.set(item.styleUrl, promise);
   }
   item.qmlStyle = await promise;
-  if (item.qmlStyle?.warnings?.length) {
+  if (item.qmlStyle?.warnings?.length && !qmlStyleWarnedUrls.has(item.styleUrl)) {
+    qmlStyleWarnedUrls.add(item.styleUrl);
     console.warn(`QML スタイル ${item.styleUrl}:`, item.qmlStyle.warnings.join(" / "));
   }
   return item.qmlStyle;
@@ -387,6 +392,20 @@ const LEGEND_SWATCH_W = 26;
 const LEGEND_SWATCH_H = 16;
 // 条件別に分岐する凡例の折りたたみ状態(レイヤーid の Set)。既定は展開
 const collapsedLayerLegends = new Set();
+// エントリ数がこの数以上の条件別凡例は既定で折りたたむ(大量スウォッチ描画を避ける)
+const LEGEND_AUTO_COLLAPSE_MIN = 24;
+// 既定で折りたたまれる大きい凡例をユーザーが展開した記憶(レイヤーid の Set)
+const expandedLayerLegends = new Set();
+// スタイル解決ごとの一覧再描画をマイクロタスクで束ねる(レイヤー数分の連発を防ぐ)
+let layerListRenderScheduled = false;
+function scheduleLayerListRender() {
+  if (layerListRenderScheduled) return;
+  layerListRenderScheduled = true;
+  queueMicrotask(() => {
+    layerListRenderScheduled = false;
+    renderLayerList();
+  });
+}
 // 凡例スウォッチを出しうるレイヤー種別(ベクター系)
 const LEGEND_VECTOR_TYPES = new Set(["geojson", "layer", "entities", "geoparquet", "flatgeobuf", "gpkg", "geopackage", "duckdb", "sql", "kml", "kmz", "wfs", "shp", "shapefile", "csv", "tsv"]);
 
@@ -530,7 +549,7 @@ function getLayerLegend(item) {
   if (!item) return null;
   if (item.styleUrl) {
     if (item.qmlStyle === undefined) {
-      ensureQmlStyle(item).then(() => { if (layerState.has(item.id)) renderLayerList(); });
+      ensureQmlStyle(item).then(() => { if (layerState.has(item.id)) scheduleLayerListRender(); });
       return null;
     }
     const legend = item.qmlStyle?.legend;
@@ -1664,15 +1683,18 @@ function renderLayerList() {
             : "";
           const legendEntries = getLayerLegend(layer)?.entries || null;
           const legendMulti = !!legendEntries && legendEntries.length > 1;
-          const legendCollapsed = legendMulti && collapsedLayerLegends.has(layer.id);
+          const legendCollapsed = legendMulti && (collapsedLayerLegends.has(layer.id)
+            || (legendEntries.length >= LEGEND_AUTO_COLLAPSE_MIN && !expandedLayerLegends.has(layer.id)));
           const legendToggle = legendMulti
             ? `<button class="layer-legend-toggle" type="button" data-layer-id="${escapeHtml(layer.id)}" aria-label="${escapeHtml(t("layer.legendToggle"))}" aria-expanded="${!legendCollapsed}">${legendCollapsed ? "▸" : "▾"}</button>`
             : "";
           const inlineSwatch = legendEntries && !legendMulti && legendEntries[0].desc
             ? `<img class="legend-swatch" src="${buildLegendSwatchDataUrl(legendEntries[0].desc)}" alt="">`
             : "";
+          // 折りたたみ中は行を生成しない(大量エントリのスウォッチ描画・DOM 構築を遅延)。
+          // 展開時はトグル側で renderLayerList を呼んで構築する
           const legendItems = legendMulti
-            ? `<div class="layer-legend-items" data-layer-id="${escapeHtml(layer.id)}"${legendCollapsed ? " hidden" : ""}>${legendEntries.map((entry, entryIndex) => {
+            ? `<div class="layer-legend-items" data-layer-id="${escapeHtml(layer.id)}"${legendCollapsed ? " hidden" : ""}>${legendCollapsed ? "" : legendEntries.map((entry, entryIndex) => {
                 const entryInputId = `${inputId}-legend-${entryIndex}`;
                 const hidden = !!entry.symbolName && !!layer.legendHidden?.has(entry.symbolName);
                 return `<label class="legend-row" for="${entryInputId}">
@@ -1788,11 +1810,27 @@ function renderLayerList() {
       const id = toggle.dataset.layerId;
       const items = toggle.closest(".layer-item")?.querySelector(".layer-legend-items");
       const expanded = toggle.getAttribute("aria-expanded") === "true";
-      toggle.setAttribute("aria-expanded", String(!expanded));
-      toggle.textContent = expanded ? "▸" : "▾";
-      if (items) items.hidden = expanded;
-      if (expanded) collapsedLayerLegends.add(id);
-      else collapsedLayerLegends.delete(id);
+      if (expanded) {
+        collapsedLayerLegends.add(id);
+        expandedLayerLegends.delete(id);
+        toggle.setAttribute("aria-expanded", "false");
+        toggle.textContent = "▸";
+        // 行は残したまま隠すだけ(再展開は DOM 切替で即応答)
+        if (items) items.hidden = true;
+      } else {
+        collapsedLayerLegends.delete(id);
+        expandedLayerLegends.add(id);
+        if (items && items.childElementCount) {
+          toggle.setAttribute("aria-expanded", "true");
+          toggle.textContent = "▾";
+          items.hidden = false;
+        } else {
+          // 折りたたみ中は行未生成のため再描画して構築する(スクロール位置は維持)
+          const scrollTop = list.scrollTop;
+          renderLayerList();
+          list.scrollTop = scrollTop;
+        }
+      }
     });
   });
 
@@ -5037,6 +5075,8 @@ function applyInspector(text) {
   // gpkg Worker が url キーで開いたままの DB も破棄する(メモリ解放・再取得)
   resetGpkgWorkerDbs();
   qmlStyleCache.clear();
+  qmlStyleWarnedUrls.clear();
+  expandedLayerLegends.clear();
   vectorSearchLoadedSources.clear();
   vectorSearchLoadFailed.clear();
   tileLayers.splice(0, tileLayers.length);
@@ -8167,6 +8207,44 @@ function setupEvents() {
   // アプリへ渡す（起動中は register+switchProject・未起動は exe 起動・
   // 未導入は not_installed+インストーラURL）。hub 未導入時は起動中
   // アプリへの ?kasc=/?project= + ビューハッシュ引き渡しにフォールバック
+  //
+  // 公開 https サイトからの 127.0.0.1 接続はブラウザの「ローカルネット
+  // ワークアクセス」権限が前提。未許可(prompt/denied)では hub・アプリの
+  // 疎通が全て失敗してインストーラDLへ流れ、見た目「押しても無反応」に
+  // なるため、その場合は許可方法を案内するモーダルを出す
+  const showLocalNetworkDialog = (state, setupUrl) => {
+    const overlay = document.createElement("div");
+    overlay.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:9999;display:flex;align-items:center;justify-content:center;";
+    const panel = document.createElement("div");
+    panel.style.cssText = "background:#fff;color:#1d2b35;max-width:520px;width:92%;border-radius:8px;padding:16px;display:flex;flex-direction:column;gap:10px;box-shadow:0 8px 30px rgba(0,0,0,0.3);";
+    const titleEl = document.createElement("strong");
+    titleEl.textContent = t("app.localNetTitle");
+    const body = document.createElement("div");
+    body.style.cssText = "font-size:0.9em;line-height:1.6;";
+    body.textContent = `${t(state === "denied" ? "app.localNetDenied" : "app.localNetPrompt")} ${t("app.localNetInstaller")}`;
+    const buttons = document.createElement("div");
+    buttons.style.cssText = "display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;";
+    const reload = document.createElement("button");
+    reload.type = "button";
+    reload.textContent = t("app.localNetReload");
+    reload.style.cssText = "background:#2f7d8c;color:#fff;border:0;border-radius:4px;padding:6px 14px;";
+    const download = document.createElement("button");
+    download.type = "button";
+    download.textContent = t("app.localNetDownload");
+    download.style.cssText = "border:1px solid #2f7d8c;color:#2f7d8c;background:#fff;border-radius:4px;padding:6px 14px;";
+    const close = document.createElement("button");
+    close.type = "button";
+    close.textContent = t("app.localNetClose");
+    const done = () => overlay.remove();
+    reload.addEventListener("click", () => window.location.reload());
+    download.addEventListener("click", () => { window.open(setupUrl, "_blank"); done(); });
+    close.addEventListener("click", done);
+    overlay.addEventListener("click", event => { if (event.target === overlay) done(); });
+    buttons.append(reload, download, close);
+    panel.append(titleEl, body, buttons);
+    overlay.append(panel);
+    document.body.append(overlay);
+  };
   const openInAppBtn = document.querySelector("#open-in-app");
   openInAppBtn?.addEventListener("click", async () => {
     const setGlyph = (g) => { openInAppBtn.textContent = g; setTimeout(() => { openInAppBtn.textContent = "🖥"; }, 1500); };
@@ -8220,7 +8298,16 @@ function setupEvents() {
           method: "POST", headers: { "Content-Type": "text/plain" },
           body: JSON.stringify({ name, kasc }),
         }).then(r => r.json().catch(() => null));
-        if (out && out.status === "opened") { setGlyph("✓"); return; }
+        if (out && out.status === "opened") {
+          // mode:"running"（起動中アプリ）は既存タブ内で切り替わるだけで、
+          // アプリのタブが無ければハンドオフが見えない。確実に見えるよう
+          // アプリのURLも新規タブで開く（launched は exe 側が開くので不要）
+          if (out.mode !== "launched") {
+            const appBase = backendBaseUrl() || "http://127.0.0.1:8510";
+            window.open(`${appBase}/cesium/?project=${encodeURIComponent(out.id || name)}${share.hash}`, "_blank");
+          }
+          setGlyph("✓"); return;
+        }
         if (out && out.status === "not_installed") {
           window.open(out.download || SETUP_URL, "_blank");
           setGlyph("⬇"); return;
@@ -8233,9 +8320,33 @@ function setupEvents() {
       window.open(`${local}/cesium/${share.search}${share.hash}`, "_blank");
       setGlyph("✓");
     } else {
-      window.open(SETUP_URL, "_blank");
-      setGlyph("⬇");
+      // ローカル疎通が全て失敗。LNA 権限が未許可ならインストーラDLではなく
+      // 許可方法の案内を出す（アプリ導入済みでも権限が無いと同じ症状になる。
+      // 権限 API 非対応ブラウザでは null が返り、従来通りインストーラへ）
+      const perm = await localNetworkPermission();
+      if (perm?.state === "denied" || perm?.state === "prompt") {
+        showLocalNetworkDialog(perm.state, SETUP_URL);
+        setGlyph("⚠");
+      } else {
+        window.open(SETUP_URL, "_blank");
+        setGlyph("⬇");
+      }
     }
+  });
+
+  // アプリ版 → CDN ホスト版ハンドオフ（🖥 の逆方向）。表示中の .kasc を
+  // ローカルサーバー配信のまま CDN ホスト版エンジンで開く
+  // （エンジンはCDN・データはローカル）。localfs:// 等 URL 化できない
+  // プロジェクトでは非表示（初期化ブロック側で制御）
+  const openInWebBtn = document.querySelector("#open-in-web");
+  openInWebBtn?.addEventListener("click", () => {
+    const HOSTED_BASE = "https://yamamoto-ryuzo.github.io/kasugai-canvas-web/stable";
+    const share = new URL(window.kasugaiApi.buildShareUrl());
+    const remoteKasc = share.searchParams.get("kasc");
+    const kascUrl = remoteKasc && /^https?:/i.test(remoteKasc)
+      ? remoteKasc
+      : `${projectsBaseUrl(share.searchParams.get("project") || "default")}kasugai_canvas.kasc`;
+    window.open(`${HOSTED_BASE}/cesium/?kasc=${encodeURIComponent(kascUrl)}${share.hash}`, "_blank");
   });
 
   // スクリーンショット: 地表タイルの読み込みを待ってから render→toBlob で PNG 保存
@@ -11236,6 +11347,49 @@ window.addEventListener("pagehide", () => {
       } else {
         openInAppBtn.style.display = "none";
       }
+    }
+  }
+  // 「CDN版で開く」はアプリ版(同一オリジン＋remoteCommand)かつ
+  // URL 化できるプロジェクトのみ表示。CDN 上では自分自身への遷移なので不要
+  {
+    const openInWebBtn = document.querySelector("#open-in-web");
+    if (openInWebBtn) {
+      const cur = new URLSearchParams(location.search);
+      const localfs = /^localfs:/i.test(currentKascUrl || "")
+        || /^(local|localfs)/i.test(cur.get("kasc") || "");
+      if (backendBaseUrl() !== "" || !hasBackendFeature("remoteCommand") || localfs) {
+        openInWebBtn.style.display = "none";
+      }
+    }
+  }
+  // ブラウザ連携（管理→その他）: Chrome/Edge の LNA ポリシー事前許可を
+  // /api/browser/lna で適用・解除する。アプリ版のみ表示
+  {
+    const section = document.querySelector("#browser-link-section");
+    if (section && backendBaseUrl() === "" && hasBackendFeature("remoteCommand")) {
+      section.hidden = false;
+      const statusEl = document.querySelector("#browser-lna-status");
+      const msgEl = document.querySelector("#browser-lna-msg");
+      const render = (d) => {
+        if (!d || !d.ok) { if (statusEl) statusEl.textContent = "-"; return; }
+        const b = d.browsers || {};
+        const fmt = (x) => !x?.installed ? t("browser.lnaNotInstalled")
+          : (x.granted ? t("browser.lnaGranted") : t("browser.lnaNotGranted"));
+        if (statusEl) statusEl.textContent = `Chrome: ${fmt(b.chrome)} / Edge: ${fmt(b.edge)}`;
+      };
+      const call = async (method) => {
+        if (msgEl) msgEl.textContent = "";
+        try {
+          const d = await fetch("/api/browser/lna", { method }).then(r => r.json());
+          render(d);
+          if (d?.changed && msgEl) msgEl.textContent = t("browser.lnaRestart");
+        } catch (e) {
+          if (msgEl) msgEl.textContent = String(e?.message || e);
+        }
+      };
+      document.querySelector("#browser-lna-apply")?.addEventListener("click", () => void call("POST"));
+      document.querySelector("#browser-lna-remove")?.addEventListener("click", () => void call("DELETE"));
+      void fetch("/api/browser/lna").then(r => r.json()).then(render).catch(() => {});
     }
   }
   const initialCamera = await resolveInitialCamera();

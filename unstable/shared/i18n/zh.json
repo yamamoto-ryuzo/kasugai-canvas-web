@@ -856,5 +856,22 @@
   "instr.confirmDelete": "Delete instruction \"{id}\"?",
   "instr.confirmOverwrite": "Overwrite instruction \"{id}\"?",
   "app.openInApp": "在 Canvas 应用中打开",
-  "app.importRemote": "导入到 Canvas 应用"
+  "app.importRemote": "导入到 Canvas 应用",
+  "app.localNetTitle": "无法连接本地应用",
+  "app.localNetDenied": "浏览器阻止了此网站访问本地网络。请在地址栏左侧的网站设置中将“本地网络访问”改为“允许”，然后重新加载页面。",
+  "app.localNetPrompt": "连接本地应用需要浏览器的“本地网络访问”权限。如果显示权限提示，请选择“允许”；如果未显示，请重新加载页面以再次显示。",
+  "app.localNetInstaller": "如果尚未安装该应用，请改为下载安装程序。",
+  "app.localNetReload": "重新加载",
+  "app.localNetDownload": "下载安装程序",
+  "app.localNetClose": "关闭",
+  "app.openInWeb": "在 CDN 版本中打开",
+  "browser.linkTitle": "浏览器联动",
+  "browser.linkHint": "通过在 Chrome/Edge 策略中预注册“本地网络访问”权限，使托管版（CDN）页面无需提示即可连接此应用（127.0.0.1）。重启浏览器后生效。",
+  "browser.lnaStatus": "状态: ",
+  "browser.lnaGranted": "已允许",
+  "browser.lnaNotGranted": "未允许",
+  "browser.lnaNotInstalled": "未安装",
+  "browser.lnaApply": "注册许可",
+  "browser.lnaRemove": "取消注册",
+  "browser.lnaRestart": "重启浏览器后生效。"
 }
