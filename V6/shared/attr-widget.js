@@ -1,0 +1,683 @@
+// Cesium 版「属性・値一覧」(#vector-attr-widget) のエンジン非依存版。
+// 画面下部へドッキングする属性テーブル: レイヤ選択・全文検索・列ソート・
+// 行クリックでの地物移動を提供する。DOM/CSS は本モジュールが注入するため、
+// 各エンジンの app.js はアダプタを渡すだけで利用できる。
+//
+// createAttrWidget({
+//   listLayers:   () => [{ id, title, entry }]   // 属性対象レイヤ(未読込含む・表示順)
+//   getFeatures:  async (entry) => Feature[] | { features, partial? }
+//   focusFeature: (feature) => void              // 行クリック時の地物移動
+//   onCellEdit?:  ({ layer, feature, attr, value }) => void // セル編集時の任意フック
+// }) → { open(layerId?), close(), refresh(), isOpen() }
+// window.vectorAttrWidget = { open, close } も公開する(Cesium 版と同じ公開面)
+
+import { computeGroupStats } from "./attr-stats.js";
+import { rowsToXlsx } from "./export-formats.js";
+
+const LABELS = {
+  title: "属性・値一覧",
+  resizer: "上下にドラッグして高さを変更",
+  close: "閉じる",
+  layerTitle: "レイヤを選択",
+  search: "属性または値で検索",
+  selectLayer: "レイヤを選択してください",
+  sort: "クリックで並び替え",
+  noFeatures: "該当する地物がありません",
+  loadFailed: "レイヤの読み込みに失敗しました",
+  loading: "読み込み中…",
+  clickToMove: "クリックで移動",
+  viewportOnly: "（表示範囲内のみ）",
+  exportCsv: "表示中の行をCSVで出力",
+  exportTsv: "表示中の行をTSVで出力",
+  exportXlsx: "表示中の行をExcel(xlsx)で出力",
+  editHint: "セルをダブルクリックで編集（メモリ内のみ・再読込で元に戻ります）",
+  count: (matched, attrs) => `${matched} 件 / ${attrs} 属性`,
+  limitSuffix: count => ` （表示上限 ${count} 件）`,
+  stats: "属性を集計（GROUP BY）",
+  statsGroup: "集計キー",
+  statsValue: "集計する数値属性",
+  statsCountOnly: "（件数のみ）",
+  statsGroups: (groups, rows) => `${groups} グループ / ${rows} 件`,
+};
+
+const MAX_ROWS = 1000;
+// __kasc_* は QML スタイル/ラベルの描画用に properties へ焼き込んだ内部値のため属性表からは除外する
+const INTERNAL_PROP_RE = /^__kasc/;
+
+// 属性タブ(クリックした地物の属性表示)用の文言。Cesium 版 attr-panel と同じ
+const ATTR_LABELS = {
+  empty: "地物を選択すると属性を表示します。",
+  noAttrs: "選択した地物に属性情報がありません。",
+  pickedCount: count => `重なった地物 ${count} 件`,
+  otherFeature: "その他の地物",
+};
+
+const CSS = `
+.vector-attr-widget { display: none; position: fixed; left: 0; bottom: 0; width: 100%; height: 35%; min-width: 240px; max-width: 100vw; min-height: 120px; max-height: 90vh; z-index: 2200; overflow: hidden; box-shadow: 0 -4px 20px rgba(0,0,0,.2); font-family: system-ui, "Segoe UI", "Yu Gothic", sans-serif; }
+.vector-attr-widget.visible { display: block; }
+.vector-attr-widget-inner { width: 100%; height: 100%; display: flex; flex-direction: column; background: #fff; border-radius: 8px 8px 0 0; overflow: hidden; position: relative; }
+.vector-attr-widget-resizer { position: absolute; top: -4px; left: 0; right: 0; height: 8px; cursor: ns-resize; z-index: 10; }
+.vector-attr-widget-header { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; border-bottom: 1px solid #e4ecef; background: #f6f9fb; }
+.vector-attr-widget-title { font-weight: 700; font-size: 15px; }
+.vector-attr-widget-close { min-width: 28px; min-height: 28px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: #52636d; cursor: pointer; font-size: 20px; line-height: 1; }
+.vector-attr-widget-close:hover { background: #e4ecef; }
+.vector-attr-widget-filter { display: flex; gap: 8px; padding: 12px 14px; border-bottom: 1px solid #e4ecef; }
+#vector-attr-widget-layer { flex: 0 0 160px; min-width: 120px; min-height: 34px; padding: 6px 8px; border: 1px solid #cbd9de; border-radius: 4px; font-size: 14px; background: #fff; }
+#vector-attr-widget-search { flex: 1; min-width: 0; min-height: 34px; padding: 6px 8px; border: 1px solid #cbd9de; border-radius: 4px; font-size: 14px; }
+.vector-attr-widget-table-wrap { flex: 1; overflow: auto; }
+.vector-attr-widget-table { width: auto; min-width: 100%; border-collapse: collapse; font-size: 13px; table-layout: auto; white-space: nowrap; }
+.vector-attr-widget-thead th { position: sticky; top: 0; padding: 8px 14px; text-align: left; border-bottom: 1px solid #e4ecef; background: #f6f9fb; color: #52636d; font-weight: 700; font-size: 12px; cursor: pointer; user-select: none; white-space: nowrap; }
+.vector-attr-widget-thead th:hover { background: #eef5f7; }
+.vector-attr-widget-thead th.sorted { background: #e7f3f0; color: #31564f; }
+#vector-attr-widget-list tr { border-bottom: 1px solid #e4ecef; }
+#vector-attr-widget-list tr:hover { background: #f6f9fb; }
+#vector-attr-widget-list td { padding: 7px 14px; vertical-align: top; }
+.vector-attr-widget-cell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+#vector-attr-widget-list td.editing { padding: 2px 6px; }
+.vector-attr-widget-edit { width: 100%; min-width: 80px; font: inherit; padding: 4px 6px; border: 1px solid #4a90a4; border-radius: 3px; box-sizing: border-box; }
+#vector-attr-widget-list td.edited { background: #fff4d6; }
+.vector-attr-widget-edit-hint { color: #9aabb5; font-size: 11px; margin-left: 4px; }
+.vector-attr-widget-footer { padding: 8px 14px; border-top: 1px solid #e4ecef; color: #71818d; font-size: 12px; text-align: right; display: flex; align-items: center; gap: 6px; }
+.vector-attr-widget-footer .vector-attr-widget-export { flex: 0 0 auto; min-height: 26px; padding: 2px 8px; border: 1px solid #cbd9de; border-radius: 4px; background: #fff; color: #31564f; font-size: 12px; cursor: pointer; }
+.vector-attr-widget-footer .vector-attr-widget-export:hover { background: #eef5f7; }
+.vector-attr-widget-footer #vector-attr-widget-count { margin-left: auto; }
+`;
+
+let styleInjected = false;
+function ensureStyle() {
+  if (styleInjected || document.querySelector("#kasc-attr-widget-style")) return;
+  styleInjected = true;
+  const el = document.createElement("style");
+  el.id = "kasc-attr-widget-style";
+  el.textContent = CSS;
+  document.head.append(el);
+}
+
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+}
+
+function propText(raw) {
+  if (raw == null) return "";
+  if (typeof raw === "object") {
+    try { return JSON.stringify(raw); } catch (_) { return String(raw); }
+  }
+  return String(raw);
+}
+
+// ---- 属性タブ(クリックした地物の属性表示。Cesium 版 attr-panel 相当) ----
+
+// 地物 properties → 属性テーブル行 [key, value] の配列。__kasc_* 内部値は除外。
+// fieldMeta(.qml の <aliases>/<attributetableconfig>)があれば、非表示フィールド
+// の除外・QML 定義順・別名表示を適用する(#56)
+export function attrEntriesFromProps(props, fieldMeta = null) {
+  let entries = Object.entries(props || {}).filter(([key]) => !INTERNAL_PROP_RE.test(key));
+  if (!fieldMeta) return entries;
+  if (fieldMeta.hidden?.size) entries = entries.filter(([k]) => !fieldMeta.hidden.has(k));
+  if (fieldMeta.order?.length) {
+    const idx = new Map(fieldMeta.order.map((n, i) => [n, i]));
+    entries = entries.slice().sort((a, b) =>
+      (idx.get(a[0]) ?? fieldMeta.order.length) - (idx.get(b[0]) ?? fieldMeta.order.length));
+  }
+  if (fieldMeta.alias) entries = entries.map(([k, v]) => [fieldMeta.alias[k] || k, v]);
+  return entries;
+}
+
+function buildAttrTable(entries) {
+  const table = document.createElement("table");
+  table.style.width = "100%";
+  table.style.borderCollapse = "collapse";
+  table.style.fontSize = "12px";
+  entries.forEach(([key, value]) => {
+    const tr = document.createElement("tr");
+    const th = document.createElement("th");
+    th.textContent = key;
+    th.style.textAlign = "left";
+    th.style.padding = "3px 6px";
+    th.style.borderBottom = "1px solid #cbd9de";
+    const td = document.createElement("td");
+    td.textContent = propText(value);
+    td.style.padding = "3px 6px";
+    td.style.borderBottom = "1px solid #cbd9de";
+    tr.append(th, td);
+    table.append(tr);
+  });
+  return table;
+}
+
+// 属性タブ(el)へクリックした地物の属性を描画する。
+// records = [{ title?, entries: [[key, value], ...], layerId?, flyable?, feature? }]
+//   layerId のある最初のレコードを el.dataset.layerId に記録し、
+//   「選択中のレイヤ属性一覧」ボタンが開くウィジェットの対象レイヤとする。
+//   複数件時はヘッダのみ表示し、クリックで属性を開閉する(Cesium 版と同じ挙動)。
+// opts.onRecordClick(record) — flyable な地物の属性行クリック時(地物移動)
+export function renderAttrContent(el, records, opts = {}) {
+  if (!el) return;
+  el.replaceChildren();
+  if (!records || !records.length) {
+    delete el.dataset.layerId;
+    el.textContent = ATTR_LABELS.empty;
+    return;
+  }
+  const list = records.filter(r => r && r.entries && r.entries.length);
+  if (!list.length) {
+    delete el.dataset.layerId;
+    el.textContent = ATTR_LABELS.noAttrs;
+    return;
+  }
+  const ctx = list.find(r => r.layerId != null);
+  if (ctx) el.dataset.layerId = String(ctx.layerId);
+  else delete el.dataset.layerId;
+
+  const multiple = list.length > 1;
+  if (multiple) {
+    const count = document.createElement("div");
+    count.className = "attr-picked-count";
+    count.style.cssText = "margin:2px 0 6px;color:#71818d;font-size:12px;";
+    count.textContent = ATTR_LABELS.pickedCount(list.length);
+    el.append(count);
+  }
+  list.forEach((rec, index) => {
+    const block = document.createElement("div");
+    block.className = "attr-feature";
+    const label = (multiple ? `${index + 1}. ` : "") + (rec.title || ATTR_LABELS.otherFeature);
+    const header = document.createElement("div");
+    header.className = "attr-feature-header";
+    header.style.cssText = "display:flex;align-items:center;gap:4px;font-weight:600;font-size:12px;margin:6px 0 2px;" + (multiple ? "cursor:pointer;" : "");
+    const marker = document.createElement("span");
+    marker.className = "attr-feature-marker";
+    const labelEl = document.createElement("span");
+    labelEl.textContent = label;
+    header.append(marker, labelEl);
+    const table = buildAttrTable(rec.entries);
+    // 属性行クリックでその地物へ移動(属性・値一覧の行クリックと同じ挙動)
+    if (rec.flyable && opts.onRecordClick) {
+      table.querySelectorAll("tr").forEach(tr => {
+        tr.style.cursor = "pointer";
+        tr.title = LABELS.clickToMove;
+        tr.addEventListener("click", () => opts.onRecordClick(rec));
+      });
+    }
+    const setOpen = open => {
+      table.hidden = !open;
+      marker.textContent = open ? "▾" : "▸";
+      header.setAttribute("aria-expanded", String(open));
+    };
+    if (multiple) {
+      header.addEventListener("click", () => {
+        const open = table.hidden;
+        setOpen(open);
+        // 展開した地物のレイヤーを属性一覧ボタンの対象にする
+        if (open && rec.layerId != null) el.dataset.layerId = String(rec.layerId);
+      });
+    }
+    setOpen(!multiple);
+    block.append(header, table);
+    el.append(block);
+  });
+}
+
+export function createAttrWidget({ listLayers, getFeatures, focusFeature, onCellEdit }) {
+  ensureStyle();
+  const widget = document.createElement("div");
+  widget.id = "vector-attr-widget";
+  widget.className = "vector-attr-widget";
+  widget.innerHTML = `
+    <div class="vector-attr-widget-inner">
+      <div class="vector-attr-widget-resizer" title="${escapeHtml(LABELS.resizer)}"></div>
+      <div class="vector-attr-widget-header">
+        <span class="vector-attr-widget-title">${escapeHtml(LABELS.title)}</span>
+        <button class="vector-attr-widget-close" type="button" aria-label="${escapeHtml(LABELS.close)}">×</button>
+      </div>
+      <div class="vector-attr-widget-filter">
+        <select id="vector-attr-widget-layer" class="vector-attr-widget-layer" title="${escapeHtml(LABELS.layerTitle)}"></select>
+        <input id="vector-attr-widget-search" type="text" placeholder="${escapeHtml(LABELS.search)}" />
+        <button id="vector-attr-widget-stats" type="button" title="${escapeHtml(LABELS.stats)}" style="flex:0 0 auto;min-height:34px;padding:0 10px;border:1px solid #cbd9de;border-radius:4px;background:#fff;cursor:pointer;">Σ</button>
+        <select id="vector-attr-widget-group" title="${escapeHtml(LABELS.statsGroup)}" hidden style="flex:0 0 120px;min-height:34px;padding:4px 6px;border:1px solid #cbd9de;border-radius:4px;font-size:13px;background:#fff;"></select>
+        <select id="vector-attr-widget-value" title="${escapeHtml(LABELS.statsValue)}" hidden style="flex:0 0 120px;min-height:34px;padding:4px 6px;border:1px solid #cbd9de;border-radius:4px;font-size:13px;background:#fff;"></select>
+      </div>
+      <div class="vector-attr-widget-table-wrap">
+        <table class="vector-attr-widget-table">
+          <thead id="vector-attr-widget-head" class="vector-attr-widget-thead"></thead>
+          <tbody id="vector-attr-widget-list"></tbody>
+        </table>
+      </div>
+      <div class="vector-attr-widget-footer">
+        <button id="vector-attr-export-csv" class="vector-attr-widget-export" type="button" title="${escapeHtml(LABELS.exportCsv)}">CSV</button>
+        <button id="vector-attr-export-tsv" class="vector-attr-widget-export" type="button" title="${escapeHtml(LABELS.exportTsv)}">TSV</button>
+        <button id="vector-attr-export-xlsx" class="vector-attr-widget-export" type="button" title="${escapeHtml(LABELS.exportXlsx)}">XLSX</button>
+        <span class="vector-attr-widget-edit-hint">${escapeHtml(LABELS.editHint)}</span>
+        <span id="vector-attr-widget-count"></span>
+      </div>
+    </div>`;
+  document.body.append(widget);
+
+  const closeBtn = widget.querySelector(".vector-attr-widget-close");
+  const resizer = widget.querySelector(".vector-attr-widget-resizer");
+  const searchInput = widget.querySelector("#vector-attr-widget-search");
+  const layerSelect = widget.querySelector("#vector-attr-widget-layer");
+  const head = widget.querySelector("#vector-attr-widget-head");
+  const list = widget.querySelector("#vector-attr-widget-list");
+  const countEl = widget.querySelector("#vector-attr-widget-count");
+  const titleEl = widget.querySelector(".vector-attr-widget-title");
+
+  let rows = [];
+  let attributes = [];
+  let attrKeys = [];
+  let sort = { column: -1, order: 1 };
+  let loading = false;
+  let loadError = false;
+  let partial = false;
+  // Σ 集計モード: 集計キー/数値列の選択状態
+  const statsBtn = widget.querySelector("#vector-attr-widget-stats");
+  const statsGroup = widget.querySelector("#vector-attr-widget-group");
+  const statsValue = widget.querySelector("#vector-attr-widget-value");
+  let statsMode = false;
+  function syncStatsControls() {
+    if (statsGroup) statsGroup.hidden = !statsMode;
+    if (statsValue) statsValue.hidden = !statsMode;
+    if (statsBtn) statsBtn.classList.toggle("active", statsMode);
+    if (!statsMode) return;
+    if (statsGroup) {
+      const prev = statsGroup.value;
+      statsGroup.innerHTML = attributes.map(a => '<option>' + escapeHtml(a) + '</option>').join("");
+      if (attributes.includes(prev)) statsGroup.value = prev;
+    }
+    if (statsValue) {
+      const prev = statsValue.value;
+      statsValue.innerHTML = '<option value="">' + escapeHtml(LABELS.statsCountOnly) + '</option>'
+        + attributes.map(a => '<option>' + escapeHtml(a) + '</option>').join("");
+      if (attributes.includes(prev)) statsValue.value = prev;
+    }
+  }
+  // 非同期の行構築が遅れて解決したときに新しい選択の結果を上書きしないための世代番号
+  let requestSeq = 0;
+
+  function currentLayerId() {
+    return layerSelect.value || "";
+  }
+
+  function findLayer(id) {
+    return (listLayers() || []).find(o => String(o.id) === String(id)) || null;
+  }
+
+  async function buildRows() {
+    const seq = ++requestSeq;
+    const isCurrent = () => seq === requestSeq;
+    rows = [];
+    attributes = [];
+    partial = false;
+    sort = { column: -1, order: 1 };
+    loading = false;
+    loadError = false;
+    attrKeys = [];
+    const layer = findLayer(currentLayerId());
+    if (!layer) return;
+    loading = true;
+    render(searchInput ? searchInput.value : "");
+    try {
+      const result = await getFeatures(layer.entry);
+      if (!isCurrent()) return;
+      const features = Array.isArray(result) ? result : (result?.features || []);
+      partial = !Array.isArray(result) && !!result?.partial;
+      // .qml の属性表示メタ(fieldMeta): 非表示列の除外・定義順・別名表示(#56)
+      const meta = layer.entry?.fieldMeta || null;
+      const metaOrder = meta?.order || [];
+      const metaOrderIdx = new Map(metaOrder.map((n, i) => [n, i]));
+      const attrSet = new Set();
+      for (const f of features) {
+        for (const key of Object.keys(f?.properties || {})) {
+          if (!INTERNAL_PROP_RE.test(key) && !meta?.hidden?.has(key)) attrSet.add(key);
+        }
+      }
+      const rawAttrs = [...attrSet].sort((a, b) => {
+        const ia = metaOrderIdx.get(a), ib = metaOrderIdx.get(b);
+        if (ia != null || ib != null) return (ia ?? metaOrder.length) - (ib ?? metaOrder.length);
+        return a.localeCompare(b);
+      });
+      // 表示名(別名)と実名を対応付けて保持する
+      attrKeys = rawAttrs;
+      attributes = rawAttrs.map(a => meta?.alias?.[a] || a);
+      const seenRows = new Set();
+      for (const f of features) {
+        const props = f?.properties || {};
+        const values = rawAttrs.map(attr => propText(props[attr]));
+        const rowKey = JSON.stringify(values);
+        if (seenRows.has(rowKey)) continue;
+        seenRows.add(rowKey);
+        rows.push({ values, feature: f, flyable: !!f?.geometry });
+      }
+    } catch (e) {
+      if (!isCurrent()) return;
+      loadError = true;
+      console.warn("属性一覧の読み込みに失敗しました:", e);
+    } finally {
+      if (isCurrent()) loading = false;
+    }
+  }
+
+  function render(filter = "") {
+    try {
+      if (!list || !countEl || !titleEl) return;
+      const query = String(filter).toLowerCase().trim();
+      let matched = query ? rows.filter(row => row.values.some(val => String(val).toLowerCase().includes(query))) : [...rows];
+      if (sort.column >= 0 && sort.column < attributes.length) {
+        const col = sort.column;
+        const order = sort.order;
+        matched.sort((a, b) => {
+          const cmp = String(a.values[col] || "").localeCompare(String(b.values[col] || ""), undefined, { numeric: true, sensitivity: "base" });
+          return cmp * order;
+        });
+      }
+      const displayRows = matched.slice(0, MAX_ROWS);
+      // Σ 集計モード: 集計キーで GROUP BY した行に差し替える(通常表は作らない)
+      if (statsMode) {
+        syncStatsControls();
+        const groupField = statsGroup?.value || "";
+        const valueField = statsValue?.value || "";
+        const features = rows.map(row => ({
+          properties: Object.fromEntries(attributes.map((a, i) => [a, row.values[i]])),
+        }));
+        const stats = groupField ? computeGroupStats(features, groupField, valueField) : [];
+        const cols = [groupField || "?", "count", ...(valueField ? ["sum", "avg", "min", "max"] : [])];
+        if (head) head.innerHTML = '<tr>' + cols.map(c => '<th>' + escapeHtml(c) + '</th>').join("") + '</tr>';
+        const fmt = v => v == null ? "" : String(Math.round(v * 1000) / 1000);
+        list.innerHTML = stats.length
+          ? stats.map(g => '<tr>' + [g.key, g.count, ...(valueField ? [fmt(g.sum), fmt(g.avg), fmt(g.min), fmt(g.max)] : [])]
+              .map(v => '<td class="vector-attr-widget-cell">' + escapeHtml(String(v)) + '</td>').join("") + '</tr>').join("")
+          : '<tr><td style="padding:12px 14px;color:#71818d;">' + escapeHtml(LABELS.noFeatures) + '</td></tr>';
+        countEl.textContent = LABELS.statsGroups(stats.length, rows.length);
+        return;
+      }
+      const layer = findLayer(currentLayerId());
+      titleEl.textContent = LABELS.title + (layer?.title ? " — " + layer.title : "");
+      if (!attributes.length) {
+        if (head) head.innerHTML = "";
+        const msg = loading ? LABELS.loading : loadError ? LABELS.loadFailed : LABELS.selectLayer;
+        list.innerHTML = '<tr><td style="padding:12px 14px;color:#71818d;">' + escapeHtml(msg) + '</td></tr>';
+        countEl.textContent = LABELS.count(0, 0);
+        return;
+      }
+      if (head) {
+        head.innerHTML = '<tr>' + attributes.map((attr, idx) => {
+          const active = sort.column === idx;
+          const marker = active ? (sort.order > 0 ? ' ▲' : ' ▼') : '';
+          return '<th data-idx="' + idx + '" title="' + escapeHtml(LABELS.sort) + '"' + (active ? ' class="sorted"' : '') + '>' + escapeHtml(attr) + '<span class="sort-marker">' + marker + '</span></th>';
+        }).join("") + '</tr>';
+      }
+      if (!displayRows.length) {
+        list.innerHTML = '<tr><td colspan="' + attributes.length + '" style="padding:12px 14px;color:#71818d;">' + escapeHtml(loading ? LABELS.loading : LABELS.noFeatures) + '</td></tr>';
+        countEl.textContent = LABELS.count(query ? 0 : rows.length, attributes.length) + (partial ? LABELS.viewportOnly : "");
+        return;
+      }
+      list.innerHTML = displayRows.map(row => {
+        const ri = rows.indexOf(row);
+      const dataAttrs = 'data-ri="' + ri + '"' + (row.flyable ? ' data-row="' + ri + '"' : '');
+        const style = row.flyable ? 'style="cursor:pointer;"' : '';
+        return '<tr class="vector-attr-widget-row" ' + dataAttrs + ' ' + style + ' title="' + (row.flyable ? escapeHtml(LABELS.clickToMove) : '') + '">' +
+          row.values.map(val => '<td class="vector-attr-widget-cell" title="' + escapeHtml(val) + '">' + escapeHtml(val) + '</td>').join("") +
+          '</tr>';
+      }).join("");
+      const suffix = (matched.length > displayRows.length) ? LABELS.limitSuffix(displayRows.length) : "";
+      countEl.textContent = LABELS.count(matched.length, attributes.length) + suffix + (partial ? LABELS.viewportOnly : "");
+    } catch (e) { console.error("vector attr widget render error", e); }
+  }
+
+  // セル編集: ダブルクリックで input に差し替え、Enter/blur で確定・Esc で取消。
+  // 書き込み先は feature.properties（全件読み込み系レイヤーはメモリ GeoJSON の
+  // 実参照なので地物クリックの属性タブ等にも反映）と行キャッシュ values
+  // （表の再描画と CSV/TSV 出力に反映）。クエリ系レイヤーの feature は実体
+  // コピーのため編集はこの表と出力にのみ残る。ファイルへの書き戻しは行わない
+  // （Canvas は .kasc 再生プレイヤー。編集・保存は QGIS 側の役割）。
+  function beginCellEdit(td, row, ci, attr, feature) {
+    const oldText = row.values[ci] == null ? "" : String(row.values[ci]);
+    td.classList.add("editing");
+    td.textContent = "";
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "vector-attr-widget-edit";
+    input.value = oldText;
+    td.append(input);
+    input.focus();
+    input.select();
+    let settled = false;
+    const settle = commit => {
+      if (settled) return;
+      settled = true;
+      td.classList.remove("editing");
+      const text = commit ? input.value : oldText;
+      td.textContent = text;
+      td.title = text;
+      if (!commit || text === oldText) return;
+      row.values[ci] = text;
+      // 数値だった属性は数値のまま書き戻す（型を壊さない最小限の変換）
+      const prev = feature.properties[attr];
+      feature.properties[attr] =
+        typeof prev === "number" && text !== "" && !Number.isNaN(Number(text)) ? Number(text) : text;
+      td.classList.add("edited");
+      try { onCellEdit?.({ layer: findLayer(currentLayerId()), feature, attr, value: feature.properties[attr] }); }
+      catch (e) { console.warn("vector attr onCellEdit hook failed", e); }
+    };
+    input.addEventListener("keydown", ev => {
+      ev.stopPropagation();
+      if (ev.key === "Enter") settle(true);
+      else if (ev.key === "Escape") settle(false);
+    });
+    input.addEventListener("blur", () => settle(true));
+  }
+
+  // 地物の代表点（属性一覧のエクスポート用。ジオメトリ包絡の中心）
+  function featureCenter(f) {
+    let west = Infinity, south = Infinity, east = -Infinity, north = -Infinity;
+    const walk = c => {
+      if (!Array.isArray(c)) return;
+      if (typeof c[0] === "number" && typeof c[1] === "number") {
+        if (c[0] < west) west = c[0];
+        if (c[0] > east) east = c[0];
+        if (c[1] < south) south = c[1];
+        if (c[1] > north) north = c[1];
+        return;
+      }
+      for (const p of c) walk(p);
+    };
+    walk(f?.geometry?.coordinates);
+    if (!Number.isFinite(west)) return { lng: null, lat: null };
+    return { lng: (west + east) / 2, lat: (south + north) / 2 };
+  }
+
+  // 表示中の行セット（検索フィルタ＋ソート適用後・全件。表示上限では切らない）を返す
+  function matchedRows() {
+    const query = String(searchInput ? searchInput.value : "").toLowerCase().trim();
+    let matched = query ? rows.filter(row => row.values.some(val => String(val).toLowerCase().includes(query))) : [...rows];
+    if (sort.column >= 0 && sort.column < attributes.length) {
+      const col = sort.column;
+      const order = sort.order;
+      matched.sort((a, b) => {
+        const cmp = String(a.values[col] || "").localeCompare(String(b.values[col] || ""), undefined, { numeric: true, sensitivity: "base" });
+        return cmp * order;
+      });
+    }
+    return matched;
+  }
+
+  // 属性一覧のエクスポート（CSV/TSV・UTF-8 BOM 付きで Excel 文字化け対策）
+  function exportTable(delim) {
+    const matched = matchedRows();
+    if (!attributes.length || !matched.length) return;
+    const esc = v => '"' + String(v ?? "").replace(/"/g, '""') + '"';
+    // 位置が取れる行は代表点の lon/lat 列を末尾に付ける（行クリック移動と同じ座標系）
+    const header = [...attributes, "lon", "lat"];
+    const lines = [header.map(esc).join(delim)];
+    for (const row of matched) {
+      const c = featureCenter(row.feature);
+      lines.push([...row.values, c.lng ?? "", c.lat ?? ""].map(esc).join(delim));
+    }
+    const layer = findLayer(currentLayerId());
+    const base = String(layer?.title || "attributes").replace(/[\\/:*?"<>|]/g, "_").slice(0, 60);
+    const ext = delim === "\t" ? "tsv" : "csv";
+    const blob = new Blob(["﻿" + lines.join("\r\n")], { type: `text/${ext};charset=utf-8` });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `${base}.${ext}`;
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }
+
+  // 表示中の行を xlsx で出力（SheetJS は初回のみ CDN 遅延ロード #73）。
+  // 生成中は件数表示を進行表示に流用して UI ブロックを可視化する
+  async function exportXlsx() {
+    const matched = matchedRows();
+    if (!attributes.length || !matched.length) return;
+    const cnt = widget.querySelector("#vector-attr-widget-count");
+    const prevText = cnt ? cnt.textContent : "";
+    try {
+      if (cnt) cnt.textContent = "xlsx 生成中…";
+      const header = [...attributes, "lon", "lat"];
+      const rows = [header];
+      for (const row of matched) {
+        const c = featureCenter(row.feature);
+        rows.push([...row.values, c.lng ?? "", c.lat ?? ""]);
+      }
+      const layer = findLayer(currentLayerId());
+      const base = String(layer?.title || "attributes").replace(/[\\/:*?"<>|]/g, "_").slice(0, 60);
+      const { data, skipped } = await rowsToXlsx([{ name: base || "attributes", rows }]);
+      const blob = new Blob([data], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `${base}.xlsx`;
+      document.body.append(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+      if (skipped) alert(`${skipped} 行は上限超過のため出力されませんでした`);
+    } catch (e) {
+      alert("xlsx の生成に失敗しました: " + (e?.message || e));
+    } finally {
+      if (cnt) cnt.textContent = prevText;
+    }
+  }
+
+  function updateLayerOptions(selectedId) {
+    if (!layerSelect) return;
+    const opts = listLayers() || [];
+    let html = '<option value="">' + escapeHtml(LABELS.layerTitle) + '</option>';
+    for (const o of opts) {
+      html += '<option value="' + escapeHtml(String(o.id)) + '">' + escapeHtml(o.title || o.id) + '</option>';
+    }
+    layerSelect.innerHTML = html;
+    const hasLayer = selectedId && opts.some(o => String(o.id) === String(selectedId));
+    layerSelect.value = hasLayer ? String(selectedId) : "";
+  }
+
+  function isOpen() {
+    return widget.classList.contains("visible");
+  }
+
+  async function open(layerId = null) {
+    updateLayerOptions(layerId != null ? layerId : currentLayerId());
+    await buildRows();
+    render(searchInput ? searchInput.value : "");
+    widget.classList.add("visible");
+    if (searchInput) searchInput.focus();
+  }
+
+  function close() {
+    widget.classList.remove("visible");
+  }
+
+  // レイヤ一覧・データの更新に追従させる。選択肢は常に再構築し、
+  // 開いている時だけ行を再取得する
+  function refresh() {
+    updateLayerOptions(currentLayerId());
+    if (!isOpen()) return;
+    void buildRows().then(() => render(searchInput ? searchInput.value : ""));
+  }
+
+  widget.querySelector("#vector-attr-export-csv")?.addEventListener("click", () => exportTable(","));
+  widget.querySelector("#vector-attr-export-tsv")?.addEventListener("click", () => exportTable("\t"));
+  widget.querySelector("#vector-attr-export-xlsx")?.addEventListener("click", () => { void exportXlsx(); });
+
+  closeBtn.addEventListener("click", close);
+  searchInput.addEventListener("input", () => render(searchInput.value));
+  searchInput.addEventListener("keydown", ev => { if (ev.key === "Enter") render(searchInput.value); });
+  layerSelect.addEventListener("change", () => {
+    try { void open(layerSelect.value); } catch (e) { console.error("vector attr layer change error", e); }
+  });
+  statsBtn?.addEventListener("click", () => {
+    statsMode = !statsMode;
+    syncStatsControls();
+    render(searchInput ? searchInput.value : "");
+  });
+  statsGroup?.addEventListener("change", () => render(searchInput ? searchInput.value : ""));
+  statsValue?.addEventListener("change", () => render(searchInput ? searchInput.value : ""));
+
+  list.addEventListener("click", ev => {
+    try {
+      if (ev.detail > 1) return; // ダブルクリック(セル編集)の2回目クリックで移動しない
+      const tr = ev.target.closest("tr");
+      if (!tr || !tr.hasAttribute("data-row")) return;
+      const row = rows[Number(tr.getAttribute("data-row"))];
+      if (row?.feature) focusFeature(row.feature);
+    } catch (e) { console.error("vector attr row click error", e); }
+  });
+
+  list.addEventListener("dblclick", ev => {
+    try {
+      const td = ev.target.closest("td.vector-attr-widget-cell");
+      if (!td || statsMode || td.querySelector("input")) return;
+      const tr = td.closest("tr");
+      const row = rows[Number(tr?.getAttribute("data-ri"))];
+      const ci = td.cellIndex;
+      const attr = attrKeys[ci] ?? attributes[ci];
+      const feature = row?.feature;
+      if (attr == null || !feature?.properties || INTERNAL_PROP_RE.test(attr)) return;
+      beginCellEdit(td, row, ci, attr, feature);
+    } catch (e) { console.error("vector attr cell edit error", e); }
+  });
+
+  head.addEventListener("click", ev => {
+    try {
+      const th = ev.target.closest("th");
+      if (!th || !th.hasAttribute("data-idx")) return;
+      const idx = Number(th.getAttribute("data-idx"));
+      if (sort.column === idx) sort.order *= -1;
+      else sort = { column: idx, order: 1 };
+      render(searchInput ? searchInput.value : "");
+    } catch (e) { console.error("vector attr head click error", e); }
+  });
+
+  if (resizer) {
+    let startY = 0;
+    let startHeight = 0;
+    let isResizing = false;
+    const onMouseMove = ev => {
+      if (!isResizing) return;
+      ev.preventDefault();
+      const nextHeight = startHeight + (startY - ev.clientY);
+      const maxHeight = Math.min(window.innerHeight * 0.9, 1200);
+      widget.style.height = Math.max(120, Math.min(maxHeight, nextHeight)) + "px";
+    };
+    const onMouseUp = () => {
+      isResizing = false;
+      document.body.style.cursor = "";
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+      if (window.getSelection) window.getSelection().removeAllRanges();
+    };
+    resizer.addEventListener("mousedown", ev => {
+      ev.preventDefault();
+      isResizing = true;
+      startY = ev.clientY;
+      startHeight = widget.offsetHeight;
+      document.body.style.cursor = "ns-resize";
+      window.addEventListener("mousemove", onMouseMove);
+      window.addEventListener("mouseup", onMouseUp);
+    });
+  }
+
+  const api = { open, close, refresh, isOpen };
+  window.vectorAttrWidget = { open, close };
+  return api;
+}

@@ -1,0 +1,62 @@
+# shared — エンジン非依存コア
+
+KASUGAI Canvas のマルチエンジン化に伴う、エンジン非依存モジュールの置き場。
+
+## レイアウト方針
+
+- `web/index.html` … エンジン選択リダイレクト（`?engine=`・既定 cesium）
+- `web/cesium/` … Cesium フロント（メインエンジン・現行アプリ）
+- `web/maplibre/` … MapLibre フロント（.kasc プレイヤー・実装済み）
+- `web/openlayers/` … OpenLayers フロント（.kasc プレイヤー・実装済み）
+- `web/leaflet/` … Leaflet フロント（.kasc プレイヤー・実装済み）
+- `web/navara/` … Navara フロント（写実 3D プレゼンエンジン）。`@navaramap/three`
+  （Rust/WASM GIS コア + Three.js）で .kasc を再生。ライブラリは npm dist を
+  `vendor/navara/`（`web/navara/vendor.json` でバージョンピン）から importmap
+  経由で読み、**同一オリジン必須**（Worker が `import.meta.url` 相対で生成
+  されるため外部 CDN 直読みは不可）。vendor 実体はどこにも置かず、
+  `vendor-proxy-sw.js` が vendor.json の npm ピン先（jsdelivr）から
+  同一オリジン中継する。対応行: base:/
+  xyz:/geojson 系・3dtiles:・cam:。wms/wmts・ドレープ先=3DTiles は未対応
+- `web/gsimaps/` … GSI Maps フロント（中間エンジン・**現在調整中**。vendored 地理院地図
+  `vendor/gsimaps/` を同一オリジン iframe で組み込み、.kasc を
+  GSI/Leaflet API 経由で再生。上流コードは無改変。vendor 実体は
+  リポジトリ・配布物・ローカル・CDN のいずれにも置かず、
+  `vendor-proxy-sw.js` が vendor.json の sha ピン先（jsdelivr/gh・
+  失敗時 raw.githubusercontent）から同一オリジン中継する
+  （Service Worker 前提。SW 非対応環境のフォールバックは持たない）。
+  iframe 内を
+  `GSI.GLOBALS` 内部 API 経由で操作する構造のため AI 制御の安定化が難しい）
+- `web/vendor-proxy-sw.js` + `web/shared/vendor-guard.js` … vendor/* を
+  上流オリジナル（vendor.json のピン先 CDN）から同一オリジン供給する
+  Service Worker と、その登録・供給可否プローブの共通ガード
+  （vendor 依存エンジン専用）
+- `web/shared/` … 本ディレクトリ。エンジン横断で使うコードをここへ集約する
+- `web/projects/` … 静的配信用の同梱プロジェクトデータ（エンジン非依存）
+
+## 収録モジュール
+
+| ファイル | 役割 |
+|---|---|
+| `kasc.js` | .kasc 行パーサー＋プロジェクトローダー（cam↔zoom・URL ビュー・テーマ・ブックマーク・`?kasc=` 直読み） |
+| `vector-load.js` / `vector-decode.js` | ベクター系行タイプ → GeoJSON 正規化ローダー／WKB・プロパティ変換ユーティリティ |
+| `gpkg-worker.js` | GeoPackage 読み込み Worker（sql.js で別スレッド処理） |
+| `qml-style.js` / `qml-2d.js` | QGIS .qml スタイルのコンパイルと 2D エンジンへの適用アダプタ |
+| `attr-widget.js` / `attr-stats.js` | 画面下部ドッキングの属性テーブル（Σ 集計・CSV/TSV 出力）と集計計算 |
+| `player-api.js` | 2D プレイヤー向け `window.kasugaiApi` アダプタ（AI ツール公開の土台） |
+| `fly-kasc.js` | `fly_geojson:` 行 → フライパス定義＋player-api フック（全プレイヤーエンジン共通） |
+| `geo-tools-2d.js` / `export-formats.js` | ツールタブ（計測・標高断面・見通し・緯度経度グリッド・レイヤーエクスポート GeoJSON/CSV/TSV/KML/FGB/SHP）。描画は `{update(fc)}` オーバーレイへ委譲（`makeLeafletOverlay` は Leaflet 系向け共通実装） |
+| `spatial-ops.js` | GeoJSON 空間演算 — 包含/交差判定・範囲生成（矩形・測地線円）・ポリゴン内集計・バッファ（点は測地線円、ライン/面は turf.js 遅延ロード） |
+| `minimap.js` | 左下オーバービュー地図（Leaflet 遅延ロード・範囲矩形または中心マーカー・クリック移動） |
+| `nav-tools.js` / `sun-time.js` / `coord-pins.js` | ナビツールバー（表示履歴・矩形ズーム等）・時刻/太陽コントロール・座標ピン |
+| `coords-format.js` / `coords-local.js` | 座標書式（度/DMS/UTM/平面直角/ローカル座標）とローカル座標系の対応点 UI |
+| `hub-diag.js` / `lazy-lib.js` | bridge-hub 由来レイヤーの失敗原因診断・CDN ライブラリ遅延ロード |
+| `session-state.js` | カレント状態ファイル（localStorage `kasugai:session-state`）の読み書き・適用 |
+| `ai-chat.js` / `mcp.js` / `box.js` | エンジン横断 AI チャット基盤（プロバイダ接続・ツール実行・MCP・Box OAuth） |
+| `engine-switch.js` | エンジン切替 UI とレイヤ状態引継ぎ |
+| `print.js` | 印刷・帳票出力 |
+| `i18n.js` / `i18n/` | 翻訳辞書と適用機構 |
+| `deck-drape.js` / `deck-ground.js` | 2D エンジン上の deck.gl 3D Tiles 表示（ドレープ・自動接地） |
+| `localfs.js` | `?kasc=local` のローカルフォルダ直読み（File System Access API） |
+| `kasc_loader.js` | geo_webview 生成ビューア HTML へのインライン埋め込み用ローダー |
+
+※エンジン固有の描画コードは各エンジンフォルダに置き、本ディレクトリから参照する。
