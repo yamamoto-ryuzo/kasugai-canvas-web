@@ -1,0 +1,79 @@
+# kasugai_canvas@main の web/ を指定チャンネル(stable/unstable)へ同期する。
+# C:\devin\cdn-publish.html のボタン → このワークフローの
+# 「Run workflow」で人が起動する運用(tools/publish_cdn.py の Actions 版)。
+# GITHUB_TOKEN は自分のリポジトリへ push できるため PAT は不要。
+name: CDN sync (kasugai_canvas web/)
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: "同期先チャンネル"
+        required: true
+        type: choice
+        default: unstable
+        options:
+          - unstable
+          - stable
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout kasugai-canvas-web
+        uses: actions/checkout@v4
+
+      - name: Fetch kasugai_canvas@main tarball
+        run: |
+          curl -fsSL -o /tmp/src.tgz \
+            https://github.com/yamamoto-ryuzo/kasugai_canvas/archive/refs/heads/main.tar.gz
+          mkdir -p /tmp/src
+          tar xzf /tmp/src.tgz -C /tmp/src
+
+      - name: Mirror web/ into channel
+        run: |
+          # tools/publish_cdn.py と同じ規約: vendor/・projects/ は除外して
+          # ミラー同期(CDN はエンジン本体のみ配信。vendor は SW がピン先を
+          # 直接解決、projects は別ホストのデータを参照するため同梱しない)
+          SRC=/tmp/src/kasugai_canvas-main/web
+          DST="${{ inputs.channel }}"
+          mkdir -p "$DST"
+          rsync -a --delete --exclude=vendor --exclude=projects "$SRC/" "$DST/"
+
+      - name: Write version.json / channels.json
+        run: |
+          python3 - <<'PY'
+          import json, re, pathlib
+          cargo = pathlib.Path('/tmp/src/kasugai_canvas-main/server/Cargo.toml').read_text(encoding='utf-8')
+          ver = re.search(r'^\s*version\s*=\s*"([^"]+)"', cargo, re.M).group(1)
+          channel = '${{ inputs.channel }}'
+          pathlib.Path(f'{channel}/version.json').write_text(
+              json.dumps({'version': ver, 'channel': channel,
+                          'source_repo': 'yamamoto-ryuzo/kasugai_canvas',
+                          'source_branch': 'main'},
+                         ensure_ascii=False, indent=2) + '\n',
+              encoding='utf-8')
+          cp = pathlib.Path('channels.json')
+          data = json.loads(cp.read_text(encoding='utf-8')) if cp.exists() else {}
+          data[channel] = ver
+          data.setdefault('default', 'stable')
+          cp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n',
+                        encoding='utf-8')
+          print(f'synced version: {ver} -> {channel}')
+          PY
+
+      - name: Commit & push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "no changes to commit"
+            exit 0
+          fi
+          VER=$(python3 -c "import json;print(json.load(open('${{ inputs.channel }}/version.json'))['version'])")
+          git commit -m "Sync web/ to ${{ inputs.channel }} (v${VER})"
+          git push
