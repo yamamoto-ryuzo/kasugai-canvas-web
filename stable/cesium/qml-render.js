@@ -1,7 +1,7 @@
 // QML スタイル(.qml)の Cesium への適用（描画側バインディング）
 // パース・式評価・シンボルコンパイルは /shared/qml-style.js を参照。
 // 本ファイルは Cesium 固有の entity/primitive 適用部のみを持つ。
-import { toCesiumColor, dashPattern, markerLayersToCanvas, fillPartsToTile, rgbaToCss } from "../shared/qml-style.js";
+import { toCesiumColor, dashPattern, markerLayersToCanvas, fillPartsToTile, rgbaToCss, qmlLabelCanvas } from "../shared/qml-style.js";
 
 const Cesium = window.Cesium;
 
@@ -124,11 +124,28 @@ function pointInsidePolygon(entity, time) {
 // 周線を別途 polyline で引く)。opacity: レイヤ透過度(色アルファへ乗算)
 export function applyQmlStyleToDataSource(ds, style, { clamp = false, time = null, hiddenSymbols = null, opacity = 1 } = {}) {
   if (!style) return;
+  // 補助エンティティの生成/削除とラベル更新を1回の変更通知に束ねる。
+  // 逐次変更だと実行中のプリミティブ構築と競合し(属性リスト不整合など)
+  // レンダリングクラッシュを起こすことがある
+  if (ds._qmlApplying) return;
+  ds._qmlApplying = true;
+  try { ds.entities.suspendEvents?.(); } catch (_) {}
+  try {
+  _applyQmlStyleToDataSourceInner(ds, style, { clamp, time, hiddenSymbols, opacity });
+  } finally {
+    ds._qmlApplying = false;
+    try { ds.entities.resumeEvents?.(); } catch (_) {}
+  }
+}
+
+function _applyQmlStyleToDataSourceInner(ds, style, { clamp = false, time = null, hiddenSymbols = null, opacity = 1 } = {}) {
   const t = time || Cesium.JulianDate.now();
   const hasHidden = !!(hiddenSymbols && hiddenSymbols.size);
   // 前回適用時に生成した補助エンティティ(装飾線・積層線)を掃除する
   for (const e of ds._qmlAux || []) { try { ds.entities.remove(e); } catch (_) {} }
   ds._qmlAux = [];
+  // ラベル障害物(obstacleType): 地物 bbox を衝突判定の placed へ登録するため収集
+  ds._qmlObstacles = [];
   const addAux = ent => {
     try {
       // 位置を持つ補助エンティティは座標の NaN を除外する(描画クラッシュ防止)
@@ -244,21 +261,35 @@ export function applyQmlStyleToDataSource(ds, style, { clamp = false, time = nul
 
     // ポリゴン
     if (hasFill) {
-      // invertedPolygonRenderer: 世界矩形 − 地物リング(穴)のマスクへ差し替える
+      // invertedPolygonRenderer: 地物 bbox を大きく広げた外枠 − 地物リング(穴)の
+      // マスクへ差し替える(±180跨ぎの世界矩形はプリミティブ分割で壊れるため
+      // データ周辺の矩形に留める)
       if (style.inverted && spec.fillParts?.length) {
         try {
           const h = entity.polygon?.hierarchy?.getValue?.(t);
           const parts = Array.isArray(h) ? h : (h ? [h] : []);
-          const holes = parts.map(p =>
-            new Cesium.PolygonHierarchy((p.positions || p).slice().reverse()));
-          entity.polygon.hierarchy = new Cesium.ConstantProperty(
-            new Cesium.PolygonHierarchy(
-              Cesium.Cartesian3.fromDegreesArray(
-                [-180, -85, 180, -85, 180, 85, -180, 85]), holes));
-          // GroundPrimitive は穴付きポリゴン非対応のため、
-          // height=0 指定で通常 Primitive(穴対応)へ切り替える
-          entity.polygon.height = new Cesium.ConstantProperty(0);
-          entity.polygon.perPositionHeight = new Cesium.ConstantProperty(false);
+          let w = Infinity, s = Infinity, e = -Infinity, n = -Infinity;
+          for (const p of parts) {
+            for (const pos of p.positions || []) {
+              const c = Cesium.Cartographic.fromCartesian(pos);
+              w = Math.min(w, c.longitude); e = Math.max(e, c.longitude);
+              s = Math.min(s, c.latitude); n = Math.max(n, c.latitude);
+            }
+          }
+          if (Number.isFinite(w)) {
+            const dw = Math.max((e - w) * 4, 0.5), dh = Math.max((n - s) * 4, 0.5);
+            const wc = w - dw, ec = e + dw, sc = s - dh, nc = n + dh;
+            const holes = parts.map(p =>
+              new Cesium.PolygonHierarchy((p.positions || p).slice().reverse()));
+            entity.polygon.hierarchy = new Cesium.ConstantProperty(
+              new Cesium.PolygonHierarchy(
+                Cesium.Cartesian3.fromRadiansArray(
+                  [wc, sc, ec, sc, ec, nc, wc, nc]), holes));
+            // GroundPrimitive は穴付きポリゴン非対応のため、
+            // height=0 指定で通常 Primitive(穴対応)へ切り替える
+            entity.polygon.height = new Cesium.ConstantProperty(0);
+            entity.polygon.perPositionHeight = new Cesium.ConstantProperty(false);
+          }
         } catch (_) { /* マスク生成失敗時は元地物のまま */ }
       }
       if (spec.fillParts?.length) {
@@ -269,6 +300,8 @@ export function applyQmlStyleToDataSource(ds, style, { clamp = false, time = nul
           entity.polygon.material = new Cesium.ImageMaterialProperty({ image: tile, repeat, transparent: true });
         } else if (solidBase) {
           entity.polygon.material = new Cesium.ColorMaterialProperty(toCesiumColor(solidBase));
+          // 2.5D レンダラ近似: 非ドレープ時のみ立体押出し(クランプと両立しない)(#64)
+          if (style?.d25 && !clamp) entity.polygon.extrudedHeight = new Cesium.ConstantProperty(style.d25.height ?? 10);
         } else {
           entity.polygon.material = new Cesium.ColorMaterialProperty(Cesium.Color.TRANSPARENT);
         }
@@ -366,41 +399,66 @@ export function applyQmlStyleToDataSource(ds, style, { clamp = false, time = nul
           // 点地物はマーカー分だけ上下へ逃がす(従来の -12px 相当)
           const bump = hasPoint && q.v ? -Math.sign(q.v) * 12 : 0;
           const bg = labelSpec.background;
-          entity.label = new Cesium.LabelGraphics({
-            text,
-            font: labelSpec.fontCss,
-            fillColor: toCesiumColor(mulAlpha(labelSpec.fill, opacity)),
-            outlineColor: labelSpec.halo ? toCesiumColor(mulAlpha(labelSpec.halo.color, opacity)) : Cesium.Color.BLACK,
-            outlineWidth: labelSpec.halo ? labelSpec.halo.widthPx : 0,
-            style: labelSpec.halo ? Cesium.LabelStyle.FILL_AND_OUTLINE : Cesium.LabelStyle.FILL,
-            horizontalOrigin: hOrigin,
-            verticalOrigin: vOrigin,
-            pixelOffset: new Cesium.Cartesian2(oxPx, oyPx + bump),
-            rotation: labelRot ? -labelRot * Math.PI / 180 : 0,
-            showBackground: !!bg,
-            backgroundColor: bg ? toCesiumColor(mulAlpha(bg.fill, opacity)) : undefined,
-            backgroundPadding: bg ? new Cesium.Cartesian2(bg.padPx[0] + 3, bg.padPx[1] + 3) : undefined,
-          });
+          // bufferNoFill(中空ハロー): LabelGraphics では中空を表せないため
+          // canvas ラスタライズしたラベルを billboard で描く
+          const labelGfx = labelSpec.halo?.noFill && (() => {
+            const r = qmlLabelCanvas(labelSpec);
+            return r ? entity.billboard = new Cesium.BillboardGraphics({
+              image: r.canvas,
+              verticalOrigin: Cesium.VerticalOrigin.CENTER,
+              horizontalOrigin: Cesium.HorizontalOrigin.CENTER,
+              pixelOffset: new Cesium.Cartesian2(oxPx, oyPx + bump),
+              rotation: labelRot ? -labelRot * Math.PI / 180 : 0,
+            }) : null;
+          })();
+          if (!labelGfx) {
+            entity.label = new Cesium.LabelGraphics({
+              text,
+              font: labelSpec.fontCss,
+              fillColor: toCesiumColor(mulAlpha(labelSpec.fill, opacity)),
+              outlineColor: labelSpec.halo ? toCesiumColor(mulAlpha(labelSpec.halo.color, opacity)) : Cesium.Color.BLACK,
+              outlineWidth: labelSpec.halo ? labelSpec.halo.widthPx : 0,
+              style: labelSpec.halo ? Cesium.LabelStyle.FILL_AND_OUTLINE : Cesium.LabelStyle.FILL,
+              horizontalOrigin: hOrigin,
+              verticalOrigin: vOrigin,
+              pixelOffset: new Cesium.Cartesian2(oxPx, oyPx + bump),
+              rotation: labelRot ? -labelRot * Math.PI / 180 : 0,
+              showBackground: !!bg,
+              backgroundColor: bg ? toCesiumColor(mulAlpha(bg.fill, opacity)) : undefined,
+              backgroundPadding: bg ? new Cesium.Cartesian2(bg.padPx[0] + 3, bg.padPx[1] + 3) : undefined,
+            });
+          }
           // ラベル縮尺表示 → 規則縮尺との積集合を DDC として適用
+          const gfx = entity.label || entity.billboard;
           const ls = labelSpec.labelScale;
           if (ls && (ls.minScale || ls.maxScale)) {
             const near = scaleDenomToDist(ls.minScale || 0);
             const far = ls.maxScale ? scaleDenomToDist(ls.maxScale) : Number.MAX_VALUE;
-            entity.label.distanceDisplayCondition = new Cesium.ConstantProperty(
+            gfx.distanceDisplayCondition = new Cesium.ConstantProperty(
               new Cesium.DistanceDisplayCondition(
                 Math.max(ddc?.near ?? 0, near),
                 Math.min(ddc?.far ?? Number.MAX_VALUE, far)));
           } else if (ddc) {
-            entity.label.distanceDisplayCondition = new Cesium.ConstantProperty(ddc);
+            gfx.distanceDisplayCondition = new Cesium.ConstantProperty(ddc);
           }
           // declutter 対象(重なり禁止系)は初期非表示にし、declutter が
           // 画面投影ベースで空き/収まりを判定したうえで復帰する
           // (初期に全表示してから消すちらつきを防ぐ)
           if (!(labelSpec.displayAll || labelSpec.allowOverlap)) {
-            entity.label.show = new Cesium.ConstantProperty(false);
+            gfx.show = new Cesium.ConstantProperty(false);
           }
           // ドロップシャドウ: 同色ラベルをオフセット重複で近似
-          if (labelSpec.shadow) pendingShadows.push({ entity, labelSpec, oxPx, oyPx: oyPx + bump, hOrigin, vOrigin });
+          if (!labelGfx && labelSpec.shadow) pendingShadows.push({ entity, labelSpec, oxPx, oyPx: oyPx + bump, hOrigin, vOrigin });
+          // ラベル障害物(obstacleType): 地物 geometry が他ラベルの配置を妨げる。
+          // declutter で画面投影 bbox を placed へ事前登録するため収集する
+          if (labelSpec.obstacleType) {
+            const mk = spec.markers?.length ? markerLayersToCanvas(spec.markers) : null;
+            ds._qmlObstacles.push({
+              entity,
+              kind: labelSpec.obstacleType,
+              sizePx: mk ? Math.max(mk.width, mk.height) : (spec.line?.widthPx || 8) * 1.5,
+            });
+          }
         }
       }
     }
@@ -590,12 +648,18 @@ function renderLineDecor(entity, decor, t, { addAux, clamp, opacity }) {
     const base = offsetPos(b, az, -headLen);
     const l = offsetPos(base, az + Math.PI / 2, headWid);
     const r = offsetPos(base, az - Math.PI / 2, headWid);
-    addAux({
-      polygon: {
-        hierarchy: new Cesium.PolygonHierarchy([b, l, r]),
-        material: new Cesium.ColorMaterialProperty(toCesiumColor(mulAlpha(decor.color, opacity))),
-      },
-    });
+    // 矢羽はポリゴンではなく2本の折れ線で近似(補助ポリゴンの
+    // プリミティブ混在による属性不整合を避ける)
+    for (const tip of [l, r]) {
+      addAux({
+        polyline: {
+          positions: [tip, b],
+          width: new Cesium.ConstantProperty(Math.max(decor.widthPx || 2, 1)),
+          material: new Cesium.ColorMaterialProperty(toCesiumColor(mulAlpha(decor.color, opacity))),
+          clampToGround: new Cesium.ConstantProperty(clamp),
+        },
+      });
+    }
   }
 }
 
@@ -618,6 +682,43 @@ function lineScreenLen(scene, entity, t) {
 
 // 1データソース分の declutter を実行する。複数 ds 間の衝突も見るため
 // 共有の placed 配列を受け取る
+// obstacleType 地物の画面投影 bbox を placed(障害物)へ事前登録する。
+// ポリゴンは全頂点 bbox、点/線はマーカー/線幅サイズの箱で近似する
+export function registerLabelObstacles(scene, ds, placed = []) {
+  const list = ds._qmlObstacles || [];
+  if (!list.length) return;
+  const t = Cesium.JulianDate.now();
+  for (const ob of list) {
+    const e = ob.entity;
+    try {
+      let box = null;
+      if (e.polygon) {
+        box = polyScreenBox(scene, e, t);
+      } else if (e.polyline) {
+        const pos = e.polyline.positions?.getValue?.(t);
+        if (pos?.length) {
+          let x1 = Infinity, y1 = Infinity, x2 = -Infinity, y2 = -Infinity;
+          for (const p of pos) {
+            const w = toWindow(scene, p);
+            if (!w || !Number.isFinite(w.x)) continue;
+            if (w.x < x1) x1 = w.x; if (w.x > x2) x2 = w.x;
+            if (w.y < y1) y1 = w.y; if (w.y > y2) y2 = w.y;
+          }
+          if (Number.isFinite(x1)) box = { x1, y1, x2, y2 };
+        }
+      } else {
+        const pos = e.position?.getValue?.(t) || entityCentroid(e, t);
+        const w = pos ? toWindow(scene, pos) : null;
+        if (w && Number.isFinite(w.x)) {
+          const half = Math.max(ob.sizePx || 10, 4) / 2;
+          box = { x1: w.x - half, y1: w.y - half, x2: w.x + half, y2: w.y + half };
+        }
+      }
+      if (box) placed.push(box);
+    } catch (_) {}
+  }
+}
+
 export function declutterDataSourceLabels(scene, ds, placed = []) {
   const list = (ds._qmlLabels || []).filter(c => c.spec?.text);
   if (!list.length) return;
@@ -626,10 +727,12 @@ export function declutterDataSourceLabels(scene, ds, placed = []) {
     (b.spec.zIndex - a.spec.zIndex) || (b.spec.priority - a.spec.priority));
   for (const c of sorted) {
     const e = c.entity;
-    if (!e?.label) continue;
+    // bufferNoFill 等は billboard ラベル(LabelGraphics では中空を表せない)
+    const gfx = e?.label || e?.billboard;
+    if (!gfx) continue;
     const pos = e.position?.getValue?.(t);
     const win = pos ? toWindow(scene, pos) : null;
-    if (!win || !Number.isFinite(win.x)) { e.label.show = new Cesium.ConstantProperty(false); continue; }
+    if (!win || !Number.isFinite(win.x)) { gfx.show = new Cesium.ConstantProperty(false); continue; }
     const size = c.spec.sizePx || 12;
     const lines = String(c.spec.text).split("\n");
     // 全角は 1em・半角は 0.55em で幅を見積もる(日本語ラベル対応)
@@ -643,7 +746,7 @@ export function declutterDataSourceLabels(scene, ds, placed = []) {
       const pb = polyScreenBox(scene, e, t);
       const fits = pb && w <= (pb.x2 - pb.x1) && h <= (pb.y2 - pb.y1);
       if (!fits) {
-        e.label.show = new Cesium.ConstantProperty(false);
+        gfx.show = new Cesium.ConstantProperty(false);
         continue;
       }
     }
@@ -657,9 +760,9 @@ export function declutterDataSourceLabels(scene, ds, placed = []) {
       } else {
         tooSmall = lineScreenLen(scene, e, t) < need;
       }
-      if (tooSmall) { e.label.show = new Cesium.ConstantProperty(false); continue; }
+      if (tooSmall) { gfx.show = new Cesium.ConstantProperty(false); continue; }
     }
-    if (c.spec.allowOverlap || c.spec.displayAll) { e.label.show = new Cesium.ConstantProperty(true); continue; }
+    if (c.spec.allowOverlap || c.spec.displayAll) { gfx.show = new Cesium.ConstantProperty(true); continue; }
     const quads = pl.predefinedOrder?.length ? orderToQuads(pl.predefinedOrder, pl.quad) : [pl.quad || { h: 0, v: 0 }];
     let done = false;
     for (const q of quads) {
@@ -670,19 +773,24 @@ export function declutterDataSourceLabels(scene, ds, placed = []) {
       const box = { x1, y1, x2: x1 + w, y2: y1 + h };
       if (!placed.some(b => overlapBox(b, box))) {
         placed.push(box);
-        e.label.pixelOffset = new Cesium.ConstantProperty(new Cesium.Cartesian2(dx, dy));
-        e.label.show = new Cesium.ConstantProperty(true);
+        gfx.pixelOffset = new Cesium.ConstantProperty(new Cesium.Cartesian2(dx, dy));
+        gfx.show = new Cesium.ConstantProperty(true);
         done = true;
         break;
       }
     }
-    if (!done) e.label.show = new Cesium.ConstantProperty(false);
+    if (!done) gfx.show = new Cesium.ConstantProperty(false);
   }
 }
 
 // データソース群に対して declutter を実行する(全 ds 横断で衝突判定)
 export function declutterAllLabels(scene, sources) {
   const placed = [];
+  // 先に全データソースの obstacleType 地物 bbox を障害物として登録する
+  // (後続のラベル配置がこれを避ける。ラベル矩形の障害物は配置時に逐次登録)
+  for (const ds of sources || []) {
+    try { registerLabelObstacles(scene, ds, placed); } catch (e) { /* ignore */ }
+  }
   for (const ds of sources || []) {
     try { declutterDataSourceLabels(scene, ds, placed); } catch (e) { /* 1件失敗でも継続 */ }
   }
