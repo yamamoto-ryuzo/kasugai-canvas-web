@@ -16,6 +16,7 @@ import {
 import {
   backendUrl, detectBackend, getBackendCapabilities, hasBackendFeature,
   isBackendCapabilitiesResolved, setBackendCapabilities as setBackendCaps,
+  localNetworkPermission,
 } from "./backend.js";
 
 // ---- バックエンド capabilities（エンジン横断で共有する状態） ----
@@ -152,7 +153,7 @@ const BRIDGE_HUB_ENDPOINT = "http://127.0.0.1:8511/agent";
 //  起動時掃除で停止されるためフロントは探さない）
 const WEBGIS_HUB_PORTS = [8511];
 // ブリッジ経由のプロバイダ（capabilities の同名キーがエンドポイントを通知する）
-const BRIDGE_PROVIDERS = ["copilot", "devin", "antigravity"];
+const BRIDGE_PROVIDERS = ["copilot", "devin", "antigravity", "acp"];
 // ブリッジ系プロバイダ（copilot/devin/antigravity/agent）のエンドポイント記憶キー。
 // 入力欄は1つだが、切替時に前プロバイダの値を各キーへ退避し、
 // 別ブリッジのURLを引き継いで送信先・モデル一覧が混線しないようにする
@@ -160,9 +161,10 @@ const PROVIDER_ENDPOINT_KEYS = {
   copilot: "agentEndpoint.copilot",
   devin: "agentEndpoint.devin",
   antigravity: "agentEndpoint.antigravity",
+  acp: "agentEndpoint.acp",
   agent: "agentEndpoint.agent",
 };
-const PROVIDER_ORDER = ["gemini", "openai", "sakura", "anthropic", "azure", "copilot", "devin", "antigravity", "agent"];
+const PROVIDER_ORDER = ["gemini", "openai", "sakura", "anthropic", "azure", "copilot", "devin", "antigravity", "acp", "agent"];
 // さくらのAI Engine（専用プロバイダ）の固定エンドポイント。OpenAI互換API
 const SAKURA_BASE_URL = "https://api.ai.sakura.ad.jp/v1";
 // ---- bridge-hub 検出 ----
@@ -173,14 +175,62 @@ const SAKURA_BASE_URL = "https://api.ai.sakura.ad.jp/v1";
 let webgisHub = undefined; // {endpoint, providers:{...}} = 検出 / null = 未検出
 let webgisHubAt = 0;
 const WEBGIS_HUB_TTL_MS = 15000;
-async function probeWebgisHub() {
+// Chrome LNA でローカル疎通がブロック確定した場合 true（denied は再プロンプト
+// されないため、ハブ未検出ではなくブロック診断へ回す判定材料）
+let webgisHubBlocked = false;
+// prompt 状態の疎通は権限プロンプト応答待ちで fetch が保留されるため、
+// 応答を待てる長めの窓を使う。許可されれば保留中の fetch がそのまま完了する
+const WEBGIS_HUB_LNA_TIMEOUT_MS = 60000;
+// prompt→granted/denied の変化をイベントで拾う監視（PermissionStatus 毎に1回）
+let webgisHubPermWatch = null;
+// ハブ検出を妨げている LNA 状態。"denied"=ブロック / "prompt"=許可待ち / null=妨げなし
+function webgisHubLnaState() {
+  if (webgisHubBlocked) return "denied";
+  if (webgisHubPermWatch) return "prompt";
+  return null;
+}
+function watchWebgisHubPermission(perm) {
+  if (!perm || webgisHubPermWatch === perm) return;
+  webgisHubPermWatch = perm;
+  perm.addEventListener?.("change", () => {
+    webgisHubPermWatch = null;
+    webgisHubBlocked = perm.state === "denied";
+    webgisHub = undefined; // TTL を捨てて新しい権限状態で即再プローブ
+    void (async () => {
+      const hub = await probeWebgisHub();
+      // 許可 → ハブ検出 → ブリッジ系プロバイダ選択肢まで同一セッションで更新する
+      updateBridgeProviderOptions();
+      updateChatPanelVisibility();
+      const status = document.querySelector("#bridge-hub-status");
+      if (status && status.textContent) {
+        if (hub) status.textContent = t("chat.bridge.hubDetected");
+        else if (webgisHubBlocked) status.textContent = t("chat.bridge.hubLnaBlocked");
+      }
+    })();
+  }, { once: true });
+}
+export async function probeWebgisHub() {
   if (webgisHub !== undefined
     && Date.now() - webgisHubAt < WEBGIS_HUB_TTL_MS) return webgisHub;
   webgisHubAt = Date.now();
+  // 公開HTTPSから loopback への fetch は Chrome LNA 権限が前提。denied は
+  // 再プロンプトされず常に失敗するため疎通せずブロック扱いとする。
+  // prompt は fetch 自体が権限プロンプトを発火させ応答待ちで保留されるため、
+  // 2s の通常タイムアウトで切ると稼働中のハブも「未検出」になる（issue #88）。
+  // 許可待ちの間は長めの窓で投げ、権限変化はイベントで拾って再プローブに繋ぐ
+  const perm = await localNetworkPermission();
+  webgisHubBlocked = perm?.state === "denied";
+  if (webgisHubBlocked) {
+    webgisHub = null;
+    return null;
+  }
+  const awaitingPrompt = perm?.state === "prompt";
+  if (awaitingPrompt) watchWebgisHubPermission(perm);
+  const timeoutMs = awaitingPrompt ? WEBGIS_HUB_LNA_TIMEOUT_MS : 2000;
   for (const port of WEBGIS_HUB_PORTS) {
     try {
       const r = await fetch(`http://127.0.0.1:${port}/health`,
-        { signal: AbortSignal.timeout(2000), cache: "no-store" });
+        { signal: AbortSignal.timeout(timeoutMs), cache: "no-store" });
       const d = await r.json().catch(() => ({}));
       if (r.ok && d?.hub) {
         webgisHub = {
@@ -208,6 +258,7 @@ async function waitForWebgisHub(timeoutMs, until) {
     webgisHub = undefined;
     const hub = await probeWebgisHub();
     if (hub && (!until || until(hub))) return hub;
+    if (webgisHubBlocked) return null; // denied は再プロンプトされないため打ち切り
     await new Promise(r => setTimeout(r, 2000));
   }
   return null;
@@ -218,6 +269,29 @@ async function waitForWebgisHub(timeoutMs, until) {
 // こちらは /health ポーリングで検出して接続まで自動完了する。
 // ブラウザから exe を直接起動することはできないため、ユーザー操作は
 // 「DL した exe を実行」の1回のみ（以後はログイン時自動起動）
+// "4.20.0" 形式のバージョンを比較する（欠けた要素は 0 扱い）。a<b なら負
+function compareVersions(a, b) {
+  const pa = String(a).split(".").map(p => parseInt(p, 10) || 0);
+  const pb = String(b).split(".").map(p => parseInt(p, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] || 0) - (pb[i] || 0);
+    if (d) return d < 0 ? -1 : 1;
+  }
+  return 0;
+}
+// 配布中 bridge-hub のバージョン。web/download/bridge-hub.version.json は
+// tools/build_bridge_zip.py が /health 実測値で出力する。取得失敗・未配置
+// （旧配布物）では null を返し、従来どおりの扱いとする
+let hubBundleVersionPromise = null;
+function fetchHubBundleVersion() {
+  if (!hubBundleVersionPromise) {
+    hubBundleVersionPromise = fetch(new URL("../download/bridge-hub.version.json", location.href), { cache: "no-store" })
+      .then(r => (r.ok ? r.json() : null))
+      .then(j => (j && typeof j.version === "string" ? j.version : null))
+      .catch(() => null);
+  }
+  return hubBundleVersionPromise;
+}
 let hubInstallWait = null; // 重複実行ガード
 // prev = 更新元の旧ハブ情報 {version}（旧ハブ検出からの更新導線で渡す。
 // 未定義なら新規インストール待ち＝最初に応答したハブを返す）
@@ -227,6 +301,16 @@ async function offerHubInstall(provider, auto, prev) {
   const status = document.querySelector("#bridge-hub-status");
   if (!note || !btn) return;
   note.hidden = false;
+  // LNA 未許可が検出不能の原因なら、インストール案内より先に許可を促す。
+  // prompt は疎通 fetch がプロンプトを発火させるので許可待ちを明示し、
+  // denied は再プロンプトされないためブロック診断を出す
+  if (status) {
+    const lnaState = webgisHubLnaState();
+    if (lnaState) {
+      status.textContent = t(lnaState === "denied"
+        ? "chat.bridge.hubLnaBlocked" : "chat.bridge.hubLnaPrompt");
+    }
+  }
   // 更新待ち: 旧ハブは実行前から応答しているため「応答した」だけでは完了と
   // みなせない。/vector 対応フィールドの出現（新ビルドの標識）か、
   // version の変化をもって新版へ置き換わったと判定する
@@ -251,7 +335,8 @@ async function offerHubInstall(provider, auto, prev) {
         if (status) status.textContent = t("chat.bridge.hubDetected");
         void refreshBridgeStatus(provider);
       } else if (status) {
-        status.textContent = t("chat.bridge.hubNotFound");
+        status.textContent = webgisHubBlocked
+          ? t("chat.bridge.hubLnaBlocked") : t("chat.bridge.hubNotFound");
       }
     })().finally(() => { hubInstallWait = null; });
     return hubInstallWait;
@@ -350,25 +435,54 @@ function setupDataSources() {
   });
 
   // QGIS Live Driver のセッションを自動検出して MCP 接続する。
-  // 検出はローカルアプリの /api/qgis-live/discover（~/.qgis-live レジストリ
-  // 走査）が行う。実接続は /api/qgis-live/mcp リレー経由（QGIS 側は CORS
-  // 非対応＋Bearer 必須のためブラウザ直叩き不可、汎用 /api/mcp プロキシは
-  // loopback を拒否）。トークンはリレーが付与するためブラウザは持たず、
-  // QGIS 再起動でポート・トークンが変わっても自動で追随する。
+  // 検出は2段: (1) ローカルアプリ(8510)の /api/qgis-live/discover
+  // （~/.qgis-live レジストリ走査）→ 実接続は /api/qgis-live/mcp リレー。
+  // (2) CDN/静的配信などバックエンドが無い・検出失敗時は、geo_webview の
+  // 内蔵サーバ(:8089-, CORS+PNA対応済み)の /live/mcp-discover をプローブし
+  // その /live/mcp リレーへ接続する。どちらもトークンはリレー側で付与する
+  // ためブラウザは持たず、QGIS 再起動でポート・トークンが変わっても自動で
+  // 追随する。qgis_bridge_call（他プラグインのブリッジ呼出）も同じ
+  // /live/mcp 経路に乗る。
+  // geo_webview の優先ポートは8089。占有時は連番フォールバックするため
+  // print.js と同じ 8089-8091 を順に試す
+  const QGIS_LIVE_PORTS = [8089, 8090, 8091];
+  const qgisLiveRelayBases = () => {
+    // ページ自体が geo_webview 配信(:8089等)なら同一オリジンを優先
+    const bases = QGIS_LIVE_PORTS.includes(Number(location.port)) ? [location.origin] : [];
+    for (const p of QGIS_LIVE_PORTS) {
+      const b = `http://127.0.0.1:${p}`;
+      if (!bases.includes(b)) bases.push(b);
+    }
+    return bases;
+  };
   const qgisStatus = document.querySelector("#qgis-status");
   const setQgisStatus = message => { if (qgisStatus) qgisStatus.textContent = message || ""; };
   document.querySelector("#qgis-connect")?.addEventListener("click", async () => {
     setQgisStatus(t("mcp.qgis.searching"));
-    let info = null;
+    let mcpUrl = "";
     try {
       const res = await fetch(backendUrl("/api/qgis-live/discover"), { cache: "no-store" });
-      if (res.ok) info = await res.json();
+      if (res.ok && (await res.json())?.ok) mcpUrl = backendUrl("/api/qgis-live/mcp");
     } catch (e) { /* バックエンド未到達 */ }
-    if (!info || !info.ok) {
+    if (!mcpUrl) {
+      // geo_webview はプラグインリロード等で一瞬無応答になり得るため
+      // 全滅時は1回だけリトライする
+      for (let attempt = 0; attempt < 2 && !mcpUrl; attempt++) {
+        if (attempt) await new Promise(r => setTimeout(r, 1000));
+        for (const base of qgisLiveRelayBases()) {
+          try {
+            const res = await fetch(`${base}/live/mcp-discover`, { cache: "no-store", signal: AbortSignal.timeout(4000) });
+            const info = res.ok ? await res.json() : null;
+            if (info?.ok && info.url) { mcpUrl = info.url; break; }
+          } catch (e) { /* geo_webview未起動 */ }
+        }
+      }
+    }
+    if (!mcpUrl) {
       setQgisStatus(t("mcp.qgis.notFound"));
       return;
     }
-    upsertMcpServer({ key: "qgis-live", name: "QGIS Live", url: backendUrl("/api/qgis-live/mcp"), enabled: true });
+    upsertMcpServer({ key: "qgis-live", name: "QGIS Live", url: mcpUrl, enabled: true });
     const result = await connectMcpServer("qgis-live");
     setQgisStatus(result.ok ? t("mcp.addOk", { count: result.tools.length }) : t("mcp.addNg", { error: result.error }));
   });
@@ -724,9 +838,33 @@ export async function refreshCliSetupStates() {
       c.style.fontWeight = "bold";
     });
   };
+  // LNA がブロック/許可待ちのときは権限案内をプローブ完了を待たず先に出す。
+  // prompt 中の疎通は許可待ちで最大 60s 保留され、案内表示が遅れるため。
+  // 権限未許可では疎通自体を省略するため、導入有無は「未導入」ではなく
+  // 「不明」とする（実疎通で不在を確認した場合だけ missing にする）
+  const hubStatus = document.querySelector("#bridge-hub-status");
+  const prePerm = await localNetworkPermission();
+  if (prePerm?.state === "denied") {
+    if (hubStatus) hubStatus.textContent = t("chat.bridge.hubLnaBlocked");
+    setChip("hub", "unknown");
+    for (const p of BRIDGE_PROVIDERS) setChip(p, "unknown");
+    return;
+  }
+  if (prePerm?.state === "prompt" && hubStatus) {
+    hubStatus.textContent = t("chat.bridge.hubLnaPrompt");
+  }
   const hub = await probeWebgisHub();
-  setChip("hub", hub ? "installed" : "missing");
-  if (!hub) { for (const p of BRIDGE_PROVIDERS) setChip(p, "unknown"); return; }
+  setChip("hub", hub ? "installed" : (webgisHubLnaState() ? "unknown" : "missing"));
+  if (!hub) {
+    // ハブ未検出が LNA 未許可起因なら「未導入」ではなく許可案内/ブロック診断を出す
+    const lnaState = webgisHubLnaState();
+    if (hubStatus && lnaState) {
+      hubStatus.textContent = t(lnaState === "denied"
+        ? "chat.bridge.hubLnaBlocked" : "chat.bridge.hubLnaPrompt");
+    }
+    for (const p of BRIDGE_PROVIDERS) setChip(p, "unknown");
+    return;
+  }
   try {
     const r = await fetch(hub.endpoint.replace(/\/agent$/, "") + "/setup",
       { signal: AbortSignal.timeout(5000), cache: "no-store" });
@@ -853,7 +991,9 @@ export function setupAiSettings() {
         const d = await r.json().catch(() => ({}));
         if (Array.isArray(d?.models)) models = d.models.filter(m => m?.id);
         if (d?.model) detectedBridgeModels[provider] = d.model;
-        retry = !!(d?.pending || (d?.error && !models.length));
+        // pending（コールドスタート）は再取得するが、要認証は確定状態のため
+        // リトライしない（ブラウザ認証は実利用時のみ開かれる）
+        retry = !!(d?.pending || (d?.error && !models.length && !d?.authRequired));
         // ブリッジが返す失敗理由（APIキー拒否・起動失敗等）を保持し、
         // 接続失敗としてステータス欄・接続状態へ反映する（全プロバイダ共通）
         if (d?.error) {
@@ -921,8 +1061,15 @@ export function setupAiSettings() {
       providerConnState = { provider, state: "ng", detail: providerConnDetail[provider] };
       setBridgeStatus(ui, providerConnDetail[provider], false);
       // 更新導線を開く（ボタン → bridge-hub.zip 再DL → 実行で自己インストールが
-      // 旧ハブを停止して新版へ置き換える。待機は更新後の応答まで絞る）
-      void offerHubInstall(provider, false, { version: found.version });
+      // 旧ハブを停止して新版へ置き換える。待機は更新後の応答まで絞る）。
+      // ただし配布物が実行中ハブ以下なら DL しても更新にならないため開かない
+      // （配布物陳腐化時のダウングレード抑止・issue #86）
+      const bundledVersion = await fetchHubBundleVersion();
+      if (bundledVersion && found.version && compareVersions(bundledVersion, found.version) <= 0) {
+        console.warn(`[bridge] 配布中 bridge-hub ${bundledVersion} は実行中ハブ ${found.version} 以下のため更新導線をスキップします`);
+      } else {
+        void offerHubInstall(provider, false, { version: found.version });
+      }
     } else {
       setBridgeStatus(ui,
         found
@@ -2535,6 +2682,23 @@ const CHAT_TOOLS = [{
       },
     },
     {
+      name: "viewshed",
+      description: "観測点からの可視範囲（viewshed）を放射状の地形サンプリングで計算し、可視=緑/不可視=赤/不明=灰として地図の地表へ色分け表示する。半径・方位数・サンプル数に上限あり（計算コストが高いため大きな範囲は分割して実行する）",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          from: { type: "ARRAY", items: { type: "NUMBER" }, description: "観測点 [lng,lat]（度）" },
+          observerHeight: { type: "NUMBER", description: "観測点の地表からの高さ(m・省略時0)" },
+          targetHeight: { type: "NUMBER", description: "対象となる地表面からの高さ(m・省略時0)" },
+          radiusMeters: { type: "NUMBER", description: "可視範囲の半径(m・省略時3000・100-50000)" },
+          azimuths: { type: "NUMBER", description: "方位分割数（省略時72・16-360）" },
+          samples: { type: "NUMBER", description: "1方位あたりの距離サンプル数（省略時64・16-256）" },
+          include3d: { type: "BOOLEAN", description: "3D Tiles（建物等）も遮蔽判定に含める近似モード（省略時false・遅い）" },
+        },
+        required: ["from"],
+      },
+    },
+    {
       name: "setGraticule",
       description: "緯度経度グリッド（緯線・経線と度ラベル）の表示をON/OFFする",
       parameters: {
@@ -3374,6 +3538,7 @@ export async function executeChatTool(name, args = {}) {
   if (name === "measureBearing") return window.kasugaiApi.measureBearing(args.from, args.to);
   if (name === "elevationProfile") return await window.kasugaiApi.elevationProfile(args.coordinates, args.samples);
   if (name === "lineOfSight") return await window.kasugaiApi.lineOfSight(args.from, args.to, args);
+  if (name === "viewshed") return await window.kasugaiApi.viewshed(args.from, args);
   if (name === "setGraticule") { window.kasugaiApi.setGraticule(!!args.on); return { ok: true }; }
   if (name === "setMinimap") { window.kasugaiApi.setMinimap(!!args.on); return { ok: true }; }
   return { ok: false, message: t("tool.unknown", { name }) };
@@ -3517,8 +3682,10 @@ function bridgeSetupHubMaybe() {
 // 完了(またはタイムアウト)までポーリングする。戻り値はツール結果向けの要約
 async function bridgeSetupRun(provider, action) {
   const hub = await detectBridgeHubBase();
-  if (!hub) return { ok: false, message: t("chat.bridge.hubNotFound") };
-  if (action !== "install") {
+  if (!hub) {
+    return { ok: false, message: webgisHubBlocked ? t("chat.bridge.hubLnaBlocked") : t("chat.bridge.hubNotFound") };
+  }
+  if (action === "status") {
     try {
       const r = await fetch(`${hub}/setup`, { signal: AbortSignal.timeout(15000) });
       const d = await r.json().catch(() => ({}));
@@ -3541,6 +3708,9 @@ async function bridgeSetupRun(provider, action) {
     } catch (e) {
       return { ok: false, message: String(e?.message || e) };
     }
+  }
+  if (action !== "install") {
+    return { ok: false, message: `unknown action: ${action}` };
   }
   try {
     const r = await fetch(`${hub}/setup`, {
@@ -3783,6 +3953,9 @@ async function verifyBridgeProviderConnection(v, token) {
       const d = await r.json().catch(() => ({}));
       if (d?.model) detectedBridgeModels[v] = d.model;
       if (d?.error) providerConnDetail[v] = String(d.error);
+      // 要認証（APIキー未設定/失効）は確定状態のためリトライしない。
+      // ブラウザ認証は実際にチャット送信した時だけ開かれる
+      if (d?.authRequired) return false;
       if (r.ok && !d?.error && !d?.pending) {
         providerConnDetail[v] = staleHub ? t("chat.bridge.hubOld", { endpoint }) : "";
         return true;
@@ -4971,6 +5144,7 @@ const AI_SETTINGS_HTML = `
     <option value="anthropic" data-i18n="chat.provider.anthropic">【API】Anthropic (Claude)</option>
     <option value="azure" data-i18n="chat.provider.azure">【API】Azure OpenAI</option>
     <option value="copilot" data-i18n="chat.provider.copilot">【ブリッジ】GitHub Copilot</option>
+    <option value="acp" data-i18n="chat.provider.acp">【ブリッジ】ACP エージェント</option>
     <option value="devin" data-i18n="chat.provider.devin">【ブリッジ】Devin</option>
     <option value="antigravity" data-i18n="chat.provider.antigravity">【ブリッジ】Antigravity</option>
     <option value="agent" data-i18n="chat.provider.agent">【ブリッジ】外部エージェント</option>

@@ -1,4 +1,4 @@
-// 計測・標高断面・見通し判定・緯度経度グリッド・レイヤーエクスポート
+// 計測・標高断面・見通し判定・可視範囲（viewshed）・緯度経度グリッド・レイヤーエクスポート
 // （Cesium フロント専用ツール群。静的配信のみで完結し、全てオンデマンド動作 —
 // モード非アクティブ時・グリッド OFF 時は描画・イベントコストともゼロ）
 //
@@ -7,6 +7,7 @@
 // api.handleClick(pos)/handleDoubleClick(pos)/handleMouseMove(pos) は app.js の
 // クリックハンドラから呼び、処理したら true を返す（属性ピックを抑止するため）
 import { t } from "../shared/i18n.js";
+import { liveSendFeatures, liveIsActive } from "../shared/live.js";
 import { notifyToolMode } from "../shared/tools-dock-ux.js";
 import { exportFeatureCollection } from "../shared/export-formats.js";
 import { collectFields } from "../shared/attr-stats.js";
@@ -90,7 +91,7 @@ export function initGeoTools({ viewer, requestRender, sampleRouteTerrain, getOrd
   const fileSafe = s => String(s || "layer").replace(/[\\/:*?"<>|]/g, "_").slice(0, 60) || "layer";
 
   // ---------- 対話モード ----------
-  // mode: null | "distance" | "area" | "bearing" | "profile" | "los"
+  // mode: null | "distance" | "area" | "bearing" | "profile" | "los" | "vs"
   //       | "sel-rect" | "sel-poly" | "sel-circle"
   //       | "draw-point" | "draw-line" | "draw-poly" | "draw-label"
   let mode = null;
@@ -101,6 +102,7 @@ export function initGeoTools({ viewer, requestRender, sampleRouteTerrain, getOrd
   let areaEntity = null;
   let rectPreviewEntity = null;
   let losRunning = false;
+  let vsRunning = false;
   let profileRunning = false;
   // 空間選択・集計・バッファ・作図の状態
   let regionGeom = null;       // 直近に確定した選択範囲（GeoJSON Polygon|MultiPolygon）
@@ -121,7 +123,7 @@ export function initGeoTools({ viewer, requestRender, sampleRouteTerrain, getOrd
   function updateModeButtons() {
     const map = {
       distance: "#tool-m-distance", area: "#tool-m-area", bearing: "#tool-m-bearing",
-      profile: "#tool-profile-draw", los: "#tool-los",
+      profile: "#tool-profile-draw", los: "#tool-los", vs: "#tool-viewshed",
       "sel-rect": "#tool-sel-rect", "sel-poly": "#tool-sel-poly", "sel-circle": "#tool-sel-circle",
       "draw-point": "#tool-draw-point", "draw-line": "#tool-draw-line", "draw-poly": "#tool-draw-poly", "draw-label": "#tool-draw-label",
     };
@@ -162,7 +164,7 @@ export function initGeoTools({ viewer, requestRender, sampleRouteTerrain, getOrd
     clearAll();
     mode = next;
     if (next && resultEl() && !String(next).startsWith("sel-") && !String(next).startsWith("draw-")) {
-      resultEl().textContent = t(next === "los" ? "tools.losHint" : "tools.measureHint");
+      resultEl().textContent = t(next === "los" ? "tools.losHint" : next === "vs" ? "tools.vsHint" : "tools.measureHint");
     }
     updateModeButtons();
     updateSelHint();
@@ -224,6 +226,9 @@ export function initGeoTools({ viewer, requestRender, sampleRouteTerrain, getOrd
       const lel = losResultEl() || el;
       if (losRunning) lel.textContent = t("tools.profileRunning");
       else lel.textContent = t(pts.length ? "tools.losTargetStep" : "tools.losHint");
+    } else if (mode === "vs") {
+      const lel = losResultEl() || el;
+      lel.textContent = vsRunning ? t("tools.vsRunning") : t("tools.vsHint");
     }
   }
 
@@ -338,12 +343,14 @@ export function initGeoTools({ viewer, requestRender, sampleRouteTerrain, getOrd
   }
 
   // 地形プロバイダから標高列を取得。全て取れない場合は地理院標高API（日本域）へフォールバック
-  async function sampleTerrainLine(lnglats, totalMeters = 0) {
+  // gsiLimit: 地理院APIは点ごとHTTP取得のため、点数が上限を超える場合はフォールバックせず全 null を返す
+  async function sampleTerrainLine(lnglats, totalMeters = 0, gsiLimit = Infinity) {
     try {
       const hs = await sampleRouteTerrain(lnglats.map(p => ({ longitude: p.lng, latitude: p.lat })), totalMeters);
       if (hs && hs.some(h => Number.isFinite(h))) return hs;
     } catch (e) { /* フォールバックへ */ }
     const out = new Array(lnglats.length).fill(null);
+    if (lnglats.length > gsiLimit) return out;
     const CHUNK = 8;
     for (let i = 0; i < lnglats.length; i += CHUNK) {
       await Promise.all(lnglats.slice(i, i + CHUNK).map(async (p, k) => {
@@ -535,6 +542,220 @@ export function initGeoTools({ viewer, requestRender, sampleRouteTerrain, getOrd
       if (resultEl()) resultEl().textContent = "";
     } finally {
       losRunning = false;
+      mode = null;
+      updateModeButtons();
+      requestRender();
+    }
+  }
+
+  // ---------- 可視範囲（viewshed） ----------
+  // 観測点から放射状のレイ上の地形標高を一括サンプリングし、レイごとに
+  // 「観測点 ENU 局所水平面からの仰角が内側の全サンプルを上回るか」で可視判定
+  // （LOS と同じく直線視線モデルのため地球曲率も自動的に考慮される）。
+  // 結果は観測点中心の可視性マップ画像（可視=緑/不可視=赤/不明=灰）として地表へドレープ。
+  const VS_MAX_POINTS_TERRAIN = 12000; // terrain provider 利用時の総サンプル上限
+  const VS_MAX_POINTS_GSI = 1024;      // 地理院APIフォールバック時（点ごとHTTP取得）の上限
+  const VS_PICK_BUDGET = 384;          // 3D Tiles 考慮時の pickFromRay 総キャスト上限
+  const VS_LIMITS = { radius: [100, 50000], azimuths: [16, 360], samples: [16, 256] };
+
+  const vsTerrainOn = () => viewer.terrainProvider && !(viewer.terrainProvider instanceof Cesium.EllipsoidTerrainProvider);
+
+  // UI 入力・API 引数を共通ルールで正規化。総点数が上限を超える場合はサンプル数を下げる
+  function resolveVsParams(o = {}) {
+    const clamp = (v, d, [lo, hi]) => Math.min(Math.max(Number.isFinite(Number(v)) ? Number(v) : d, lo), hi);
+    const radius = clamp(o.radiusMeters ?? num($("#vs-radius"), 3000), 3000, VS_LIMITS.radius);
+    let azimuths = Math.round(clamp(o.azimuths ?? num($("#vs-azimuths"), 72), 72, VS_LIMITS.azimuths));
+    let samples = Math.round(clamp(o.samples ?? num($("#vs-samples"), 64), 64, VS_LIMITS.samples));
+    const cap = vsTerrainOn() ? VS_MAX_POINTS_TERRAIN : VS_MAX_POINTS_GSI;
+    if (azimuths * samples > cap) {
+      samples = Math.floor(cap / azimuths);
+      // GSI フォールバック(1024点)では既定72方位だと下限16点にも届かないため、
+      // サンプル数を下限で維持しつつ方位数を下げて総点数を cap 以内に収める
+      if (samples < VS_LIMITS.samples[0]) {
+        samples = VS_LIMITS.samples[0];
+        azimuths = Math.max(VS_LIMITS.azimuths[0], Math.floor(cap / samples));
+      }
+    }
+    return {
+      radius, azimuths, samples,
+      observerH: Number.isFinite(Number(o.observerHeight)) ? Number(o.observerHeight) : num($("#vs-observer-h"), 0),
+      targetH: Number.isFinite(Number(o.targetHeight)) ? Number(o.targetHeight) : num($("#vs-target-h"), 0),
+      use3d: o.include3d ?? !!$("#vs-3d")?.checked,
+    };
+  }
+
+  // 観測点 + 方位 A × 距離 M の放射グリッド点列を返す（[0]=観測点, 以降レイ順）
+  function buildViewshedGrid(obsCarto, radius, A, M) {
+    const grid = [{ lat: obsCarto.latitude * DEG, lng: obsCarto.longitude * DEG }];
+    const R = Cesium.Ellipsoid.WGS84.maximumRadius;
+    const angDist = radius / R;
+    for (let i = 0; i < A; i++) {
+      const hdg = (i / A) * 2 * Math.PI;
+      // 球面の順解法で概略終点を求め、そこへの測地線上を等分割する
+      const endLat = Math.asin(Math.sin(obsCarto.latitude) * Math.cos(angDist)
+        + Math.cos(obsCarto.latitude) * Math.sin(angDist) * Math.cos(hdg));
+      const endLng = obsCarto.longitude + Math.atan2(
+        Math.sin(hdg) * Math.sin(angDist) * Math.cos(obsCarto.latitude),
+        Math.cos(angDist) - Math.sin(obsCarto.latitude) * Math.sin(endLat));
+      const g = new Cesium.EllipsoidGeodesic(obsCarto, new Cesium.Cartographic(endLng, endLat));
+      for (let j = 1; j <= M; j++) {
+        const c = g.interpolateUsingFraction(j / M);
+        grid.push({ lat: c.latitude * DEG, lng: c.longitude * DEG });
+      }
+    }
+    return grid;
+  }
+
+  // 地形標高列 + 観測点から、可視性セル（true=可視 / false=不可視 / null=標高不明）と
+  // 各セルの仰角を計算する。3D Tiles 考慮時は drillPickFromRay で近距離の遮蔽物を追加判定
+  function analyzeViewshed(grid, terr, p, A, M, obsGroundFallback) {
+    const obsGround = Number.isFinite(terr[0]) ? terr[0] : (Number.isFinite(obsGroundFallback) ? obsGroundFallback : 0);
+    const eye = Cesium.Cartesian3.fromDegrees(grid[0].lng, grid[0].lat, obsGround + p.observerH);
+    const enu = Cesium.Transforms.eastNorthUpToFixedFrame(eye);
+    const col = k => { const c4 = Cesium.Matrix4.getColumn(enu, k, new Cesium.Cartesian4()); return new Cesium.Cartesian3(c4.x, c4.y, c4.z); };
+    const east = col(0), north = col(1), up = col(2);
+    const cells = [], angles = [];
+    const scratch = new Cesium.Cartesian3();
+    // 対象高は「判定される地点の対象」だけに適用し、遮蔽物(地形)の仰角には含めない。
+    // 全サンプルに一律で加算すると近傍の対象点自体が遮蔽物化して遠方を潰すため
+    const angleAt = (idx, h, withTarget) => {
+      const g = grid[idx];
+      Cesium.Cartesian3.fromDegrees(g.lng, g.lat, h + (withTarget ? p.targetH : 0), Cesium.Ellipsoid.WGS84, scratch);
+      const dE = Cesium.Cartesian3.dot(scratch, east) - eye.x * east.x - eye.y * east.y - eye.z * east.z;
+      const dN = Cesium.Cartesian3.dot(scratch, north) - eye.x * north.x - eye.y * north.y - eye.z * north.z;
+      const dU = Cesium.Cartesian3.dot(scratch, up) - eye.x * up.x - eye.y * up.y - eye.z * up.z;
+      return Math.atan2(dU, Math.sqrt(dE * dE + dN * dN));
+    };
+    const counts = { visible: 0, blocked: 0, unknown: 0 };
+    for (let i = 0; i < A; i++) {
+      const row = new Array(M), angRow = new Array(M);
+      let maxAngle = -Infinity;
+      for (let j = 0; j < M; j++) {
+        const idx = 1 + i * M + j;
+        if (!Number.isFinite(terr[idx])) { row[j] = null; angRow[j] = -Infinity; counts.unknown++; continue; }
+        const ang = angleAt(idx, terr[idx], true);
+        const angOcc = angleAt(idx, terr[idx], false);
+        angRow[j] = ang;
+        row[j] = ang > maxAngle + 1e-7;
+        if (row[j]) counts.visible++; else counts.blocked++;
+        if (angOcc > maxAngle) maxAngle = angOcc;
+      }
+      cells[i] = row; angles[i] = angRow;
+    }
+
+    // 3D Tiles 等の遮蔽物を drillPickFromRay で追加判定（近似）。
+    // レイ上の stride 間隔サンプルへキャストし、対象点より近い位置でのヒットを
+    // 「その仰角以下の遠方セルを遮蔽する遮蔽物」として伝播する
+    let casts = 0;
+    if (p.use3d && typeof viewer.scene.drillPickFromRay === "function") {
+      const ownColls = new Set([toolDs.entities, gratDs.entities, selDs.entities, annotDs.entities]);
+      const isOwn = h => h?.object?.id?.entityCollection && ownColls.has(h.object.id.entityCollection);
+      const perRay = Math.max(1, Math.min(M, Math.floor(VS_PICK_BUDGET / A)));
+      const stride = Math.ceil(M / perRay);
+      const ray = new Cesium.Ray(eye.clone(), new Cesium.Cartesian3());
+      const dir = new Cesium.Cartesian3();
+      for (let i = 0; i < A; i++) {
+        const hits = [];
+        for (let j = 0; j < M; j += stride) {
+          if (cells[i][j] !== true) continue;
+          const idx = 1 + i * M + j;
+          const g = grid[idx];
+          Cesium.Cartesian3.fromDegrees(g.lng, g.lat, terr[idx] + p.targetH, Cesium.Ellipsoid.WGS84, scratch);
+          Cesium.Cartesian3.subtract(scratch, eye, dir);
+          const targetDist = Cesium.Cartesian3.magnitude(dir);
+          Cesium.Cartesian3.normalize(dir, ray.direction);
+          const picked = viewer.scene.drillPickFromRay(ray, 8) || [];
+          casts++;
+          const first = picked.find(h => h?.position && !isOwn(h));
+          if (!first) continue;
+          const hitDist = Cesium.Cartesian3.distance(eye, first.position);
+          if (hitDist < targetDist - Math.max(3, targetDist * 0.01)) hits.push({ dist: hitDist, ang: angles[i][j] });
+        }
+        if (!hits.length) continue;
+        const distStep = p.radius / M;
+        for (let j = 0; j < M; j++) {
+          if (cells[i][j] !== true) continue;
+          const d = (j + 1) * distStep;
+          for (const h of hits) {
+            if (d > h.dist && angles[i][j] <= h.ang + 1e-9) { cells[i][j] = false; counts.visible--; counts.blocked++; break; }
+          }
+        }
+      }
+    }
+    return { cells, eye, obsGround, counts, casts };
+  }
+
+  // 可視性セルを観測点中心の画像にラスタライズし、矩形エンティティとして地表へドレープ
+  function drawViewshed(obsCarto, res, p) {
+    const latO = obsCarto.latitude * DEG, lngO = obsCarto.longitude * DEG;
+    const sin = Math.sin(obsCarto.latitude), e2 = 6.69437999014e-3;
+    const Rn = 6378137 / Math.sqrt(1 - e2 * sin * sin);
+    const Rm = Rn * (1 - e2) / (1 - e2 * sin * sin);
+    const mPerDegLat = Rm * Math.PI / 180;
+    const dLat = p.radius / mPerDegLat;
+    const dLng = Math.min(170, p.radius / Math.max(1e-6, Rn * Math.cos(obsCarto.latitude) * Math.PI / 180));
+    const W = 512;
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = W;
+    const ctx = canvas.getContext("2d");
+    const img = ctx.createImageData(W, W);
+    const A = res.cells.length, M = res.cells[0].length;
+    for (let py = 0; py < W; py++) {
+      const lat = (latO + dLat) - ((py + 0.5) / W) * 2 * dLat;
+      const mPerDegLng = Rn * Math.cos(lat / DEG) * Math.PI / 180;
+      const dy = (lat - latO) * mPerDegLat;
+      for (let px = 0; px < W; px++) {
+        const lng = (lngO - dLng) + ((px + 0.5) / W) * 2 * dLng;
+        const dx = (lng - lngO) * mPerDegLng;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        const o = (py * W + px) * 4;
+        if (dist > p.radius || dist < p.radius / M * 0.5) continue;
+        const az = (Math.atan2(dx, dy) + 2 * Math.PI) % (2 * Math.PI);
+        const i = Math.min(A - 1, Math.floor(az / (2 * Math.PI) * A));
+        const j = Math.min(M - 1, Math.floor(dist / p.radius * M));
+        const cell = res.cells[i][j];
+        if (cell === null) { img.data[o] = 110; img.data[o + 1] = 114; img.data[o + 2] = 128; img.data[o + 3] = 60; }
+        else if (cell) { img.data[o] = 50; img.data[o + 1] = 205; img.data[o + 2] = 50; img.data[o + 3] = 105; }
+        else { img.data[o] = 235; img.data[o + 1] = 55; img.data[o + 2] = 40; img.data[o + 3] = 75; }
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+    dyn.push(pointEntity(res.eye, Cesium.Color.DEEPSKYBLUE, 10));
+    dyn.push(toolDs.entities.add({
+      rectangle: {
+        coordinates: Cesium.Rectangle.fromDegrees(lngO - dLng, latO - dLat, lngO + dLng, latO + dLat),
+        material: new Cesium.ImageMaterialProperty({ image: canvas, transparent: true }),
+      },
+    }));
+    requestRender();
+  }
+
+  async function runViewshed(observer, params) {
+    const p = resolveVsParams(params);
+    const obsCarto = cartoOf(observer);
+    const grid = buildViewshedGrid(obsCarto, p.radius, p.azimuths, p.samples);
+    const terr = await sampleTerrainLine(grid, 2 * p.radius, VS_MAX_POINTS_GSI);
+    if (!terr.some(h => Number.isFinite(h))) return { ok: false, reason: "elevation unavailable" };
+    const res = analyzeViewshed(grid, terr, p, p.azimuths, p.samples, cartoOf(observer).height);
+    drawViewshed(obsCarto, res, p);
+    return {
+      ok: true, res, params: p,
+      observer: { lat: obsCarto.latitude * DEG, lng: obsCarto.longitude * DEG },
+    };
+  }
+
+  async function executeViewshed() {
+    vsRunning = true;
+    updateReadout();
+    try {
+      const res = await runViewshed(pts[0]);
+      if (losResultEl()) {
+        losResultEl().textContent = res.ok
+          ? t("tools.vsResult", { vis: Math.round(res.res.counts.visible / Math.max(1, res.res.counts.visible + res.res.counts.blocked) * 100), radius: fmtDist(res.params.radius), az: res.params.azimuths, sm: res.params.samples })
+          : t("tools.profileFail");
+      }
+    } finally {
+      vsRunning = false;
       mode = null;
       updateModeButtons();
       requestRender();
@@ -806,6 +1027,8 @@ export function initGeoTools({ viewer, requestRender, sampleRouteTerrain, getOrd
       updateOverlay();
       return true;
     }
+    // 可視範囲は観測点1クリックで実行（実行中の重複クリックは無視）
+    if (mode === "vs" && pts.length >= 1) { if (!vsRunning) void executeViewshed(); return true; }
     if (mode === "los" && pts.length >= 2) void executeLos();
     else if (mode === "bearing" && pts.length >= 2) {
       // 方位は2点確定で結果を残す
@@ -996,6 +1219,32 @@ export function initGeoTools({ viewer, requestRender, sampleRouteTerrain, getOrd
     return { ok: true, file, count: res.count, skipped: res.skipped || 0 };
   }
 
+  // ---------- QGIS ライブ連携: 地物投入(Canvas → QGIS) ----------
+  // ライブ未接続時は status に理由を出して終わる(POST /live/features)
+  async function sendGeoJsonToQgis(name, gj, statusEl) {
+    const st = statusEl;
+    if (!liveIsActive()) {
+      if (st) st.textContent = t("tools.qgisInactive");
+      return { ok: false, reason: "inactive" };
+    }
+    if (!gj?.features?.length) {
+      if (st) st.textContent = t("tools.exportNoData");
+      return { ok: false, reason: "noData" };
+    }
+    const res = await liveSendFeatures(String(name || "Canvas"), gj);
+    if (st) {
+      st.textContent = res.ok
+        ? t("tools.qgisSent", { count: res.added ?? gj.features.length })
+        : t("tools.qgisSendFail", { error: res.reason || "?" });
+    }
+    return res;
+  }
+
+  // 作図アノテーションを QGIS スクラッチレイヤへ送る(API/ボタン共通)
+  function sendAnnotationsToQgis(name) {
+    return sendGeoJsonToQgis(name || t("tools.drawLayerTitle"), annotationsFc(), $("#tool-draw-status"));
+  }
+
   $("#tool-export-layer")?.addEventListener("focus", refreshExportOptions);
   $("#tool-export-run")?.addEventListener("click", async () => {
     const st = $("#tool-export-status");
@@ -1016,6 +1265,14 @@ export function initGeoTools({ viewer, requestRender, sampleRouteTerrain, getOrd
       if (st) st.textContent = t("tools.exportFail");
     }
   });
+  // 選択中レイヤーを QGIS スクラッチレイヤへ送る(GeoJSONエクスポートと同じ収集経路)
+  $("#tool-export-toqgis")?.addEventListener("click", async () => {
+    const st = $("#tool-export-status");
+    const id = $("#tool-export-layer")?.value;
+    const item = id && (getOrderedLayerItems() || []).find(i => i.id === id || i.title === id);
+    const gj = item && getLayerGeoJson && getLayerGeoJson(item.id);
+    await sendGeoJsonToQgis(item ? (item.title || item.id) : "", gj, st);
+  });
 
   // ---------- モードボタン ----------
   $("#tool-m-distance")?.addEventListener("click", () => setMode(mode === "distance" ? null : "distance"));
@@ -1023,6 +1280,7 @@ export function initGeoTools({ viewer, requestRender, sampleRouteTerrain, getOrd
   $("#tool-m-bearing")?.addEventListener("click", () => setMode(mode === "bearing" ? null : "bearing"));
   $("#tool-profile-draw")?.addEventListener("click", () => setMode(mode === "profile" ? null : "profile"));
   $("#tool-los")?.addEventListener("click", () => setMode(mode === "los" ? null : "los"));
+  $("#tool-viewshed")?.addEventListener("click", () => setMode(mode === "vs" ? null : "vs"));
   $("#tool-clear")?.addEventListener("click", clearAll);
 
   // 空間選択・集計・バッファ
@@ -1063,6 +1321,10 @@ export function initGeoTools({ viewer, requestRender, sampleRouteTerrain, getOrd
     await addDataLayer(t("tools.drawLayerTitle"), annotationsFc());
     while (annotations.length) removeAnnotation(0);
   });
+  $("#tool-draw-toqgis")?.addEventListener("click", async () => {
+    if (!annotations.length) return;
+    await sendAnnotationsToQgis();
+  });
   refreshExportOptions();
   refreshSelLayerOptions();
 
@@ -1087,6 +1349,13 @@ export function initGeoTools({ viewer, requestRender, sampleRouteTerrain, getOrd
     clearAll,
     refreshExportOptions,
     exportLayer: (idOrTitle, format = "geojson") => doExport(idOrTitle, format),
+    // QGIS ライブ連携: 作図アノテーション/任意レイヤーを QGIS へ投入
+    sendAnnotationsToQgis,
+    sendLayerToQgis: (idOrTitle) => {
+      const item = idOrTitle && (getOrderedLayerItems() || []).find(i => i.id === idOrTitle || i.title === idOrTitle);
+      const gj = item && getLayerGeoJson && getLayerGeoJson(item.id);
+      return sendGeoJsonToQgis(item ? (item.title || item.id) : "", gj, $("#tool-export-status"));
+    },
 
     // 空間選択（#23）: region は GeoJSON Polygon/MultiPolygon/Feature、
     // {bbox:[w,s,e,n]}、{center:[lng,lat]|{lng,lat}, radiusMeters} を受け付ける。
@@ -1261,6 +1530,39 @@ export function initGeoTools({ viewer, requestRender, sampleRouteTerrain, getOrd
         visible: res.blocked < 0,
         distanceMeters: res.total,
         blockedAt: res.blocked >= 0 ? { lat: res.points[res.blocked].lat, lng: res.points[res.blocked].lng, distanceMeters: res.points[res.blocked].dist } : null,
+      };
+    },
+
+    // 可視範囲（#66）: from は観測点 [lng,lat]|{lng,lat}。
+    // opts: radiusMeters/azimuths/samples/observerHeight/targetHeight/include3d
+    async viewshed(from, opts = {}) {
+      const cartes = toCartesians([from]);
+      if (!cartes.length) return { ok: false, reason: "need observer point" };
+      clearOverlay();
+      const res = await runViewshed(cartes[0], opts || {});
+      if (!res.ok) {
+        if (losResultEl()) losResultEl().textContent = t("tools.profileFail");
+        return res;
+      }
+      const c = res.res.counts;
+      const judged = Math.max(1, c.visible + c.blocked);
+      if (losResultEl()) {
+        losResultEl().textContent = t("tools.vsResult", {
+          vis: Math.round(c.visible / judged * 100), radius: fmtDist(res.params.radius),
+          az: res.params.azimuths, sm: res.params.samples,
+        });
+      }
+      requestRender();
+      return {
+        ok: true,
+        observer: res.observer,
+        radiusMeters: res.params.radius,
+        azimuths: res.params.azimuths,
+        samples: res.params.samples,
+        include3d: !!res.params.use3d,
+        counts: { visible: c.visible, blocked: c.blocked, unknown: c.unknown },
+        visibleRatio: c.visible / judged,
+        pickCasts: res.res.casts,
       };
     },
   };
