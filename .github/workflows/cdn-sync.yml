@@ -1,6 +1,6 @@
 # kasugai_canvas@main の web/ を指定チャンネル(stable/unstable)へ同期する。
-# C:\devin\cdn-publish.html のボタン → このワークフローの
-# 「Run workflow」で人が起動する運用(tools/publish_cdn.py の Actions 版)。
+# 通常運用は kasugai_canvas 側の tools/publish_cdn.py --commit --push。
+# 本ワークフローは代替経路(ローカル環境なしで GitHub 上だけで同期したい場合)。
 # GITHUB_TOKEN は自分のリポジトリへ push できるため PAT は不要。
 name: CDN sync (kasugai_canvas web/)
 
