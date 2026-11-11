@@ -13,3 +13,16 @@ repos:
       - id: detect-secrets
         args: ['--baseline', '.secrets.baseline']
         exclude: '(\.secrets\.baseline|package-lock\.json|Cargo\.lock)$|(^|/)vendor/'
+
+  # Virus scan staged binary artifacts before commit (see SECURITY.md).
+  # Uses ClamAV if on PATH, otherwise Windows Defender (MpCmdRun.exe).
+  # Blocks the commit when no scanner is available. Manual full scan:
+  #   python tools/scan_binaries.py --all
+  - repo: local
+    hooks:
+      - id: virus-scan-binaries
+        name: Virus scan binary artifacts
+        entry: python tools/scan_binaries.py
+        language: system
+        pass_filenames: true
+        files: '(?i)\.(zip|exe|dll|msi|7z|rar|com|scr|jar|cab|iso)$'

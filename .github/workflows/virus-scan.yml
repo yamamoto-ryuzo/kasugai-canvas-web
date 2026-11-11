@@ -1,0 +1,40 @@
+# 追跡中の配布バイナリ(*.zip, *.exe 等)を ClamAV でスキャンする。
+# ローカル pre-commit を通らないコミット経路(例: cdn-sync.yml が
+# GitHub 上で直接作るコミット)もここでカバーする。
+# 手順・検知時の対処フローは SECURITY.md を参照。
+name: Virus scan (binary artifacts)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ClamAV
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clamav
+
+      - name: Update virus definitions
+        run: sudo freshclam
+
+      - name: Scan tracked binary artifacts
+        run: |
+          mapfile -t FILES < <(git ls-files | grep -iE '\.(zip|exe|dll|msi|7z|rar|com|scr|jar|cab|iso)$' || true)
+          if [ "${#FILES[@]}" -eq 0 ]; then
+            echo "no binary artifacts tracked"
+            exit 0
+          fi
+          printf 'target: %s\n' "${FILES[@]}"
+          # clamscan 終了コード: 0=クリーン, 1=検出(ジョブ失敗), 2=エラー(ジョブ失敗)
+          clamscan --infected --no-summary "${FILES[@]}"

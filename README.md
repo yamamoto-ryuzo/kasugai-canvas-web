@@ -28,6 +28,12 @@ KASUGAI Canvas 未インストール環境でもブラウザ再生できるよ�
   (`--channel` がコピー先を選ぶだけで、格上げ・再ビルドの概念はない)
 - 同期は kasugai_canvas 側の `python tools/publish_cdn.py` で実行
 
+## セキュリティ
+
+配布バイナリ(`*.zip`/`*.exe` 等)はコミット前(pre-commit)と CI(ClamAV)で
+ウイルススキャンされる。手順と検知時の対処フローは
+[SECURITY.md](SECURITY.md) を参照。
+
 ## ライセンス
 
 [MIT License](LICENSE)。コンテンツの正本は `yamamoto-ryuzo/kasugai_canvas` の `web/` であり、ライセンスも正本に準じます。
