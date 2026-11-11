@@ -7,7 +7,6 @@
 
 現在の対象（`git ls-files` で確認可能）:
 
-- `V6.zip`
 - `stable/download/bridge-hub.{exe,zip}`
 - `unstable/download/bridge-hub.{exe,zip}`
 - `V6/download/bridge-hub.{exe,zip}`
@@ -51,3 +50,29 @@
 ## 除外の記録
 
 （現在の除外: なし）
+
+## 検知・対処の記録
+
+### 2026-11-11: `V6.zip` の廃止
+
+リポジトリ全体のウイルスチェックで `V6.zip` が検知された。内容物を調査した
+結果、最有力な検知原因は内包する無署名実行ファイル
+`V6/download/bridge-hub.exe` / `bridge-hub.zip`（ローカル Windows Defender
+では未検知。検知したエンジン・検知名は未確定）。
+
+- `V6.zip` は展開済み `V6/` と内容が完全に重複し、リポジトリ内の
+  html/md/json/js から参照されていなかったため、再生成ではなく廃止した。
+- 削除した `V6.zip` の SHA-256（再配布・同定用）:
+  `621cf944713a8eb14a40dfa0532702fb4391cf65cc47057bc62aff4f6d7d7265`
+- 各チャンネルの配布導線（`shared/ai-chat.js` → `../download/bridge-hub.*`）
+  で使用中のため、以下のバイナリは残置する。いずれも同一ハッシュであり、
+  今後の誤検知判定・VirusTotal 照合・正本との改変確認に用いること。
+
+| ファイル | SHA-256 |
+|---|---|
+| `{stable,unstable,V6}/download/bridge-hub.exe` | `b2fc07a3fa277b66d402c73728e6a26fffaa12c1a8663ed07ea7d9e8a776c4ca` |
+| `{stable,unstable,V6}/download/bridge-hub.zip` | `f32e227dc5a9a42e9ba85ad456df38e74d40b2871c76fdfd32f61df5262c729f` |
+
+残置バイナリが今後エンジンに検知された場合は、別エンジン（VirusTotal 等）で
+の再検査に加え、正本 `yamamoto-ryuzo/kasugai_canvas` の `web/` 側での再生成・
+コード署名を検討する（本リポジトリは発行物のみでバイナリ自体は修正しない）。
