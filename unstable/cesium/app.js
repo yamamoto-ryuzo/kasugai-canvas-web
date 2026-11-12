@@ -28,6 +28,7 @@ import { createMinimap } from "../shared/minimap.js";
 import { mountSunControls } from "../shared/sun-time.js";
 import { initGeoTools } from "./geo-tools.js";
 import { buildWmsTileTemplate, buildWmtsTileTemplate, rewriteKascLineVisibility, rewriteKascLineOpt, themeShowSet, kascTitleInTheme, normKascTitle, fillThemeSelect, resolveKascUrl, readKascSource, loadKascBookmarks, parseQgisBookmarksXml, qgisBookmarkToCam, downloadQgisBookmarksXml, downloadKascCamLines, parseKasc, zoomToCamHeightView, appendGroupedTitleOptions, syncBasemapList, fetchKascProjectTitle, projectsBaseUrl, projectsManifestUrl, applyPanelTitle, loadKascInfoContent, clearKascInfoContent, parseDefaultStyleSpec as parseKascDefaultStyleSpec, rememberedKascUrl, heightToViewZoom } from "../shared/kasc.js";
+import { createMvtImageryProvider } from "../shared/mvt.js";
 import { configureLive, configureFollow, liveUpdate, liveNotifyCamera, liveNotifySelection, liveStatus, liveWritebackEntries, liveSendFeatures, liveIsActive, liveQueryFeatures, liveRenderUrl, liveSetFollow, liveIsFollowing } from "../shared/live.js";
 import { mountLivePanel, syncLivePanel } from "../shared/live-panel.js";
 import { mountEngineSwitcher } from "../shared/engine-switch.js";
@@ -37,6 +38,7 @@ import { initPrint } from "../shared/print.js";
 import { formatLatLng, parseCoordinateQuery } from "../shared/coords-format.js";
 import { installLocalCrsUI } from "../shared/coords-local.js";
 import { computeGroupStats } from "../shared/attr-stats.js";
+import { matchAttrCellFilter } from "../shared/attr-widget.js";
 import { loadScriptOnce } from "../shared/lazy-lib.js";
 import { isGeoTiffType, resolveGeoTiffItem, buildGeoTiffOverlayDataSource, createGeoTiffImageryProvider } from "./geotiff-layer.js";
 
@@ -410,6 +412,8 @@ const collapsedLayerLegends = new Set();
 const LEGEND_AUTO_COLLAPSE_MIN = 24;
 // 既定で折りたたまれる大きい凡例をユーザーが展開した記憶(レイヤーid の Set)
 const expandedLayerLegends = new Set();
+// #107: ⚠バッジのクリックで展開する「未再現要素一覧」の開閉状態
+const expandedStyleWarnings = new Set();
 // スタイル解決ごとの一覧再描画をマイクロタスクで束ねる(レイヤー数分の連発を防ぐ)
 let layerListRenderScheduled = false;
 function scheduleLayerListRender() {
@@ -1761,7 +1765,7 @@ async function focusLayer(layer) {
   let target = layerRuntimeTargets.get(layer.id) || layer.dataSource || null;
   // XYZタイルは範囲情報を持たないため、ImageryLayer未生成時は全世界表示にフォールバックする
   // (bbox= 指定時はその範囲へ flyTo する)
-  if (!target && layer.type === "tile") {
+  if (!target && (layer.type === "tile" || layer.type === "mvt" || layer.type === "pmtiles")) {
     target = layer.bbox
       ? Cesium.Rectangle.fromDegrees(...layer.bbox)
       : Cesium.Rectangle.clone(Cesium.Rectangle.MAX_VALUE);
@@ -1856,10 +1860,11 @@ function renderLayerList() {
           <span class="layer-status${layer._loadStatus === "loading" ? " loading" : ""}${layer._loadStatus === "failed" ? " failed" : ""}${deferred ? " deferred" : ""}" data-layer-id="${escapeHtml(layer.id)}" title="${escapeHtml(layer._loadStatus === "failed" ? (layer._loadError || "") : deferred ? t("layer.notLoadedHint") : "")}">${layer._loadStatus === "failed" ? escapeHtml(t("layer.loadFailed")) : deferred ? escapeHtml(t("layer.notLoaded")) : ""}</span>
           ${filterButton}
           ${limitBadge}
-          ${layer.qmlStyle?.warnings?.length ? `<small class="entity-limit-badge style-warn-badge" title="${escapeHtml(layer.qmlStyle.warnings.join(" / "))}">⚠${layer.qmlStyle.warnings.length}</small>` : ""}
+          ${layer.qmlStyle?.warnings?.length ? `<button class="entity-limit-badge style-warn-badge" type="button" data-layer-id="${escapeHtml(layer.id)}" title="${escapeHtml(layer.qmlStyle.warnings.join(" / "))}">⚠${layer.qmlStyle.warnings.length}</button>` : ""}
           <button class="layer-focus" type="button" data-layer-id="${escapeHtml(layer.id)}" title="${escapeHtml(t("layer.focus"))}" aria-label="${escapeHtml(t("layer.focus"))}">📍</button>
         </label>
         ${legendItems}
+        ${layer.qmlStyle?.warnings?.length && expandedStyleWarnings.has(layer.id) ? `<div class="style-warn-list" data-layer-id="${escapeHtml(layer.id)}">${layer.qmlStyle.warnings.map(w => `<div class="style-warn-item">${escapeHtml(w)}</div>`).join("")}</div>` : ""}
         </div>`;
         }).join("")}
       </div>
@@ -1944,6 +1949,18 @@ function renderLayerList() {
       event.preventDefault();
       event.stopPropagation();
       void editLayerQueryFilter(layerState.get(button.dataset.layerId));
+    });
+  });
+
+  // #107: ⚠バッジクリックで QML 未再現要素の警告一覧を展開/収納
+  list.querySelectorAll(".style-warn-badge").forEach(button => {
+    button.addEventListener("click", event => {
+      event.preventDefault();
+      event.stopPropagation();
+      const id = button.dataset.layerId;
+      if (expandedStyleWarnings.has(id)) expandedStyleWarnings.delete(id);
+      else expandedStyleWarnings.add(id);
+      renderLayerList();
     });
   });
 
@@ -3704,7 +3721,7 @@ async function refreshLayersImpl() {
   // Globe 表面の XYZ（geotiff の mode=tiles は ImageryLayer として同じスタックに混ぜ、
   // .kasc の記述順を再現する）
   const orderedImageryLayers = orderedItems
-    .filter(layer => layer.type === "tile" || (isGeoTiffType(layer.type) && layer._gt?.mode === "tiles"))
+    .filter(layer => layer.type === "tile" || layer.type === "mvt" || layer.type === "pmtiles" || (isGeoTiffType(layer.type) && layer._gt?.mode === "tiles"))
     .slice().reverse();
   for (const item of orderedImageryLayers) {
     if (!item.visible) continue;
@@ -3723,6 +3740,32 @@ async function refreshLayersImpl() {
         if (loadTargets.has(item)) layerOk(item);
       } catch (error) {
         console.warn("geotiff タイルレイヤーの作成に失敗しました:", item.url, error);
+        if (loadTargets.has(item)) layerFail(item, error);
+      }
+      continue;
+    }
+    if (item.type === "mvt" || item.type === "pmtiles") {
+      // ベクトルタイル: デコード→canvas ラスタライズの ImageryProvider(#24)
+      try {
+        const provider = await createMvtImageryProvider(Cesium, {
+          type: item.type,
+          url: proxyTileUrl(item.url, item.proxy),
+          tileSize: item.tileSize || 256,
+          minimumLevel: item.minimumLevel,
+          maximumLevel: item.maximumLevel || DEFAULT_MAXIMUM_LEVEL,
+          rectangle: Array.isArray(item.bbox) && item.bbox.length === 4 ? Cesium.Rectangle.fromDegrees(...item.bbox) : undefined,
+          credit: new Cesium.Credit(sanitizedAttributionHtml(item.attribution || "")),
+          opts: item.mvtOpts || {},
+        });
+        const imageryLayer = new Cesium.ImageryLayer(provider, { alpha: (item.opacity ?? 0.8) * layerOpacityFactor });
+        imageryLayer._baseAlpha = item.opacity ?? 0.8;
+        imageryLayer.show = effectiveLayerShow(item);
+        viewer.imageryLayers.add(imageryLayer);
+        layerRuntimeTargets.set(item.id, imageryLayer);
+        item._loaded = true;
+        if (loadTargets.has(item)) layerOk(item);
+      } catch (error) {
+        console.warn("ベクトルタイルの作成に失敗しました:", item.url, error);
         if (loadTargets.has(item)) layerFail(item, error);
       }
       continue;
@@ -5727,6 +5770,49 @@ function applyInspector(text) {
       if (options.minimumLevel !== undefined) item.minimumLevel = options.minimumLevel;
       if (options.bbox) item.bbox = options.bbox;
       if (options.tileSize !== undefined) item.tileSize = options.tileSize;
+      parseScaleVisOpts(parts, item);
+      tileLayers.push(item);
+      layerState.set(id, item);
+      layerOrder.push(id);
+    }
+
+    if (type === "mvt" || type === "pmtiles") {
+      // MVT ベクトルタイル / PMTiles(#24)。Cesium はネイティブ非対応のため
+      // shared/mvt.js がデコード→canvas ラスタライズする ImageryProvider を返し、
+      // XYZ と同じ imagery スタックへ載せる。url は {z}/{x}/{y} テンプレート、
+      // TileJSON(.json)、または .pmtiles アーカイブを取る
+      const parts = value.split("|").map(part => part.trim());
+      const title = parts[0];
+      const url = resolveProjectUrl(parts[1]);
+      const off = parts.some(part => /^(off|false)$/i.test(part));
+      if (!title || !url) return;
+      const { group, title: displayTitle, exclusiveGroup } = parseLayerTitle(title);
+      const options = {};
+      const kv = {};
+      parts.slice(2).forEach(part => {
+        const eq = part.indexOf("=");
+        if (eq < 0) return;
+        const key = part.slice(0, eq).trim();
+        const raw = part.slice(eq + 1).trim();
+        kv[key.toLowerCase()] = raw;
+        const number = Number(raw);
+        if (key === "opacity" && Number.isFinite(number)) options.opacity = Math.max(0, Math.min(1, number));
+        if ((key === "maximumLevel" || key === "maxZoom") && Number.isInteger(number) && number >= 0) options.maximumLevel = number;
+        if ((key === "minimumLevel" || key === "minZoom") && Number.isInteger(number) && number >= 0) options.minimumLevel = number;
+        if (key.toLowerCase() === "tilesize" && [256, 512].includes(number)) options.tileSize = number;
+        if (key === "proxy" && /^(off|false|direct)$/i.test(raw)) options.proxy = false;
+        if (key === "bbox" || key === "bounds" || key === "extent") {
+          const nums = raw.split(",").map(v => Number(v.trim()));
+          if (nums.length === 4 && nums.every(Number.isFinite)) options.bbox = nums;
+        }
+      });
+      const id = `inspector-layer-${inspectorLayerIndex++}`;
+      const item = { id, title: displayTitle, sourceTitle: title, sourceLine: line, url, visible: !off, type, opacity: options.opacity ?? 0.8, attribution: parseAttributionField(parts[2]) || kv.attr || null, proxy: options.proxy !== false, group, exclusiveGroup };
+      if (options.maximumLevel !== undefined) item.maximumLevel = options.maximumLevel;
+      if (options.minimumLevel !== undefined) item.minimumLevel = options.minimumLevel;
+      if (options.bbox) item.bbox = options.bbox;
+      if (options.tileSize) item.tileSize = options.tileSize;
+      item.mvtOpts = kv;
       parseScaleVisOpts(parts, item);
       tileLayers.push(item);
       layerState.set(id, item);
@@ -10488,6 +10574,14 @@ function setupVectorSearch() {
   const vectorAttrWidgetList = document.querySelector("#vector-attr-widget-list");
   const vectorAttrWidgetCount = document.querySelector("#vector-attr-widget-count");
   const vectorAttrWidgetTitle = document.querySelector(".vector-attr-widget-title");
+  const vectorAttrColFilterField = document.querySelector("#vector-attr-widget-colfilter-field");
+  const vectorAttrColFilterOp = document.querySelector("#vector-attr-widget-colfilter-op");
+  const vectorAttrColFilterValue = document.querySelector("#vector-attr-widget-colfilter-value");
+  const vectorAttrColFilterClear = document.querySelector("#vector-attr-widget-colfilter-clear");
+  // 列フィルタで選択中の属性名。レイヤ切替で同名属性が残れば条件を維持し、
+  // 消えた場合は自動解除する(インデックスは列構成で変わるため名前で保持)
+  let vectorAttrColFilterAttr = "";
+  let vectorAttrColFilterAttrSig = null;
   let vectorAttrWidgetRows = [];
   let vectorAttrWidgetAttributes = [];
   let vectorAttrWidgetSort = { column: -1, order: 1 };
@@ -10517,6 +10611,29 @@ function setupVectorSearch() {
         + vectorAttrWidgetAttributes.map(a => '<option>' + escapeHtml(a) + '</option>').join("");
       if (vectorAttrWidgetAttributes.includes(prev)) vectorAttrStatsValue.value = prev;
     }
+  }
+
+  // 列フィルタ(#110): 属性・条件・値で行を絞り込む。全文検索とは AND で併用
+  function syncVectorAttrColFilterOptions() {
+    if (!vectorAttrColFilterField) return;
+    // 再構築前の選択状態を引き継ぐ(change 未発火のプログラム的選択も拾う)
+    const cur = (vectorAttrColFilterField.value !== "" && vectorAttrColFilterField.selectedOptions[0]?.textContent) || vectorAttrColFilterAttr;
+    vectorAttrColFilterField.innerHTML = '<option value="">' + escapeHtml(t("vattr.colFilterNone")) + '</option>'
+      + vectorAttrWidgetAttributes.map((a, i) => '<option value="' + i + '">' + escapeHtml(a) + '</option>').join("");
+    const idx = cur ? vectorAttrWidgetAttributes.indexOf(cur) : -1;
+    if (idx >= 0) {
+      vectorAttrColFilterField.value = String(idx);
+      vectorAttrColFilterAttr = cur;
+    } else {
+      vectorAttrColFilterField.value = "";
+      // 行再構築中(loading)は列が一時的に空になるだけなので選択を保持し、
+      // 列構成が確定した時点で対象属性が無い場合のみ解除する
+      if (vectorAttrWidgetAttributes.length || !vectorAttrWidgetLoading) vectorAttrColFilterAttr = "";
+    }
+  }
+  function vectorAttrRowPassesColFilter(row) {
+    if (!vectorAttrColFilterField || vectorAttrColFilterField.value === "" || !vectorAttrColFilterValue || !vectorAttrColFilterValue.value.trim()) return true;
+    return matchAttrCellFilter(row.values[Number(vectorAttrColFilterField.value)], vectorAttrColFilterOp ? vectorAttrColFilterOp.value : "contains", vectorAttrColFilterValue.value);
   }
 
   function getVectorDataSourceById(layerId) {
@@ -10669,7 +10786,13 @@ function setupVectorSearch() {
     try {
       if (!vectorAttrWidgetList || !vectorAttrWidgetCount || !vectorAttrWidgetTitle) return;
       const query = String(filter).toLowerCase().trim();
-      let matched = query ? vectorAttrWidgetRows.filter(row => row.values.some(val => String(val).toLowerCase().includes(query))) : [...vectorAttrWidgetRows];
+      // 列構成が変わった時だけ列フィルタの選択肢を再構築する
+      // (毎回再構築すると描画と選択変更の競合で選択が失われ得る)
+      const attrSig = vectorAttrWidgetAttributes.join("");
+      if (attrSig !== vectorAttrColFilterAttrSig) { vectorAttrColFilterAttrSig = attrSig; syncVectorAttrColFilterOptions(); }
+      // 列フィルタ適用後に全文検索を AND でかける
+      let matched = vectorAttrWidgetRows.filter(vectorAttrRowPassesColFilter);
+      if (query) matched = matched.filter(row => row.values.some(val => String(val).toLowerCase().includes(query)));
       if (vectorAttrWidgetSort.column >= 0 && vectorAttrWidgetSort.column < vectorAttrWidgetAttributes.length) {
         const col = vectorAttrWidgetSort.column;
         const order = vectorAttrWidgetSort.order;
@@ -10720,7 +10843,7 @@ function setupVectorSearch() {
       }
       if (!displayRows.length) {
         vectorAttrWidgetList.innerHTML = '<tr><td colspan="' + vectorAttrWidgetAttributes.length + '" style="padding:12px 14px;color:#71818d;">' + escapeHtml(t("vattr.noFeatures")) + '</td></tr>';
-        vectorAttrWidgetCount.textContent = t("vattr.count", { matched: query ? 0 : vectorAttrWidgetRows.length, attrs: vectorAttrWidgetAttributes.length });
+        vectorAttrWidgetCount.textContent = t("vattr.count", { matched: matched.length, attrs: vectorAttrWidgetAttributes.length });
         return;
       }
       vectorAttrWidgetList.innerHTML = displayRows.map(row => {
@@ -10795,7 +10918,8 @@ function setupVectorSearch() {
   // renderVectorAttrWidget の絞り込み・並び替えと同じルール
   function getAttrWidgetMatchedRows() {
     const query = String(vectorAttrWidgetSearch ? vectorAttrWidgetSearch.value : "").toLowerCase().trim();
-    let matched = query ? vectorAttrWidgetRows.filter(row => row.values.some(val => String(val).toLowerCase().includes(query))) : [...vectorAttrWidgetRows];
+    let matched = vectorAttrWidgetRows.filter(vectorAttrRowPassesColFilter);
+    if (query) matched = matched.filter(row => row.values.some(val => String(val).toLowerCase().includes(query)));
     if (vectorAttrWidgetSort.column >= 0 && vectorAttrWidgetSort.column < vectorAttrWidgetAttributes.length) {
       const col = vectorAttrWidgetSort.column;
       const order = vectorAttrWidgetSort.order;
@@ -10840,6 +10964,20 @@ function setupVectorSearch() {
   });
   vectorAttrStatsGroup?.addEventListener("change", () => renderVectorAttrWidget(vectorAttrWidgetSearch ? vectorAttrWidgetSearch.value : ""));
   vectorAttrStatsValue?.addEventListener("change", () => renderVectorAttrWidget(vectorAttrWidgetSearch ? vectorAttrWidgetSearch.value : ""));
+
+  const onVectorAttrColFilter = () => renderVectorAttrWidget(vectorAttrWidgetSearch ? vectorAttrWidgetSearch.value : "");
+  vectorAttrColFilterField?.addEventListener("change", () => {
+    vectorAttrColFilterAttr = vectorAttrColFilterField.value === "" ? "" : (vectorAttrColFilterField.selectedOptions[0]?.textContent || "");
+    onVectorAttrColFilter();
+  });
+  vectorAttrColFilterOp?.addEventListener("change", onVectorAttrColFilter);
+  vectorAttrColFilterValue?.addEventListener("input", onVectorAttrColFilter);
+  vectorAttrColFilterClear?.addEventListener("click", () => {
+    if (vectorAttrColFilterField) vectorAttrColFilterField.value = "";
+    vectorAttrColFilterAttr = "";
+    if (vectorAttrColFilterValue) vectorAttrColFilterValue.value = "";
+    onVectorAttrColFilter();
+  });
 
   if (vectorAttrListBtn) vectorAttrListBtn.addEventListener("click", () => openVectorAttrWidget(vectorLayer ? vectorLayer.value : null));
   const attrVectorAttrListBtn = document.querySelector("#attr-vector-attr-list-btn");
