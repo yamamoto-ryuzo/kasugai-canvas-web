@@ -27,7 +27,10 @@ import { diagnoseHubLayerError } from "../shared/hub-diag.js";
 import { createMinimap } from "../shared/minimap.js";
 import { mountSunControls } from "../shared/sun-time.js";
 import { initGeoTools } from "./geo-tools.js";
-import { buildWmsTileTemplate, buildWmtsTileTemplate, rewriteKascLineVisibility, rewriteKascLineOpt, themeShowSet, kascTitleInTheme, normKascTitle, fillThemeSelect, resolveKascUrl, readKascSource, loadKascBookmarks, parseQgisBookmarksXml, qgisBookmarkToCam, downloadQgisBookmarksXml, downloadKascCamLines, parseKasc, zoomToCamHeightView, appendGroupedTitleOptions, syncBasemapList, fetchKascProjectTitle, projectsBaseUrl, projectsManifestUrl, applyPanelTitle, loadKascInfoContent, clearKascInfoContent, parseDefaultStyleSpec as parseKascDefaultStyleSpec, rememberedKascUrl, heightToViewZoom } from "../shared/kasc.js";
+import { buildWmsTileTemplate, buildWmtsTileTemplate, rewriteKascLineVisibility, rewriteKascLineOpt, themeShowSet, kascTitleInTheme, normKascTitle, fillThemeSelect, resolveKascUrl, readKascSource, loadKascBookmarks, parseQgisBookmarksXml, qgisBookmarkToCam, downloadQgisBookmarksXml, downloadKascCamLines, parseKasc, zoomToCamHeightView, appendGroupedTitleOptions, syncBasemapList, fetchKascProjectTitle, projectsBaseUrl, projectsManifestUrl, applyPanelTitle, loadKascInfoContent, clearKascInfoContent, parseDefaultStyleSpec as parseKascDefaultStyleSpec, rememberedKascUrl, heightToViewZoom, parseKascViewValue, parseKascPortalValue, parseKascLinkValue, splitKascTail, geojsonExtent } from "../shared/kasc.js";
+import { compileWhereExpression, filterGeoJsonByWhere } from "../shared/where-eval.js";
+import { executeOgrSelect } from "../shared/ogr-sql.js";
+import { createKascPortal } from "../shared/portal.js";
 import { createMvtImageryProvider } from "../shared/mvt.js";
 import { configureLive, configureFollow, liveUpdate, liveNotifyCamera, liveNotifySelection, liveStatus, liveWritebackEntries, liveSendFeatures, liveIsActive, liveQueryFeatures, liveRenderUrl, liveSetFollow, liveIsFollowing } from "../shared/live.js";
 import { mountLivePanel, syncLivePanel } from "../shared/live-panel.js";
@@ -38,6 +41,7 @@ import { initPrint } from "../shared/print.js";
 import { formatLatLng, parseCoordinateQuery } from "../shared/coords-format.js";
 import { installLocalCrsUI } from "../shared/coords-local.js";
 import { computeGroupStats } from "../shared/attr-stats.js";
+import { rowsToXlsx, geometryToWKT } from "../shared/export-formats.js";
 import { matchAttrCellFilter } from "../shared/attr-widget.js";
 import { loadScriptOnce } from "../shared/lazy-lib.js";
 import { isGeoTiffType, resolveGeoTiffItem, buildGeoTiffOverlayDataSource, createGeoTiffImageryProvider } from "./geotiff-layer.js";
@@ -45,6 +49,7 @@ import { isGeoTiffType, resolveGeoTiffItem, buildGeoTiffOverlayDataSource, creat
 import { createReportTool } from "../shared/report.js";
 import { installViewHistory } from "../shared/nav-tools.js";
 import { coordPins as coordPinStore } from "../shared/coord-pins.js";
+import { renderLayerLegendPicker } from "../shared/legend-tab.js";
 
 await initI18n();
 applyI18n();
@@ -290,7 +295,28 @@ function getVectorEntityLimit() {
 
 // entity 描画前に GeoJSON を残りバジェットの件数まで切り詰める。
 // vectorSourceCache の共有オブジェクトを破壊しないよう浅いコピーで返す
+// 非クエリ系ベクターの where= をクライアント評価(shared/where-eval.js)で
+// 描画用 GeoJSON へ適用する。item.geojsonSource は常にフルソースを保持し
+// (検索索引・属性一覧は全件対象の方針)、ここでは描画対象だけを絞る。
+// クエリ系(duckdb:/sql:/gpkg:)は SQL 側で絞り込み済みのため対象外
+function applyClientWhere(item, source) {
+  if (!item?.where || !source?.features?.length) return source;
+  if (isQueryDecoder(vectorDecoders.get(item.type), item)) return source;
+  if (item._whereExpr !== item.where) {
+    item._whereExpr = item.where;
+    try { item._wherePred = compileWhereExpression(item.where); }
+    catch (e) {
+      item._wherePred = null;
+      console.warn(`${item.title}: where= の式を解釈できません`, e.message);
+    }
+  }
+  if (!item._wherePred) return source;
+  const kept = source.features.filter((f, i) => item._wherePred(f, i));
+  return kept.length === source.features.length ? source : { ...source, features: kept };
+}
+
 function limitGeoJsonFeatures(source, remaining, item) {
+  source = applyClientWhere(item, source);
   const total = source?.features?.length ?? 0;
   item.entityLimited = null;
   if (!total || total <= remaining) return { source, used: total };
@@ -425,7 +451,7 @@ function scheduleLayerListRender() {
   });
 }
 // 凡例スウォッチを出しうるレイヤー種別(ベクター系)
-const LEGEND_VECTOR_TYPES = new Set(["geojson", "layer", "entities", "geoparquet", "flatgeobuf", "gpkg", "geopackage", "duckdb", "sql", "kml", "kmz", "wfs", "shp", "shapefile", "csv", "tsv"]);
+const LEGEND_VECTOR_TYPES = new Set(["geojson", "layer", "entities", "geoparquet", "flatgeobuf", "gpkg", "geopackage", "duckdb", "sql", "ogrsql", "kml", "kmz", "wfs", "shp", "shapefile", "csv", "tsv"]);
 
 // 描画指示内の canvas/画像をサイズ+src に正規化してキャッシュキーを作る
 function legendDescKey(desc) {
@@ -436,11 +462,10 @@ function legendDescKey(desc) {
 // 描画指示 {marker|image|point|line|fill|outline} をスウォッチ dataURL に描く。
 // marker/image は元 canvas・画像。line={css,widthPx,dash}、fill={css|tile}、
 // outline={css,widthPx,dash}、point={css,sizePx,outlineCss}
-function buildLegendSwatchDataUrl(desc) {
-  const key = legendDescKey(desc);
+function buildLegendSwatchDataUrl(desc, scale = 2) {
+  const key = `${legendDescKey(desc)}@${scale}`;
   const cached = legendSwatchCache.get(key);
   if (cached) return cached;
-  const scale = 2;
   const canvas = document.createElement("canvas");
   canvas.width = LEGEND_SWATCH_W * scale;
   canvas.height = LEGEND_SWATCH_H * scale;
@@ -582,29 +607,92 @@ function getLayerLegend(item) {
   return null;
 }
 
-// 凡例の条件別チェックの切り替え。該当シンボルにだけ評価される地物を
-// 描画中の DataSource/Primitive へ即時再適用し、未描画なら次回 refreshLayers で反映される
+// 凡例タブ用: legend: 画像とレイヤ凡例(QML/既定スタイル)を1つのセレクタで
+// 切替表示する。選択中は legendTabState.selected で保持し、再描画で維持する。
+// legendnode: メタ(ラベル改題・凡例順)はレイヤ一覧と同じ規則でここでも適用する
+const legendTabState = {};
+// legend: 行で指定された凡例画像(applyInspector で収集)
+let inspectorLegendImages = [];
+function legendTabEntries(layer) {
+  let entries = getLayerLegend(layer)?.entries || null;
+  if (entries && layer.legendLabels) {
+    entries = entries.map((e, i) => layer.legendLabels[i] != null ? { ...e, label: layer.legendLabels[i] } : e);
+  }
+  if (entries && layer.legendOrder?.length) {
+    const usedIdx = new Set(layer.legendOrder);
+    entries = layer.legendOrder.map(i => entries[i]).filter(Boolean)
+      .concat(entries.filter((_, i) => !usedIdx.has(i)));
+  }
+  return (entries || []).map(e => ({
+    label: e.label || e.symbolName || "",
+    spec: e.desc || null,
+    hidden: !!e.symbolName && !!layer.legendHidden?.has(e.symbolName),
+    symbolName: e.symbolName || "",
+  }));
+}
+function renderLegendPanelPicker() {
+  const panel = document.querySelector("#legend-panel");
+  if (!panel) return;
+  const layers = getOrderedLayerItems()
+    .map(layer => ({ ref: layer, title: layer.title || layer.url || layer.id || "", entries: legendTabEntries(layer) }))
+    .filter(l => l.entries.length);
+  const images = inspectorLegendImages;
+  let box = panel.querySelector(".legend-layer-picker");
+  if (!layers.length && !images.length) { box?.remove(); return; }
+  if (!box) {
+    box = document.createElement("div");
+    box.className = "legend-layer-picker";
+    panel.append(box);
+  }
+  renderLayerLegendPicker(box, { images, layers }, {
+    // 凡例タブはレイヤ行より大きめ表示のため、第2引数の表示pxから解像度を換算する
+    swatchUrl: (spec, size) => buildLegendSwatchDataUrl(spec, Math.max(2, Math.round(((size || LEGEND_SWATCH_W) / LEGEND_SWATCH_W) * 2))),
+    state: legendTabState,
+    ariaLabel: t("legend.selectLayer"),
+    imageGroupLabel: t("legend.groupImages"),
+    layerGroupLabel: t("legend.groupLayers"),
+    onToggleSymbol: (ref, name, vis) => setLegendSymbolVisible(ref, name, vis),
+    onToggleAll: (ref, vis) => setAllLegendSymbolsVisible(ref, vis),
+    showAllLabel: t("legend.showAll"),
+    hideAllLabel: t("legend.hideAll"), verticalLabel: t("legend.viewVertical"), tabsLabel: t("legend.viewTabs"),
+  });
+}
+
+// 凡例シンボル非表示集合を描画中の DataSource/Primitive へ即時再適用する。
+// 未描画なら次回 refreshLayers で反映される
+function applyLegendSymbolHidden(item) {
+  const style = item.qmlStyle;
+  if (!style) return;
+  const entry = vectorDataSources.find(e => e.id === item.id);
+  if (entry) {
+    try { applyQmlStyleToDataSource(entry.ds, style, { clamp: !!item._qmlClamp, hiddenSymbols: item.legendHidden, opacity: item.opacity ?? 1 }); }
+    catch (error) { console.warn("凡例の再適用に失敗しました:", error); }
+  } else {
+    const target = layerRuntimeTargets.get(item.id);
+    if (Cesium.GeoJsonPrimitive && target instanceof Cesium.GeoJsonPrimitive) {
+      try { applyQmlStyleToPrimitive(target, style, item.legendHidden, item.opacity ?? 1); }
+      catch (error) { console.warn("凡例の再適用に失敗しました:", error); }
+    }
+  }
+  requestRender();
+}
+// 凡例の条件別チェックの切り替え
 function setLegendSymbolVisible(item, symbolName, visible) {
   if (!item || !symbolName) return;
   if (!item.legendHidden) item.legendHidden = new Set();
   if (visible) item.legendHidden.delete(symbolName);
   else item.legendHidden.add(symbolName);
   if (!item.legendHidden.size) item.legendHidden = null;
-  const style = item.qmlStyle;
-  if (style) {
-    const entry = vectorDataSources.find(e => e.id === item.id);
-    if (entry) {
-      try { applyQmlStyleToDataSource(entry.ds, style, { clamp: !!item._qmlClamp, hiddenSymbols: item.legendHidden, opacity: item.opacity ?? 1 }); }
-      catch (error) { console.warn("凡例の再適用に失敗しました:", error); }
-    } else {
-      const target = layerRuntimeTargets.get(item.id);
-      if (Cesium.GeoJsonPrimitive && target instanceof Cesium.GeoJsonPrimitive) {
-        try { applyQmlStyleToPrimitive(target, style, item.legendHidden, item.opacity ?? 1); }
-        catch (error) { console.warn("凡例の再適用に失敗しました:", error); }
-      }
-    }
-    requestRender();
-  }
+  applyLegendSymbolHidden(item);
+  renderLayerList();
+}
+// 凡例タブの全表示/全非表示: 対象レイヤの全シンボルを一括で切り替える
+function setAllLegendSymbolsVisible(layer, visible) {
+  if (!layer) return;
+  const names = legendTabEntries(layer).map(e => e.symbolName).filter(Boolean);
+  if (!names.length) return;
+  layer.legendHidden = visible ? null : new Set(names);
+  applyLegendSymbolHidden(layer);
   renderLayerList();
 }
 // レイヤー行の📍フォーカス用: レイヤーID→実行時オブジェクト(ImageryLayer/Tileset/DataSource/Primitive)。
@@ -688,6 +776,25 @@ const inspectorPluginSpecs = [];
 // インスペクタの theme: 行で宣言された可視性プリセット {name, layers[], line}[]。
 // QGIS マップテーマ相当。applyInspector で再構築し #theme-select へ反映する
 const inspectorThemes = [];
+// インスペクタの view: 行で宣言された目的別プリセット
+// {name, desc, img, cam, base, layers[], styles{}, wheres{}, line}[]。
+// ポータル画面のカードへ展開する(theme: の発展形。フィルタ・カメラ・背景を含む)
+const inspectorViews = [];
+// インスペクタの html: 行で宣言されたポータル HTML セクション {title, spec, line}[]
+const inspectorHtmlSections = [];
+// インスペクタの link: 行で宣言された外部リンクカード {name, url, desc, img, line}[]
+const inspectorLinks = [];
+// ポータルのカード宣言順リスト {kind:"view"|"link", entry}[]
+const inspectorPortalCards = [];
+// portal: 行の宣言 {enabled, title, open}。null=行なし
+let inspectorPortalSpec = null;
+// title: 行のパネルタイトル(ポータル見出しのフォールバックに使う)。null=行なし
+let inspectorPanelTitle = null;
+// 適用中のビュー名と、適用前スナップショット(ビュー解除で復元)
+let activeViewName = null;
+let viewSnapshot = null;
+// 起動時ポータル自動表示の管理(プロジェクト読込ごとに1回)
+let portalAutoOpened = false;
 // インスペクタの bookmark: 行で宣言された QGIS ブックマーク XML 参照
 // {title, url}[]。applyInspector で収集し、非同期ロードでカメラプリセットへ展開する
 const inspectorBookmarkSpecs = [];
@@ -1045,6 +1152,8 @@ let switchRestore = null;
 
 async function loadInspectorConfig() {
   try {
+    // プロジェクト読込ごとの起動時ポータル自動表示を1回に戻す
+    portalAutoOpened = false;
     const projectId = currentProjectId || "default";
     const staticUrl = currentKascUrl
       || `${projectsBaseUrl(projectId)}kasugai_canvas.kasc`;
@@ -1214,6 +1323,186 @@ async function applyKascThemeStyles(theme, items) {
     renderLayerList();
   }
 }
+
+// ---- ビュー(view: 行。表示+スタイル+フィルタ+カメラ+背景を束ねた目的別プリセット) ----
+
+// ビュー適用前の状態を記録する。ビュー解除でこの状態へ戻す
+function captureViewSnapshot() {
+  const items = new Map();
+  for (const item of getOrderedLayerItems()) {
+    items.set(item.id, {
+      visible: item.visible, sourceVisible: item.sourceVisible,
+      where: item.where, query: item.query, sourceLine: item.sourceLine,
+    });
+  }
+  return { items, camera: snapshotCamera() };
+}
+
+// ビューのメンバレイヤーか( `*` は全レイヤー)。where/style 適用対象の判定に使う
+function viewHasLayer(view, item, show) {
+  if (show == null) return true;
+  return kascTitleInTheme(item.sourceTitle || item.title, show);
+}
+
+// レイヤーに対応するビュー側指定(styles/wheres マップ。フルパス→葉名の順で照合)
+function viewSpecFor(view, mapName, item) {
+  const map = view?.[mapName] || {};
+  const key = normKascTitle(item.sourceTitle || item.title);
+  return map[key] ?? map[key.split("/").pop()];
+}
+
+// ビュー適用: 表示+フィルタを反映して refreshLayers 1回で再描画し、
+// スタイル差替・背景・カメラを後続適用する。初回適用時はスナップショットを取る
+async function applyKascView(view) {
+  if (!view) return;
+  if (!viewSnapshot) viewSnapshot = captureViewSnapshot();
+  activeViewName = view.name || null;
+  const show = themeShowSet(view);
+  const all = show == null;
+  const items = getOrderedLayerItems().filter(item => item.sourceLine);
+  for (const item of items) {
+    item.visible = all || kascTitleInTheme(item.sourceTitle || item.title, show);
+    item.sourceVisible = item.visible;
+    // ビューのメンバレイヤーは ;where= がなくてもフィルタ解除まで含めて
+    // ビュー指定を正とする(スナップショットで解除時に復元される)。
+    // ビュー外のレイヤーのフィルタは触らない
+    if (viewHasLayer(view, item, show)) {
+      const where = viewSpecFor(view, "wheres", item);
+      if (item.type === "sql" || item.type === "ogrsql") {
+        if (where) console.warn(`view:${view.name}: sql:/ogrsql: レイヤーへの ;where= は未対応です`, item.title);
+      } else {
+        item.where = where || undefined;
+      }
+    }
+  }
+  // 背景地図(base=): タイトル/ID/葉名で照合。none=ベースマップなし、transparent=地表透明
+  if (view.base) applyViewBase(view.base);
+  renderLayerList();
+  refreshLayers();
+  // inspector テキストの on/off と where= を同期(テーマ適用と同じ規則。
+  // sql: 行はクエリ文字列が本文のため where= フィールドを書かない)
+  const input = document.querySelector("#inspector-input");
+  if (input) {
+    const lines = input.value.split(/\r?\n/);
+    for (const item of items) {
+      const idx = lines.indexOf(item.sourceLine);
+      let newLine = rewriteKascLineVisibility(item.sourceLine, show);
+      if (item.type !== "sql" && item.type !== "ogrsql") newLine = rewriteKascLineOpt(newLine, "where", item.where ?? null);
+      if (idx >= 0) lines[idx] = newLine;
+      item.sourceLine = newLine;
+    }
+    input.value = lines.join("\n");
+  }
+  // ;style= 指定レイヤーの .qml 差替(テーマと同じ機構)
+  void applyKascThemeStyles(view, items);
+  // cam= 指定カメラプリセットへ移動
+  if (view.cam) applyViewCam(view.cam, `view:${view.name}`);
+  // QGIS ライブ連携: ビュー適用を QGIS プロジェクトへ書き戻す
+  liveWritebackEntries(getOrderedLayerItems(), { theme: view?.name });
+  updatePortalButton();
+}
+
+// view cam=/portal data-cam= 共通: カメラプリセット名で移動
+function applyViewCam(name, logPrefix = "data-cam") {
+  const preset = cameraPresets.find(p => p.title === name || p.name === name);
+  if (preset) preset._extent ? flyToExtent(preset) : flyTo(preset);
+  else console.warn(`${logPrefix}: カメラプリセットが見つかりません`, name);
+}
+
+// view base=/portal data-base= 共通: 背景地図を名前照合で切替。
+// none=ベースマップなし、transparent=地表透明
+function applyViewBase(rawName) {
+  const name = String(rawName || "").trim();
+  if (/^(none|off|なし|ベースマップなし)$/i.test(name)) {
+    globeHidden = false;
+    selectedBasemap = null;
+  } else if (/^(transparent|hide|透明)$/i.test(name)) {
+    globeHidden = true;
+    selectedBasemap = null;
+  } else {
+    const basemap = basemaps.find(b => b.id === name || b.title === name || parseLayerTitle(b.title).title === name);
+    if (basemap) { globeHidden = false; selectedBasemap = basemap; }
+  }
+  const select = document.querySelector("#basemap-select");
+  if (select) select.value = globeHidden ? "__hide_globe__" : (selectedBasemap?.id || "");
+  applyGlobeVisibility();
+  updateMapAttribution();
+}
+
+// ビュー解除: 適用前スナップショットへ復元する
+async function clearKascView() {
+  const snap = viewSnapshot;
+  activeViewName = null;
+  viewSnapshot = null;
+  if (!snap) { updatePortalButton(); return; }
+  const items = getOrderedLayerItems().filter(item => item.sourceLine);
+  const restored = new Set();
+  for (const item of items) {
+    const s = snap.items.get(item.id);
+    if (!s) continue;
+    item.visible = s.visible;
+    item.sourceVisible = s.sourceVisible;
+    item.where = s.where;
+    item.query = s.query;
+    restored.add(item.sourceTitle || item.title);
+  }
+  // 表示状態を行へ戻す。復元後の可視レイヤータイトルをセットにして
+  // rewriteKascLineVisibility で on/off を書き戻す
+  const showSet = new Set();
+  for (const item of items) if (item.visible) {
+    const n = normKascTitle(item.sourceTitle || item.title);
+    showSet.add(n); showSet.add(n.split("/").pop());
+  }
+  const input = document.querySelector("#inspector-input");
+  if (input) {
+    const lines = input.value.split(/\r?\n/);
+    for (const item of items) {
+      const idx = lines.indexOf(item.sourceLine);
+      let newLine = rewriteKascLineVisibility(item.sourceLine, showSet);
+      if (item.type !== "sql" && item.type !== "ogrsql") newLine = rewriteKascLineOpt(newLine, "where", item.where ?? null);
+      if (idx >= 0) lines[idx] = newLine;
+      item.sourceLine = newLine;
+    }
+    input.value = lines.join("\n");
+  }
+  renderLayerList();
+  refreshLayers();
+  // テーマ差替スタイルを元の style= 指定へ戻す
+  void applyKascThemeStyles({ styles: {} }, items);
+  if (snap.camera && Number.isFinite(snap.camera.latitude)) flyTo(snap.camera, 0);
+  liveWritebackEntries(getOrderedLayerItems());
+  updatePortalButton();
+}
+
+// ---- ポータル(portal:/html:/view:/link: 行で構成する開始画面) ----
+// UI 構築は shared/portal.js へ共通化。ここでは状態getterと
+// applyView/clearView を束ねた遅延インスタンスを提供する
+
+let _kascPortal = null;
+function kascPortal() {
+  if (!_kascPortal) {
+    _kascPortal = createKascPortal({
+      t,
+      resolveProjectUrl,
+      loadInfoContent: loadKascInfoContent,
+      applyView: view => applyKascView(view),
+      clearView: () => clearKascView(),
+      applyCam: name => applyViewCam(name),
+      applyBase: name => applyViewBase(name),
+      getActiveViewName: () => activeViewName,
+      getPortalSpec: () => inspectorPortalSpec,
+      getPanelTitle: () => inspectorPanelTitle,
+      getHtmlSections: () => inspectorHtmlSections,
+      getCards: () => inspectorPortalCards,
+    });
+  }
+  return _kascPortal;
+}
+const portalAvailable = () => kascPortal().available();
+const updatePortalButton = () => kascPortal().updateButton();
+const updatePortalUI = () => kascPortal().update();
+const openPortal = () => kascPortal().open();
+const closePortal = () => kascPortal().close();
 
 function updateInspectorFromLayerOrder() {
   const input = document.querySelector("#inspector-input");
@@ -1810,7 +2099,9 @@ function renderLayerList() {
       <div class="layer-group-children" id="${groupId}"${group && !expandedLayerGroups.has(groupKey) ? " hidden" : ""}>
         ${layers.map((layer, index) => {
           const inputId = `${groupId}-layer-${index}`;
-          const filterButton = isQueryDecoder(vectorDecoders.get(layer.type), layer)
+          // ⏷ は where= を評価できるベクター全型に出す(クエリ系は SQL 再クエリ、
+          // geojson: 等は where-eval のクライアント評価)。entities(プラグイン所有)は対象外
+          const filterButton = (layer.type === "geojson" || layer.type === "layer" || vectorDecoders.has(layer.type))
             ? `<button class="layer-filter" type="button" data-layer-id="${escapeHtml(layer.id)}" title="${escapeHtml(t("layer.filter"))}" aria-label="${escapeHtml(t("layer.filter"))}">⏷</button>`
             : "";
           const limitBadge = layer.entityLimited
@@ -2098,6 +2389,8 @@ function renderLayerList() {
   });
 
   refreshTimeConfigLayers();
+  // 凡例タブのレイヤ選択凡例も最新へ追従させる
+  renderLegendPanelPicker();
 }
 
 function renderFlyPathSelect() {
@@ -3036,8 +3329,11 @@ function isGpkgBackedItem(item) {
 // useAsDefault を優先してコンパイルし item.qmlStyle に保持する
 // (style= 明示指定があるときはそちらを優先し埋め込みは使わない)
 async function loadGeoPackageAsGeoJson(item) {
+  const fetchUrl = proxyFetchUrl(item.url, item.proxy);
   const res = await gpkgWorkerCall("load", {
-    url: proxyFetchUrl(item.url, item.proxy),
+    url: fetchUrl,
+    // プロキシ経由が失敗した場合の直接取得用(同一URLなら不要)
+    directUrl: fetchUrl === item.url ? null : item.url,
     table: item.gpkgTable || null,
     where: item.where || null,
     limit: item.limit || null,
@@ -3060,13 +3356,16 @@ async function loadGeoPackageAsGeoJson(item) {
 // 属性値一覧ウィジェット用: クエリ系扱いの GPKG レイヤーの属性行を Worker 内の
 // DB に直接クエリして取得する。表示用の絞り込み(bbox/limit)は適用せず、
 // where= の全件を対象にする(検索は常に全件検索の方針)
-async function queryGpkgAttributeRows(item, searchText) {
+async function queryGpkgAttributeRows(item, searchText, wantGeom = false) {
+  const fetchUrl = proxyFetchUrl(item.url, item.proxy);
   const res = await gpkgWorkerCall("attrs", {
-    url: proxyFetchUrl(item.url, item.proxy),
+    url: fetchUrl,
+    directUrl: fetchUrl === item.url ? null : item.url,
     table: item.gpkgTable || null,
     where: item.where || null,
     columns: item.columns || null,
     searchText: searchText || "",
+    wantGeom,
   });
   return { attributes: res.attributes, rows: res.rows };
 }
@@ -3442,7 +3741,7 @@ async function loadDuckDbQueryAsGeoJson(item) {
 // (検索は常に全件検索の方針)。searchText は属性列への ILIKE 検索として SQL に
 // 変換する。LIMIT は付けず全件を取得し、表示側(DOM)だけ上限で切る。
 // 位置は spatial の ST_Centroid か lon/lat 列から取る
-async function queryDuckDbAttributeRows(item, searchText) {
+async function queryDuckDbAttributeRows(item, searchText, wantWkt = false) {
   const { conn, spatial } = await loadDuckDb();
   let inner, columns, geomCol, lonlat;
   if (item.type === "sql") {
@@ -3457,8 +3756,11 @@ async function queryDuckDbAttributeRows(item, searchText) {
     lonlat = geomCol ? null : resolveDuckDbLonLat(columns, item.lon, item.lat);
   }
   const geomOperand = geomCol && spatial ? duckDbGeometryCastExpr(geomCol) : null;
+  // __wkt__ は属性テーブルの WKT 出力列(QGIS GEOMETRY=AS_WKT 相当)用。
+  // ST_AsText は全行分の文字列化コストがあるため、wantWkt(出力実行時)のみ取得する
   const posExpr = geomOperand
     ? `, ST_X(ST_Centroid(${geomOperand})) AS "__lng__", ST_Y(ST_Centroid(${geomOperand})) AS "__lat__"`
+      + (wantWkt ? `, ST_AsText(${geomOperand}) AS "__wkt__"` : "")
     : "";
   const predicates = [];
   if (item.type === "duckdb" && item.where) predicates.push(`(${item.where})`);
@@ -3487,7 +3789,7 @@ async function queryDuckDbAttributeRows(item, searchText) {
   console.info(`[duckdb] ${item.title} (属性一覧): ${sql}`);
   const table = await conn.query(sql);
   const fields = table.schema.fields.map(f => f.name);
-  const attributes = fields.filter(name => name !== "__lng__" && name !== "__lat__");
+  const attributes = fields.filter(name => name !== "__lng__" && name !== "__lat__" && name !== "__wkt__");
   const rows = [];
   for (const row of table.toArray()) {
     const values = attributes.map(name => {
@@ -3500,9 +3802,134 @@ async function queryDuckDbAttributeRows(item, searchText) {
       const x = Number(row[lonlat.lon]), y = Number(row[lonlat.lat]);
       if (Number.isFinite(x) && Number.isFinite(y)) { lng = x; lat = y; }
     }
-    rows.push({ values, lat, lng });
+    const wkt = fields.includes("__wkt__") && row.__wkt__ != null ? String(row.__wkt__) : null;
+    rows.push({ values, lat, lng, wkt });
   }
   return { attributes, rows };
+}
+
+// ---- ogrsql: OGR SQL SELECT 文(shared/ogr-sql.js) ----
+// FROM の解決: 'ds'.layer 形式 → 読み込み済みレイヤータイトル照合 →
+// ファイルパス/DATA/ 推測。デコードは shared/vector-load.js へ委譲する
+function ogrFileTypeByPath(path) {
+  const clean = String(path || "").split(/[?#]/)[0];
+  if (/\.(fgb|flatgeobuf)$/i.test(clean)) return "flatgeobuf";
+  if (/\.(parquet|geoparquet)$/i.test(clean)) return "geoparquet";
+  if (/\.gpkg$/i.test(clean)) return "gpkg";
+  if (/\.kml$/i.test(clean)) return "kml";
+  if (/\.kmz$/i.test(clean)) return "kmz";
+  if (/\.(zip|shp|dbf)$/i.test(clean)) return "shp";
+  if (/\.tsv$/i.test(clean)) return "tsv";
+  if (/\.csv$/i.test(clean)) return "csv";
+  return "geojson";
+}
+
+async function decodeOgrFile(path, table) {
+  const synthetic = {
+    type: ogrFileTypeByPath(path), title: table || path,
+    url: resolveProjectUrl(path), opts: table ? { table } : {},
+  };
+  return (await loadVectorItem(synthetic, "", null)).geojson;
+}
+
+// FROM 名(レイヤータイトル/ファイルパス/'ds'.layer) → GeoJSON。
+// 未解決なら null(呼び出し側がファイル推測へ進む)
+async function resolveOgrSqlSource(ref) {
+  if (ref.source) return decodeOgrFile(ref.source, ref.name);
+  const name = String(ref.name || "");
+  const leafOf = t => String(t || "").split("/").pop().trim();
+  const match = getOrderedLayerItems().find(layer =>
+    layer.title === name || layer.sourceTitle === name
+    || leafOf(layer.title) === name || leafOf(layer.sourceTitle) === name);
+  if (!match) return null;
+  if (match.geojsonSource) return match.geojsonSource;
+  if (match.data && typeof match.data === "object") return match.data;
+  const dec = vectorDecoders.get(match.type);
+  if (dec) return dec.load(match);
+  const gj = getLayerGeoJson(match.id);
+  if (gj) return gj;
+  // 参照先レイヤーがまだ読み込み中で GeoJSON 未保持の場合は、
+  // そのソース URL を直接再デコードする(読み込み順の非決定性を吸収)
+  if (match.url) {
+    const it = { type: match.type === "layer" ? "geojson" : match.type, title: match.title, url: match.url, opts: match.opts || {} };
+    return (await loadVectorItem(it, "", null)).geojson;
+  }
+  return null;
+}
+
+// FeatureCollection → 属性一覧の {attributes, rows}。検索文字は全属性値の
+// 部分一致(大文字小文字無視)。SQL ダイアログの一覧絞り込みとも共用する
+function attrRowsFromFeatureCollection(fc, searchText = "") {
+  const attributes = [];
+  for (const f of fc?.features || []) {
+    for (const k of Object.keys(f.properties || {})) {
+      if (!attributes.includes(k)) attributes.push(k);
+    }
+  }
+  const needle = String(searchText || "").trim().toLowerCase();
+  const rows = [];
+  for (const f of fc?.features || []) {
+    const p = f.properties || {};
+    const values = attributes.map(name => {
+      const v = sanitizeVectorPropertyValue(p[name]);
+      return v == null ? "" : String(v);
+    });
+    if (needle && !values.some(v => v.toLowerCase().includes(needle))) continue;
+    let lat = null, lng = null;
+    if (f.geometry?.type === "Point" && Array.isArray(f.geometry.coordinates)) {
+      [lng, lat] = f.geometry.coordinates;
+    } else if (f.geometry) {
+      const env = geojsonExtent({ type: "FeatureCollection", features: [f] });
+      if (env) { lng = (env.west + env.east) / 2; lat = (env.south + env.north) / 2; }
+    }
+    rows.push({ values, lat, lng, geometry: f.geometry || null });
+  }
+  return { attributes, rows };
+}
+
+// ogrsql: の属性一覧は再クエリ結果(GeoJSON)から組み立てる。
+// 検索文字は全属性値の部分一致(大文字小文字無視)で絞る
+async function queryOgrSqlAttributeRows(item, searchText) {
+  return attrRowsFromFeatureCollection(await loadOgrSqlLayerAsGeoJson(item), searchText);
+}
+
+// executeOgrSelect の FROM 参照リゾルバ。ogrsql: デコードと
+// SQL ダイアログの SELECT 実行で共用する
+async function resolveOgrSqlFromRef(ref) {
+  if (ref.source) return resolveOgrSqlSource(ref);
+  const layer = await resolveOgrSqlSource(ref);
+  if (layer) return layer;
+  const name = String(ref.name || "");
+  const looksPath = /[/\\]/.test(name) || /^[a-z][a-z0-9+.-]*:/i.test(name)
+    || /\.(geojson|json|fgb|flatgeobuf|parquet|geoparquet|gpkg|kml|kmz|zip|shp|dbf|csv|tsv)$/i.test(name);
+  const candidates = looksPath ? [name]
+    : [`DATA/${name}.geojson`, `DATA/${name}.fgb`, `DATA/${name}.parquet`,
+       `DATA/${name}.gpkg`, `DATA/${name}.kml`, `DATA/${name}.csv`, name];
+  let lastError = null;
+  for (const path of candidates) {
+    try { return await decodeOgrFile(path); }
+    catch (e) { lastError = e; }
+  }
+  throw lastError || new Error(`ogrsql: テーブル "${name}" を解決できません`);
+}
+
+async function loadOgrSqlLayerAsGeoJson(item) {
+  const query = String(item.query || "").replace(/;+\s*$/, "");
+  // 主経路はブラウザ内 JS 実装(shared/ogr-sql.js)。QGIS Live が検出
+  // できても GDAL 実行へは切り替えず、JS で解決できない FROM(QGIS
+  // プロジェクトレイヤー・ローカル SHP 等)や JS 未対応構文だけ
+  // QGIS 側の ogr.ExecuteSQL(dialect="OGRSQL") へフォールバックする
+  let jsErr = null;
+  try {
+    return await executeOgrSelect(query, resolveOgrSqlFromRef);
+  } catch (e) {
+    jsErr = e;
+  }
+  const { runOgrSqlViaQgis } = await import("../shared/qgis-ogr.js");
+  const viaQgis = await runOgrSqlViaQgis(query, ref => (ref.source ? null : resolveOgrSqlSource(ref)),
+    path => resolveProjectUrl(path));
+  if (viaQgis) return viaQgis;
+  throw jsErr;
 }
 
 // GeoJSON 正規化経路のデコーダー一覧。新しい形式はここに type→loader を登録し、
@@ -3519,6 +3946,7 @@ const vectorDecoders = new Map([
   ["geopackage", { load: item => loadGeoPackageAsGeoJson(item), query: item => !!(item.where || item.limit || item.columns?.length || item.bboxAuto) }],
   ["duckdb", { load: item => loadDuckDbLayerAsGeoJson(item), query: true }],
   ["sql", { load: item => loadDuckDbQueryAsGeoJson(item), query: true }],
+  ["ogrsql", { load: item => loadOgrSqlLayerAsGeoJson(item), query: true }],
   // kml/kmz/wfs/shp は全件読み込み系。デコードは shared/vector-load.js へ一本化
   ["kml", { load: item => loadVectorItem({ type: "kml", title: item.title, url: item.url }, "").then(r => r.geojson) }],
   ["kmz", { load: item => loadVectorItem({ type: "kmz", title: item.title, url: item.url }, "").then(r => r.geojson) }],
@@ -3894,9 +4322,11 @@ async function refreshLayersImpl() {
         // heat=on: 点レイヤーをキャンバスヒートマップとして描画する。
         // entity は作らず検索索引・属性一覧はフルソース側に残る(描画は密度表示のみ)
         if (item.heat) {
-          const heatDs = await buildHeatmapDataSource(item, source);
+          const heatDs = await buildHeatmapDataSource(item, applyClientWhere(item, source));
+          heatDs._kasugaiLayerId = item.id;
           heatDs.show = effectiveLayerShow(item);
           await viewer.dataSources.add(heatDs);
+          removeOtherLayerDataSources(item, heatDs);
           vectorDataSources.push({ ds: heatDs, id: item.id, title: item.title });
           layerRuntimeTargets.set(item.id, heatDs);
           buildVectorSearchIndex();
@@ -3927,6 +4357,7 @@ async function refreshLayersImpl() {
         const ds = await buildStyledGeoJsonDataSource(limited.source, vectorDrape, item);
         try { ds.show = effectiveLayerShow(item); } catch (e) {}
         await viewer.dataSources.add(ds);
+        removeOtherLayerDataSources(item, ds);
         vectorDataSources.push({ ds, id: item.id, title: item.title });
         layerRuntimeTargets.set(item.id, ds);
         // ロード済みのレイヤーから順に検索索引・選択肢を更新する。
@@ -4056,7 +4487,9 @@ function applyVectorDefaultStyleToPrimitive(primitive, layerOpacity = 1) {
 // に回され scene.pick で拾えなくなるため、ピックできる単純な描画を優先する。
 // 属性はピック時に picked.properties から参照できる
 async function addGeoJsonPrimitiveLayer(item, geojson) {
-  const primitive = await Cesium.GeoJsonPrimitive.fromGeoJson(geojson, { allowPicking: true });
+  // where=(クライアント評価)は描画地物だけに適用し、registerPrimitiveLayer へは
+  // フルソースを渡して検索索引・属性一覧を全件対象に保つ
+  const primitive = await Cesium.GeoJsonPrimitive.fromGeoJson(applyClientWhere(item, geojson), { allowPicking: true });
   applyPrimitiveVectorStyle(primitive, item);
   registerPrimitiveLayer(item, primitive, geojson);
 }
@@ -4311,7 +4744,7 @@ const timeLayers = new Map(); // layerId → { item, items, starts, ends, si, ei
 let timePrevMs = null;
 let timePlaying = false;
 // entity 描画経路(time= が有効な)ベクター行タイプ。⏱ ボタンの表示対象
-const VECTOR_TIME_TYPES = new Set(["geojson", "layer", "geoparquet", "parquet", "flatgeobuf", "fgb", "gpkg", "geopackage", "kml", "kmz", "wfs", "shp", "shapefile", "csv", "tsv", "duckdb", "sql"]);
+const VECTOR_TIME_TYPES = new Set(["geojson", "layer", "geoparquet", "parquet", "flatgeobuf", "fgb", "gpkg", "geopackage", "kml", "kmz", "wfs", "shp", "shapefile", "csv", "tsv", "duckdb", "sql", "ogrsql"]);
 
 function parseTimeValueMs(v) {
   if (v == null || v === "") return null;
@@ -4649,6 +5082,9 @@ async function buildStyledGeoJsonDataSource(source, drape, item = null) {
     else if (drape.dem) classification = Cesium.ClassificationType.TERRAIN;
   }
   const ds = await Cesium.GeoJsonDataSource.load(source, { clampToGround: clamp, ...vectorDefaultStyleLoadOptions() });
+  // 並走する再構築(refreshLayers / reloadVectorLayer / live 再取得)で
+  // 同レイヤの ds が二重登録されないよう、掃除用にレイヤIDをタグ付けする
+  if (item?.id) ds._kasugaiLayerId = item.id;
   // GeoJsonDataSource は polygon/polyline に arcType=RHUMB を設定するが、
   // 極域(南極)・日付変更線跨ぎ・重複点を含むデータで rhumb 細分化が暴走し
   // レンダリング全体が停止する既知バグがある(Cesium #7550/#7864/#8599)。
@@ -4740,6 +5176,20 @@ function applyLayerOpacityToEntities(ds, opacity) {
 
 // クエリ系レイヤー(duckdb:/sql:)の描画物を条件変更後に差し替えて再読み込みする
 // render=primitive のレイヤーは vectorDataSources に載らないため scene.primitives 側を差し替える
+// レイヤIDでタグ付けされた ds のうち keep 以外を viewer から除去する。
+// refreshLayers の走行中に reloadVectorLayer(または逆)が同レイヤの ds を
+// 追加すると、古い参照経由の除去が no-op になって二重描画になるため、
+// ds 追加直後に必ず呼んで孤児を掃除する(最後に終わった再構築が勝つ)
+function removeOtherLayerDataSources(item, keep) {
+  if (!item?.id) return;
+  for (let i = viewer.dataSources.length - 1; i >= 0; i--) {
+    const other = viewer.dataSources.get(i);
+    if (other !== keep && other._kasugaiLayerId === item.id) {
+      try { viewer.dataSources.remove(other, false); } catch (error) { /* ignore */ }
+    }
+  }
+}
+
 async function reloadVectorLayer(item) {
   const decoder = vectorDecoders.get(item.type);
   if (!decoder) return;
@@ -4771,7 +5221,12 @@ async function reloadVectorLayer(item) {
   if (hadLimited || item.entityLimited) renderLayerList();
   viewer.dataSources.remove(entry.ds, false);
   await viewer.dataSources.add(ds);
-  entry.ds = ds;
+  removeOtherLayerDataSources(item, ds);
+  // 並走した refreshLayers が vectorDataSources を再構築している場合があるため
+  // エントリを取り直す(見つからなければ push して孤児参照を防ぐ)
+  const latestEntry = vectorDataSources.find(e => e.id === item.id);
+  if (latestEntry) latestEntry.ds = ds;
+  else vectorDataSources.push({ ds, id: item.id, title: item.title });
   layerRuntimeTargets.set(item.id, ds);
   // entity 描画でもフルソースを保持する(件数上限の切り捨て分も検索・属性の対象にするため)
   item.geojsonSource = geojson;
@@ -4799,6 +5254,7 @@ async function reloadFailedVectorLayer(item) {
   const ds = await buildStyledGeoJsonDataSource(limited.source, getVectorDrapeFlags(), item);
   try { ds.show = item.visible; } catch (e) {}
   await viewer.dataSources.add(ds);
+  removeOtherLayerDataSources(item, ds);
   vectorDataSources.push({ ds, id: item.id, title: item.title });
   layerRuntimeTargets.set(item.id, ds);
 }
@@ -4903,7 +5359,10 @@ async function resliceViewportLayer(item, remaining) {
   try { ds.show = item.visible; } catch (e) {}
   await viewer.dataSources.add(ds);
   viewer.dataSources.remove(entry.ds, false);
-  entry.ds = ds;
+  removeOtherLayerDataSources(item, ds);
+  const resliceEntry = vectorDataSources.find(e => e.id === item.id);
+  if (resliceEntry) resliceEntry.ds = ds;
+  else vectorDataSources.push({ ds, id: item.id, title: item.title });
   layerRuntimeTargets.set(item.id, ds);
   // バッジはフルソース基準(範囲外で0件でも「0/N」でデータ残存を示す)
   item.entityLimited = limited.used < item.geojsonSource.features.length
@@ -4915,20 +5374,20 @@ async function resliceViewportLayer(item, remaining) {
   return limited.used;
 }
 
-// クエリ系レイヤーの条件を対話的に変更する。duckdb: は WHERE 式、sql: はクエリ全文を編集し、
+// レイヤーの条件を対話的に変更する。duckdb: 等は WHERE 式、sql:/ogrsql: はクエリ
+// 全文を編集。⏷ボタンからは SQL ダイアログ(uiHooks.openSqlDialog)を開き、
+// 「レイヤフィルタ」ボタンでの適用が本関数(applyLayerQueryFilter)へ繋がる。
 // 変更は .kasc 行(sourceLine)にも反映して inspector テキストとの整合を保つ
-async function editLayerQueryFilter(item) {
+function editLayerQueryFilter(item) {
   if (!item) return;
-  const isSql = item.type === "sql";
-  const current = isSql ? (item.query || "") : (item.where || "");
-  const input = window.prompt(t(isSql ? "layer.filter.promptSql" : "layer.filter.promptWhere"), current);
-  if (input === null) return;
-  await applyLayerQueryFilter(item, input.trim());
+  if (uiHooks.openSqlDialog) uiHooks.openSqlDialog(item.id);
 }
 
-// クエリ系レイヤーのフィルター適用本体。⏷ボタンの prompt と AI ツール(setLayerFilter)の共通経路
+// フィルター適用本体。⏷ボタン(=SQL ダイアログ)と AI ツール(setLayerFilter)の
+// 共通経路。クエリ系は SQL 側で絞り込み、非クエリ系(geojson: 等)は
+// where= をクライアント評価(where-eval)して描画に適用する
 async function applyLayerQueryFilter(item, value) {
-  const isSql = item.type === "sql";
+  const isSql = item.type === "sql" || item.type === "ogrsql";
   if (isSql) {
     if (!value) return false;
     item.query = value;
@@ -4937,7 +5396,12 @@ async function applyLayerQueryFilter(item, value) {
   }
   syncLayerSourceLine(item);
   try {
-    await reloadVectorLayer(item);
+    // デコーダ系は再クエリで差し替え。geojson:/layer: 等のデコーダ無し型は
+    // refreshLayers で再描画する(applyClientWhere が where= を再評価)
+    if (vectorDecoders.has(item.type)) await reloadVectorLayer(item);
+    else await refreshLayers();
+    // 属性一覧のオンデマンド読み込みキャッシュに旧フィルタの行が残るのを防ぐ
+    vectorAttrLoadCache.delete(item.id);
     buildVectorSearchIndex();
     updateVectorSearchUI();
     // 条件変更で一覧内容が変わるため、クエリ系も含めて属性一覧の行を再取得する
@@ -4957,7 +5421,6 @@ function syncLayerSourceLine(item) {
   if (item.type === "duckdb") {
     const parts = [item.sourceTitle, item.url || "", item.attribution || ""];
     if (item.sourceVisible === false) parts.push("off");
-    if (item.where) parts.push(`where=${item.where}`);
     if (item.limit) parts.push(`limit=${item.limit}`);
     if (item.geom) parts.push(`geom=${item.geom}`);
     if (item.lon) parts.push(`lon=${item.lon}`);
@@ -4974,11 +5437,12 @@ function syncLayerSourceLine(item) {
     if (item.timeField) parts.push(`time=${item.timeField}`);
     if (item.timeEndField) parts.push(`time_end=${item.timeEndField}`);
     if (item.timeSpan != null) parts.push(`time_span=${item.timeSpan / 1000}`);
+    // where= は行の最終オプション(値は行末まで。`||` 連結等の | を含んでよい)
+    if (item.where) parts.push(`where=${item.where}`);
     line = `duckdb: ${parts.join(" | ")}`;
   } else if (item.type === "gpkg" || item.type === "geopackage") {
     const parts = [item.sourceTitle, item.url || "", item.attribution || ""];
     if (item.sourceVisible === false) parts.push("off");
-    if (item.where) parts.push(`where=${item.where}`);
     if (item.limit) parts.push(`limit=${item.limit}`);
     if (item.columns?.length) parts.push(`columns=${item.columns.join(",")}`);
     if (item.gpkgTable) parts.push(`table=${item.gpkgTable}`);
@@ -4990,9 +5454,16 @@ function syncLayerSourceLine(item) {
     if (item.timeField) parts.push(`time=${item.timeField}`);
     if (item.timeEndField) parts.push(`time_end=${item.timeEndField}`);
     if (item.timeSpan != null) parts.push(`time_span=${item.timeSpan / 1000}`);
+    // where= は行の最終オプション(値は行末まで。`||` 連結等の | を含んでよい)
+    if (item.where) parts.push(`where=${item.where}`);
     line = `${item.type}: ${parts.join(" | ")}`;
-  } else if (item.type === "sql") {
-    line = `sql: ${item.sourceTitle} | ${item.query}${item.renderSpecified ? (item.renderPrimitive ? " | render=primitive" : " | render=entity") : ""}${item.sourceVisible === false ? " | off" : ""}${item.attribution ? ` | attr=${item.attribution}` : ""}${item.styleUrl ? ` | style=${item.styleUrl}` : ""}${item.timeField ? ` | time=${item.timeField}` : ""}${item.timeEndField ? ` | time_end=${item.timeEndField}` : ""}${item.timeSpan != null ? ` | time_span=${item.timeSpan / 1000}` : ""}`;
+  } else if (item.type === "sql" || item.type === "ogrsql") {
+    line = `${item.type}: ${item.sourceTitle} | ${item.query}${item.renderSpecified ? (item.renderPrimitive ? " | render=primitive" : " | render=entity") : ""}${item.sourceVisible === false ? " | off" : ""}${item.attribution ? ` | attr=${item.attribution}` : ""}${item.styleUrl ? ` | style=${item.styleUrl}` : ""}${item.timeField ? ` | time=${item.timeField}` : ""}${item.timeEndField ? ` | time_end=${item.timeEndField}` : ""}${item.timeSpan != null ? ` | time_span=${item.timeSpan / 1000}` : ""}`;
+  } else if (item.type === "geojson" || item.type === "layer" || item.type === "entities" || vectorDecoders.has(item.type)) {
+    // 全件読み込み系ベクターの where=(クライアント評価フィルタ)を行へ反映する。
+    // duckdb:/gpkg:/sql: は上の専用分岐で再構築済み。それ以外は where= フィールド
+    // の差し替えのみ行い、行の他フィールドはそのまま維持する
+    line = rewriteKascLineOpt(item.sourceLine, "where", item.where);
   }
   if (!line || line === item.sourceLine) return;
   const input = document.querySelector("#inspector-input");
@@ -5061,19 +5532,53 @@ async function googlePlacesSearch(query, key) {
   }));
 }
 
+// GSI AddressSearch の生順はデータセット順で関連度ではない。
+// 「東京」等では「〜町東」の町字候補が先頭に大量に並ぶため、
+// 完全一致>前方一致>部分一致>その他 の関連度順にクライアント側で並べ替える
+function rankSearchResults(items, query) {
+  const q = String(query || "");
+  return items.map((it, idx) => {
+    const t = String(it.title || "");
+    let g = 3;
+    if (q && t === q) g = 0;
+    else if (q && t.startsWith(q)) g = 1;
+    else if (q && t.includes(q)) g = 2;
+    return { g, len: t.length, idx, it };
+  }).sort((a, b) => a.g - b.g || a.len - b.len || a.idx - b.idx)
+    .map(x => x.it);
+}
+
+const GSI_ADMIN_SUFFIXES = "都道府県市区町村郡";
+
+async function gsiAddressFetch(query) {
+  const response = await fetch(`https://msearch.gsi.go.jp/address-search/AddressSearch?q=${encodeURIComponent(query)}`, { mode: "cors" });
+  if (!response.ok) throw new Error(await response.text() || t("search.failedStatus", { status: response.status }));
+  const data = await response.json().catch(() => []);
+  return (Array.isArray(data) ? data : []).map(item => ({
+    title: item.properties?.title || item.properties?.name || item.properties?.Name || "",
+    address: item.properties?.address || item.properties?.Address || item.properties?.title || "",
+    latitude: Number(item.geometry?.coordinates?.[1]),
+    longitude: Number(item.geometry?.coordinates?.[0]),
+  }));
+}
+
 // 検索プロバイダ。いずれも {title,address,latitude,longitude}[] を返す。
 // google は Maps API キー(localStorage)、yahoo は .kasc の yahooappid: を使う
 const searchProviders = {
   async gsi(query) {
-    const response = await fetch(`https://msearch.gsi.go.jp/address-search/AddressSearch?q=${encodeURIComponent(query)}`, { mode: "cors" });
-    if (!response.ok) throw new Error(await response.text() || t("search.failedStatus", { status: response.status }));
-    const data = await response.json();
-    return data.map(item => ({
-      title: item.properties?.title || item.properties?.name || item.properties?.Name || "",
-      address: item.properties?.address || item.properties?.Address || item.properties?.title || "",
-      latitude: Number(item.geometry?.coordinates?.[1]),
-      longitude: Number(item.geometry?.coordinates?.[0]),
-    }));
+    const q = String(query || "").trim();
+    const items = await gsiAddressFetch(q);
+    // 行政区画接尾辞を持たない短い入力は "<q>都" の補完リクエストで
+    // 「東京都」「札幌市」「東京都台東区秋葉原」のような行政区画レベルの
+    // 候補を拾い、クエリを含むものだけ先頭へマージする
+    if (q.length >= 2 && q.length <= 10 && !GSI_ADMIN_SUFFIXES.includes(q.slice(-1)) && !/[0-9０-９]/.test(q)) {
+      try {
+        const extra = (await gsiAddressFetch(q + "都")).filter(it => String(it.title || "").includes(q));
+        const seen = new Set(items.map(it => `${it.title},${it.latitude},${it.longitude}`));
+        items.unshift(...extra.filter(it => !seen.has(`${it.title},${it.latitude},${it.longitude}`)));
+      } catch { /* 補完失敗時は本体の結果だけを使う */ }
+    }
+    return rankSearchResults(items, q);
   },
   // ハイブリッド検索: Geocoding（住所向け）と Places テキスト検索（施設・キーワード向け）を
   // 並列で呼んでマージする。片方が失敗しても他方の結果は返す（両方失敗時のみエラー）
@@ -5351,6 +5856,14 @@ function applyInspector(text) {
   layerState.clear();
   inspectorPluginSpecs.splice(0, inspectorPluginSpecs.length);
   inspectorThemes.splice(0, inspectorThemes.length);
+  inspectorViews.splice(0, inspectorViews.length);
+  inspectorHtmlSections.splice(0, inspectorHtmlSections.length);
+  inspectorLinks.splice(0, inspectorLinks.length);
+  inspectorPortalCards.splice(0, inspectorPortalCards.length);
+  inspectorPortalSpec = null;
+  inspectorPanelTitle = null;
+  activeViewName = null;
+  viewSnapshot = null;
   inspectorBookmarkSpecs.splice(0, inspectorBookmarkSpecs.length);
   inspectorLiveSpec = null;
   vectorDefaultStyles.point = null;
@@ -5390,6 +5903,7 @@ function applyInspector(text) {
   undergroundBackgroundColor = Cesium.Color.BLACK;
   clearKascInfoContent(document.querySelector("#info-content"));
   document.querySelector("#legend-panel img").removeAttribute("src");
+  inspectorLegendImages = [];
 
   let inspectorLayerIndex = 0;
   // cloud: 行(複数ある場合は最後の行を採用)。null=行なし、{stop:true}=停止
@@ -5406,6 +5920,7 @@ function applyInspector(text) {
 
     if (type === "title") {
       parsedPanelTitle = value || null;
+      inspectorPanelTitle = parsedPanelTitle;
     }
     // live: <geo_webview HTTPサーバ base URL> — QGIS ライブ双方向連携(#62)。
     // 値は保持のみで、反映は applyInspector 末尾の liveConfigureFromSpec が行う
@@ -5432,7 +5947,11 @@ function applyInspector(text) {
     }
     if (type === "legend") {
       const parts = value.split("|").map(part => part.trim());
-      document.querySelector("#legend-panel img").src = resolveProjectUrl(parts[parts.length - 1]);
+      // 凡例画像はセレクタ(legend-tab.js)へ渡して選択式で表示する(URL 重複はまとめる)
+      const url = resolveProjectUrl(parts[parts.length - 1]);
+      if (!inspectorLegendImages.some(l => l.url === url)) {
+        inspectorLegendImages.push({ title: parts.length > 1 ? parts[0] : "", url });
+      }
     }
 
     // default_style: point|line|polygon | color= / size= / width= / opacity= / fill= / stroke=…
@@ -5466,6 +5985,42 @@ function applyInspector(text) {
         }
       }
       inspectorThemes.push({ name: parts[0] || "", layers, styles, line });
+    }
+
+    // view: 名前 | desc=説明 | img=画像 | cam=カメラ名 | base=背景名 |
+    //   レイヤタイトル[;style=…][;where=式] [|タイトル…]（`*` で全表示）。
+    // ポータル画面の目的別カード。theme: の発展形でフィルタ・カメラ・背景を含む
+    if (type === "view") {
+      const parts = value.split("|").map(part => part.trim());
+      const view = parseKascViewValue(parts, line);
+      inspectorViews.push(view);
+      inspectorPortalCards.push({ kind: "view", entry: view });
+    }
+
+    // html: タイトル | インラインHTML または HTMLファイル/URL —
+    // ポータル画面へ描画するセクション。記述順に並ぶ。
+    // info: 行と同じく 1 フィールド形式(タイトル無し)も可
+    if (type === "html") {
+      const parts = value.split("|").map(part => part.trim());
+      const body = parts.slice(1).join("|") || parts[0];
+      const spec = body.startsWith("<") ? body : resolveProjectUrl(body);
+      inspectorHtmlSections.push({ title: parts.length > 1 ? parts[0] : "", spec, line });
+    }
+
+    // link: 名前 | url=… | desc=説明 | img=画像 —
+    // ポータル画面の外部リンクカード。view: カードと宣言順で同じグリッドに並ぶ
+    if (type === "link") {
+      const parts = value.split("|").map(part => part.trim());
+      const link = parseKascLinkValue(parts, line);
+      inspectorLinks.push(link);
+      inspectorPortalCards.push({ kind: "link", entry: link });
+    }
+
+    // portal: on|off | title=見出し | open=auto|manual —
+    // 起動時・🏠ボタンで開くポータル画面の宣言
+    if (type === "portal") {
+      const parts = value.split("|").map(part => part.trim());
+      inspectorPortalSpec = parseKascPortalValue(parts);
     }
 
     // group: グループパス( / 区切り) | expanded|collapsed —
@@ -5891,7 +6446,7 @@ function applyInspector(text) {
     // shp:/shapefile:タイトル|.zip または .shp 系URL も同じ書式(タイトル|URL|出典|オプション)
     if (type === "3dtiles" || type === "geojson" || type === "geoparquet" || type === "flatgeobuf" || type === "layer" || type === "gpkg" || type === "geopackage"
       || type === "kml" || type === "kmz" || type === "wfs" || type === "shp" || type === "shapefile" || type === "csv" || type === "tsv") {
-      const parts = value.split("|").map(part => part.trim());
+      const parts = splitKascTail(value);
       const title = parts[0];
       const url = resolveProjectUrl(parts[1]);
       const off = parts.some(part => /^(off|false)$/i.test(part));
@@ -5959,7 +6514,7 @@ function applyInspector(text) {
           }
         }
         // GPKG の絞り込みオプション(sql.js に渡す SQLite 式)。
-        // where= の値に | は含められない(行の区切り文字)。
+        // where= は行の最終オプションで値は行末まで(| を含んでよい)
         // bbox=auto は既定 ON(表示範囲連動のクエリ系)。常時全件描画にしたい場合は bbox=off で明示解除する
         if (type === "gpkg" || type === "geopackage") {
           const whereOpt = parts.find(part => /^where\s*=\s*\S/i.test(part));
@@ -5980,6 +6535,13 @@ function applyInspector(text) {
           if (item.bboxAuto === undefined) item.bboxAuto = true;
           item.sourceVisible = !off;
         }
+        // where= は非クエリ系(geojson: 等の全件読み込み系)も受け付ける。
+        // SQL 実行ではなくクライアント評価(shared/where-eval.js)で描画地物を
+        // 絞る。gpkg:/duckdb: 等のクエリ系は専用ブロックで SQL 側へ適用済み
+        if (type !== "gpkg" && type !== "geopackage") {
+          const whereOpt = parts.find(part => /^where\s*=\s*\S/i.test(part));
+          if (whereOpt) item.where = whereOpt.slice(whereOpt.indexOf("=") + 1).trim();
+        }
       }
       parseScaleVisOpts(parts, item);
       layers.push(item);
@@ -5995,7 +6557,7 @@ function applyInspector(text) {
     // 描画は既定で entity(GeoJsonDataSource・地形ドレープ可)。render=primitive で
     // GeoJsonPrimitive バッチ(entity 非経由・ドレープ不可だが大量地物向け)に切替可
     if (type === "duckdb") {
-      const parts = value.split("|").map(part => part.trim());
+      const parts = splitKascTail(value);
       const title = parts[0];
       const url = resolveProjectUrl(parts[1]);
       const off = parts.some(part => /^(off|false)$/i.test(part));
@@ -6051,11 +6613,13 @@ function applyInspector(text) {
       layerOrder.push(id);
     }
 
-    // sql: タイトル | SELECT文(先頭の | 以降はすべてクエリ文字列として扱い | も使用可)。
+    // sql:/ogrsql: タイトル | SELECT文(先頭の | 以降はすべてクエリ文字列として扱い | も使用可)。
     // 末尾の "| off" は非表示指定、"| render=entity" / "| render=primitive" は描画方式、
     // "| attr=出典" は出典表示(値に | は含められない)として末尾から順に解釈する。
-    // 描画は既定で entity(地形ドレープ可)
-    if (type === "sql") {
+    // 描画は既定で entity(地形ドレープ可)。
+    // sql: は DuckDB-WASM(SQLite方言)、ogrsql: は shared/ogr-sql.js の OGR SQL 方言
+    // (FROM=レイヤータイトル/'DATA/ファイル'/'ds'.layer 形式)で評価系が異なる
+    if (type === "sql" || type === "ogrsql") {
       const firstSep = value.indexOf("|");
       const title = firstSep < 0 ? "" : value.slice(0, firstSep).trim();
       let query = firstSep < 0 ? "" : value.slice(firstSep + 1).trim();
@@ -6284,10 +6848,17 @@ function applyInspector(text) {
   renderPresets();
   renderLayerList();
   updateThemeSelect();
+  updatePortalUI();
   renderFlyPathSelect();
   void ensureDrawnRouteFlyPath();
   refreshLayers();
   updateSearchProvider();
+  // portal: 行があり open=manual でなければ起動時(プロジェクト読込後の初回)に
+  // ポータルを自動表示する。インスペクタ再適用では再表示しない
+  if (!portalAutoOpened && inspectorPortalSpec?.enabled && inspectorPortalSpec.open !== "manual") {
+    portalAutoOpened = true;
+    openPortal();
+  }
   // scene3d: 行の反映(#60)。背景色/SkyBox は updateUndergroundView が
   // spec を参照して再計算する。影・大気はここで適用する
   if (inspectorScene3dSpec) {
@@ -6519,6 +7090,7 @@ async function reloadLiveLayer(item) {
   const ds = await buildStyledGeoJsonDataSource(limited.source, getVectorDrapeFlags(), item);
   try { ds.show = item.visible; } catch (_) {}
   await viewer.dataSources.add(ds);
+  removeOtherLayerDataSources(item, ds);
   if (entry) {
     viewer.dataSources.remove(entry.ds, false);
     entry.ds = ds;
@@ -6588,7 +7160,11 @@ async function liveReloadItem(item) {
     try { ds.show = item.visible; } catch (e) {}
     viewer.dataSources.remove(entry.ds, false);
     await viewer.dataSources.add(ds);
-    entry.ds = ds;
+    removeOtherLayerDataSources(item, ds);
+    // refreshLayers との並走でエントリが入れ替わっている場合に備え取り直す
+    const liveEntry = vectorDataSources.find(e => e.id === item.id);
+    if (liveEntry) liveEntry.ds = ds;
+    else vectorDataSources.push({ ds, id: item.id, title: item.title });
     layerRuntimeTargets.set(item.id, ds);
     item.geojsonSource = geojson;
     requestRender();
@@ -7560,7 +8136,9 @@ function setupEvents() {
     try { ds.show = coordPinLayerItem.visible; } catch (e) {}
     await viewer.dataSources.add(ds);
     viewer.dataSources.remove(entry.ds, false);
-    entry.ds = ds;
+    removeOtherLayerDataSources(coordPinLayerItem, ds);
+    const pinEntry = vectorDataSources.find(e => e.id === coordPinLayerItem.id);
+    if (pinEntry) pinEntry.ds = ds;
     layerRuntimeTargets.set(coordPinLayerItem.id, ds);
     buildVectorSearchIndex();
     updateVectorSearchUI();
@@ -8711,6 +9289,9 @@ function setupEvents() {
     const theme = inspectorThemes.find(entry => entry.name === event.target.value);
     if (theme) applyKascTheme(theme);
   });
+
+  // ポータル: 🏠ボタンで開始画面を開く / 「地図を開く」・Esc で閉じる / 「ビュー解除」で復元
+  kascPortal().bindEvents();
 
   document.querySelector("#export-inspector")?.addEventListener("click", () => {
     // 認証モードでは /api/data/...?token= に書き換えられたURLが入っているため、
@@ -9985,7 +10566,7 @@ function setupEvents() {
       labelEl.textContent = label;
       header.append(marker, labelEl);
       const table = buildAttrTable(record.entries);
-      // 属性行クリックでその地物へ飛ぶ(属性・値一覧の行クリックと同じ挙動)。
+      // 属性行クリックでその地物へ飛ぶ(属性テーブルの行クリックと同じ挙動)。
       // 位置が取れる entity 由来のレコードのみ対象
       const flyCartesian = record.entity ? getEntityPosition(record.entity) : null;
       const flyDeg = flyCartesian ? cartesianToDegrees(flyCartesian) : null;
@@ -10578,6 +11159,8 @@ function setupVectorSearch() {
   const vectorAttrColFilterOp = document.querySelector("#vector-attr-widget-colfilter-op");
   const vectorAttrColFilterValue = document.querySelector("#vector-attr-widget-colfilter-value");
   const vectorAttrColFilterClear = document.querySelector("#vector-attr-widget-colfilter-clear");
+  const vectorAttrMapFilterBtn = document.querySelector("#vector-attr-map-filter");
+  const vectorAttrExportWkt = document.querySelector("#vector-attr-export-wkt");
   // 列フィルタで選択中の属性名。レイヤ切替で同名属性が残れば条件を維持し、
   // 消えた場合は自動解除する(インデックスは列構成で変わるため名前で保持)
   let vectorAttrColFilterAttr = "";
@@ -10636,6 +11219,60 @@ function setupVectorSearch() {
     return matchAttrCellFilter(row.values[Number(vectorAttrColFilterField.value)], vectorAttrColFilterOp ? vectorAttrColFilterOp.value : "contains", vectorAttrColFilterValue.value);
   }
 
+  // 一覧の現在の絞り込み条件(列フィルタ AND 全文検索)を1行分に適用する共通述語
+  function vectorAttrRowPassesViewFilter(row) {
+    if (!vectorAttrRowPassesColFilter(row)) return false;
+    const query = String(vectorAttrWidgetSearch ? vectorAttrWidgetSearch.value : "").toLowerCase().trim();
+    return !query || row.values.some(val => String(val).toLowerCase().includes(query));
+  }
+
+  // 地図表示フィルタ: 一覧の絞り込み条件を地図上の entity.show にだけ適用する
+  // 表示限定フィルタ。where= とは別物で .kasc・データを書き換えず、解除/再適用で
+  // 即座に戻せる。ON の間は renderVectorAttrWidget 経由で条件変更のたびに再適用される
+  let vectorAttrMapFilterOn = false;
+  const vectorAttrMapFilteredEntities = new Map();
+
+  function restoreVectorAttrMapFilter() {
+    for (const [entity, prevShow] of vectorAttrMapFilteredEntities) {
+      try { entity.show = prevShow; } catch (_) {}
+    }
+    vectorAttrMapFilteredEntities.clear();
+  }
+
+  function applyVectorAttrMapFilter() {
+    restoreVectorAttrMapFilter();
+    const layerId = vectorAttrWidgetLayerSelect ? vectorAttrWidgetLayerSelect.value : "";
+    const layerItem = layerId && layerId !== "__all__" ? layerState.get(layerId) : null;
+    const ds = layerItem && (((getVectorDataSourceById(layerId) || {}).ds) || layerItem.dataSource || null);
+    if (!ds || !vectorAttrWidgetAttributes.length) return;
+    const time = viewer.clock && viewer.clock.currentTime;
+    for (const entity of ds.entities.values) {
+      const props = (entity.properties && entity.properties.getValue) ? entity.properties.getValue(time) : (entity.properties || {});
+      const values = vectorAttrWidgetAttributes.map(attr => {
+        const raw = props ? props[attr] : undefined;
+        return raw == null ? "" : (typeof raw === "object" ? JSON.stringify(raw) : String(raw));
+      });
+      if (!vectorAttrRowPassesViewFilter({ values })) {
+        vectorAttrMapFilteredEntities.set(entity, entity.show);
+        try { entity.show = false; } catch (_) {}
+      }
+    }
+  }
+
+  function setVectorAttrMapFilter(on) {
+    vectorAttrMapFilterOn = !!on;
+    if (vectorAttrMapFilterOn) applyVectorAttrMapFilter(); else restoreVectorAttrMapFilter();
+    syncVectorAttrMapFilterButton();
+  }
+
+  function syncVectorAttrMapFilterButton() {
+    if (!vectorAttrMapFilterBtn) return;
+    const layerId = vectorAttrWidgetLayerSelect ? vectorAttrWidgetLayerSelect.value : "";
+    const item = layerId && layerId !== "__all__" ? layerState.get(layerId) : null;
+    vectorAttrMapFilterBtn.disabled = !item || !vectorAttrWidgetAttributes.length;
+    vectorAttrMapFilterBtn.classList.toggle("active", vectorAttrMapFilterOn && !vectorAttrMapFilterBtn.disabled);
+  }
+
   function getVectorDataSourceById(layerId) {
     if (layerId === "__all__") return null;
     return vectorDataSources.find(item => item.id === layerId) || null;
@@ -10648,7 +11285,9 @@ function setupVectorSearch() {
     if (!promise) {
       promise = (async () => {
         const src = await loadVectorSourceCached(layerItem, layerDecoder);
-        return src ? Cesium.GeoJsonDataSource.load(src) : null;
+        // 未ロードレイヤーの一覧も where= 適用後と同じ行になるよう絞り込む
+        const filtered = applyClientWhere(layerItem, src);
+        return filtered ? Cesium.GeoJsonDataSource.load(filtered) : null;
       })();
       promise.catch(() => { if (vectorAttrLoadCache.get(layerItem.id) === promise) vectorAttrLoadCache.delete(layerItem.id); });
       vectorAttrLoadCache.set(layerItem.id, promise);
@@ -10676,6 +11315,7 @@ function setupVectorSearch() {
         }),
         lat: deg && Number.isFinite(deg.lat) ? deg.lat : null,
         lng: deg && Number.isFinite(deg.lng) ? deg.lng : null,
+        geometry: feature.geometry || null,
       };
     });
     return true;
@@ -10689,6 +11329,8 @@ function setupVectorSearch() {
     vectorAttrWidgetSort = { column: -1, order: 1 };
     vectorAttrWidgetLoading = false;
     vectorAttrWidgetLoadError = false;
+    // SQL ダイアログの「一覧を絞る」で置き換えた行は再構築で解除される
+    vectorAttrSqlView = null;
     // ウィジェット側の選択を優先(クエリ系レイヤーは検索パネルの #vector-layer に存在しないため)
     const layerId = (vectorAttrWidgetLayerSelect && vectorAttrWidgetLayerSelect.value) || (vectorLayer && vectorLayer.value) || "__all__";
     // クエリ系レイヤー(duckdb:/sql:)は読み込み済み entity ではなく DuckDB に直接クエリして全件対象で一覧を作る
@@ -10704,7 +11346,9 @@ function setupVectorSearch() {
         const searchText = vectorAttrWidgetSearch ? vectorAttrWidgetSearch.value : "";
         const result = isGpkgBackedItem(layerItem)
           ? await queryGpkgAttributeRows(layerItem, searchText)
-          : await queryDuckDbAttributeRows(layerItem, searchText);
+          : layerItem.type === "ogrsql"
+            ? await queryOgrSqlAttributeRows(layerItem, searchText)
+            : await queryDuckDbAttributeRows(layerItem, searchText);
         if (!isCurrent()) return;
         vectorAttrWidgetAttributes = result.attributes;
         vectorAttrWidgetRows = result.rows;
@@ -10759,8 +11403,9 @@ function setupVectorSearch() {
     }
     if (!vectorAttrWidgetAttributes.length) return;
     // GeoJsonDataSource は MultiPolygon 等をパート毎の別 entity に分割する。
-    // 同一フィーチャ由来の entity は properties が一致するので、地物単位で1行にまとめる
-    const seenRows = new Set();
+    // 同一フィーチャ由来の entity は properties が一致するので、地物単位で1行にまとめる。
+    // 行が参照する entity は WKT 出力・地図絞り込みで使うためすべて保持する
+    const rowMap = new Map();
     for (const entity of ds.entities.values) {
       const props = (entity.properties && entity.properties.getValue) ? entity.properties.getValue(time) : (entity.properties || {});
       const row = [];
@@ -10770,15 +11415,18 @@ function setupVectorSearch() {
         row.push(val);
       }
       const rowKey = JSON.stringify(row);
-      if (seenRows.has(rowKey)) continue;
-      seenRows.add(rowKey);
-      const cartesian = getEntityPosition(entity);
-      const deg = cartesian ? cartesianToDegrees(cartesian) : null;
-      vectorAttrWidgetRows.push({
-        values: row,
-        lat: deg && Number.isFinite(deg.lat) ? deg.lat : null,
-        lng: deg && Number.isFinite(deg.lng) ? deg.lng : null,
-      });
+      let rec = rowMap.get(rowKey);
+      if (!rec) {
+        rec = { values: row, lat: null, lng: null, entities: [] };
+        rowMap.set(rowKey, rec);
+        vectorAttrWidgetRows.push(rec);
+      }
+      rec.entities.push(entity);
+      if (rec.lat == null || rec.lng == null) {
+        const cartesian = getEntityPosition(entity);
+        const deg = cartesian ? cartesianToDegrees(cartesian) : null;
+        if (deg && Number.isFinite(deg.lat) && Number.isFinite(deg.lng)) { rec.lat = deg.lat; rec.lng = deg.lng; }
+      }
     }
   }
 
@@ -10807,6 +11455,10 @@ function setupVectorSearch() {
       const widgetLayerId = (vectorAttrWidgetLayerSelect && vectorAttrWidgetLayerSelect.value) || (vectorLayer ? vectorLayer.value : "__all__");
       const layerTitle = (widgetLayerId !== "__all__" && ((vectorSearchData && vectorSearchData.layers && vectorSearchData.layers[widgetLayerId] && vectorSearchData.layers[widgetLayerId].title) || (layerState.get(widgetLayerId) && layerState.get(widgetLayerId).title))) || t("common.all");
       vectorAttrWidgetTitle.textContent = t("vattr.title") + (layerTitle ? " — " + layerTitle : "");
+      syncVectorAttrSqlButton();
+      syncVectorAttrMapFilterButton();
+      // 地図表示フィルタが ON の間は、検索・列フィルタの変更をそのつど地図へ再適用する
+      if (vectorAttrMapFilterOn) applyVectorAttrMapFilter();
       if (!vectorAttrWidgetAttributes.length) {
         if (vectorAttrWidgetHead) vectorAttrWidgetHead.innerHTML = "";
         const msgKey = vectorAttrWidgetLoading ? "common.loading" : vectorAttrWidgetLoadError ? "vattr.loadFailed" : "vattr.selectLayer";
@@ -10931,32 +11583,124 @@ function setupVectorSearch() {
     return matched;
   }
 
-  // 属性一覧のエクスポート（CSV/TSV・UTF-8 BOM 付きで Excel 文字化け対策）
-  function exportAttrWidgetTable(delim) {
-    const rows = getAttrWidgetMatchedRows();
-    if (!vectorAttrWidgetAttributes.length || !rows.length) return;
-    const esc = v => '"' + String(v ?? "").replace(/"/g, '""') + '"';
-    // 位置が取れる行は代表点の lon/lat 列を末尾に付ける（行クリック移動と同じ座標）
-    const header = [...vectorAttrWidgetAttributes, "lon", "lat"];
-    const lines = [header.map(esc).join(delim)];
-    for (const row of rows) {
-      lines.push([...row.values, Number.isFinite(row.lng) ? row.lng : "", Number.isFinite(row.lat) ? row.lat : ""].map(esc).join(delim));
+  // 行のジオメトリを WKT 文字列にする(QGIS の CSV エクスポート GEOMETRY=AS_WKT 相当)。
+  // 行の出自によって保持形が違う: entity 参照 / geometry オブジェクト / wkt 文字列
+  function attrRowWkt(row) {
+    if (row.wkt != null) return row.wkt;
+    let geom = row.geometry || null;
+    if (!geom && row.entities) {
+      geom = mergeGeoJsonGeometries(row.entities.map(entity => entityToGeoJsonGeometry(entity)));
     }
+    return geom ? geometryToWKT(geom) : "";
+  }
+
+  // WKT 出力チェックが ON のとき、ジオメトリ参照を持たないクエリ系レイヤーの行へ
+  // 出力直前にだけジオメトリを補完する(行構築時の常時デコード/ST_AsText は重い)。
+  // 再クエリはウィジェット行と同じ条件のため同じ順序で返る前提で位置結合する
+  async function ensureAttrRowsWkt() {
+    if (!vectorAttrWidgetRows.length) return;
+    if (vectorAttrWidgetRows.some(r => r.wkt != null || r.geometry || r.entities)) return;
+    const layerId = vectorAttrWidgetLayerSelect ? vectorAttrWidgetLayerSelect.value : "";
+    const layerItem = layerId && layerId !== "__all__" ? layerState.get(layerId) : null;
+    const layerDecoder = layerItem && vectorDecoders.get(layerItem.type);
+    if (!isQueryDecoder(layerDecoder, layerItem)) return;
+    const searchText = vectorAttrWidgetSearch ? vectorAttrWidgetSearch.value : "";
+    try {
+      const res = isGpkgBackedItem(layerItem)
+        ? await queryGpkgAttributeRows(layerItem, searchText, true)
+        : layerItem.type === "ogrsql"
+          ? await queryOgrSqlAttributeRows(layerItem, searchText)
+          : await queryDuckDbAttributeRows(layerItem, searchText, true);
+      const src = res && res.rows;
+      if (!src || src.length !== vectorAttrWidgetRows.length) {
+        console.warn("属性一覧の WKT 行数が一致しないためジオメトリ列を省略します:", layerItem.title, src && src.length, vectorAttrWidgetRows.length);
+        return;
+      }
+      for (let i = 0; i < src.length; i++) {
+        if (src[i].wkt != null) vectorAttrWidgetRows[i].wkt = src[i].wkt;
+        if (src[i].geometry) vectorAttrWidgetRows[i].geometry = src[i].geometry;
+      }
+    } catch (e) {
+      console.warn("属性一覧のジオメトリ取得に失敗しました:", layerItem && layerItem.title, e);
+    }
+  }
+
+  // エクスポート対象の表を現在の表示モードで返す。通常=検索・列フィルタ・ソート
+  // 適用後の全行＋代表点 lon/lat、Σ 集計=表示中の GROUP BY 表。値は生値のまま
+  async function attrWidgetExportData() {
     const layerId = vectorAttrWidgetLayerSelect ? vectorAttrWidgetLayerSelect.value : "";
     const item = layerState.get(layerId);
     const base = String((item && item.title) || "attributes").replace(/[\\/:*?"<>|]/g, "_").slice(0, 60);
+    if (vectorAttrStatsMode) {
+      const groupField = vectorAttrStatsGroup ? vectorAttrStatsGroup.value : "";
+      const valueField = vectorAttrStatsValue ? vectorAttrStatsValue.value : "";
+      const features = vectorAttrWidgetRows.map(row => ({
+        properties: Object.fromEntries(vectorAttrWidgetAttributes.map((a, i) => [a, row.values[i]])),
+      }));
+      const stats = groupField ? computeGroupStats(features, groupField, valueField) : [];
+      if (!stats.length) return null;
+      const header = [groupField, t("vattr.statsCount"), ...(valueField ? ["sum", "avg", "min", "max"] : [])];
+      const rows = stats.map(g => [g.key, g.count, ...(valueField ? [g.sum, g.avg, g.min, g.max].map(v => v == null ? "" : v) : [])]);
+      return { header, rows, base, suffix: "_stats" };
+    }
+    const matched = getAttrWidgetMatchedRows();
+    if (!vectorAttrWidgetAttributes.length || !matched.length) return null;
+    // WKT チェック ON 時のみ、ジオメトリが取れる行に QGIS 互換の先頭 WKT 列を付ける。
+    // 位置が取れる行は代表点の lon/lat 列を末尾に付ける（行クリック移動と同じ座標）
+    const wantWkt = !!(vectorAttrExportWkt && vectorAttrExportWkt.checked);
+    if (wantWkt) await ensureAttrRowsWkt();
+    const wkts = wantWkt ? matched.map(attrRowWkt) : [];
+    const hasWkt = wkts.some(Boolean);
+    const header = [...(hasWkt ? ["WKT"] : []), ...vectorAttrWidgetAttributes, "lon", "lat"];
+    const rows = matched.map((row, i) => [...(hasWkt ? [wkts[i]] : []), ...row.values, Number.isFinite(row.lng) ? row.lng : "", Number.isFinite(row.lat) ? row.lat : ""]);
+    return { header, rows, base, suffix: "" };
+  }
+
+  // 属性一覧のエクスポート（CSV/TSV・UTF-8 BOM 付きで Excel 文字化け対策）
+  async function exportAttrWidgetTable(delim) {
+    const table = await attrWidgetExportData();
+    if (!table) return;
+    const esc = v => '"' + String(v ?? "").replace(/"/g, '""') + '"';
     const ext = delim === "\t" ? "tsv" : "csv";
+    const lines = [table.header.map(esc).join(delim), ...table.rows.map(r => r.map(esc).join(delim))];
     const blob = new Blob(["﻿" + lines.join("\r\n")], { type: `text/${ext};charset=utf-8` });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = `${base}.${ext}`;
+    a.download = `${table.base}${table.suffix}.${ext}`;
     document.body.append(a);
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   }
+
+  // 表示中の行を xlsx で出力（SheetJS は初回のみ CDN 遅延ロード）
+  async function exportAttrWidgetXlsx() {
+    const table = await attrWidgetExportData();
+    if (!table) return;
+    const prevText = vectorAttrWidgetCount ? vectorAttrWidgetCount.textContent : "";
+    try {
+      if (vectorAttrWidgetCount) vectorAttrWidgetCount.textContent = "xlsx 生成中…";
+      const { data, skipped } = await rowsToXlsx([{ name: table.base || "attributes", rows: [table.header, ...table.rows] }]);
+      const blob = new Blob([data], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `${table.base}${table.suffix}.xlsx`;
+      document.body.append(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+      if (skipped) alert(`${skipped} 行は上限超過のため出力されませんでした`);
+    } catch (e) {
+      alert("xlsx の生成に失敗しました: " + (e?.message || e));
+    } finally {
+      if (vectorAttrWidgetCount) vectorAttrWidgetCount.textContent = prevText;
+    }
+  }
+
+  vectorAttrMapFilterBtn?.addEventListener("click", () => setVectorAttrMapFilter(!vectorAttrMapFilterOn));
   document.querySelector("#vector-attr-export-csv")?.addEventListener("click", () => exportAttrWidgetTable(","));
   document.querySelector("#vector-attr-export-tsv")?.addEventListener("click", () => exportAttrWidgetTable("\t"));
+  document.querySelector("#vector-attr-export-xlsx")?.addEventListener("click", exportAttrWidgetXlsx);
   vectorAttrStatsBtn?.addEventListener("click", () => {
     vectorAttrStatsMode = !vectorAttrStatsMode;
     syncVectorAttrStatsControls();
@@ -10964,6 +11708,168 @@ function setupVectorSearch() {
   });
   vectorAttrStatsGroup?.addEventListener("change", () => renderVectorAttrWidget(vectorAttrWidgetSearch ? vectorAttrWidgetSearch.value : ""));
   vectorAttrStatsValue?.addEventListener("change", () => renderVectorAttrWidget(vectorAttrWidgetSearch ? vectorAttrWidgetSearch.value : ""));
+
+  // ---- SQL ダイアログ: 属性一覧の高度なフィルター ----
+  // QGIS 属性テーブルの「条件式でフィルタ」相当。WHERE 式(OGR SQL)または
+  // SELECT 文を受け付け、3経路で適用する:
+  //   一覧を絞る     … この一覧の行だけを絞る(表示のみ・地図は変えない)
+  //   レイヤフィルタ … where= / クエリ書換え(描画も絞る・QGIS writeback 対象)
+  //   新規レイヤ     … ogrsql: レイヤーとして追加
+  const sqlDialog = document.querySelector("#sql-dialog");
+  const sqlDialogLayer = document.querySelector("#sql-dialog-layer");
+  const sqlDialogInput = document.querySelector("#sql-dialog-input");
+  const sqlDialogStatus = document.querySelector("#sql-dialog-status");
+  const sqlDialogTestBtn = document.querySelector("#sql-dialog-test");
+  const sqlDialogClearBtn = document.querySelector("#sql-dialog-clear");
+  const sqlDialogViewBtn = document.querySelector("#sql-dialog-view");
+  const sqlDialogLayerFilterBtn = document.querySelector("#sql-dialog-layerfilter");
+  const sqlDialogAddLayerBtn = document.querySelector("#sql-dialog-addlayer");
+  const vectorAttrSqlBtn = document.querySelector("#vector-attr-sql");
+  // 「一覧を絞る」の適用状態。{layerId} — 別レイヤー選択・行再構築で解除
+  let vectorAttrSqlView = null;
+  const isSqlDialogVectorItem = item => item && (item.type === "geojson" || item.type === "layer" || vectorDecoders.has(item.type));
+  const isSqlDialogQueryEditor = item => item && (item.type === "sql" || item.type === "ogrsql");
+  const sqlDialogItem = () => layerState.get(sqlDialogLayer ? sqlDialogLayer.value : "");
+  function sqlDialogParsed() {
+    const text = sqlDialogInput ? sqlDialogInput.value.trim().replace(/;+\s*$/, "") : "";
+    if (!text) return { mode: "empty" };
+    return /^\(?\s*select\b/i.test(text) ? { mode: "select", query: text } : { mode: "where", where: text };
+  }
+  function setSqlDialogStatus(text, isError = false) {
+    if (!sqlDialogStatus) return;
+    sqlDialogStatus.textContent = text || "";
+    sqlDialogStatus.classList.toggle("error", !!isError);
+  }
+  function syncSqlDialogButtons() {
+    const item = sqlDialogItem();
+    const parsed = sqlDialogParsed();
+    if (sqlDialogLayerFilterBtn) {
+      // sql:/ogrsql: は SELECT 文のみ可(クエリ全文の置き換え)。それ以外は
+      // WHERE 式を where= へ書く(空=フィルタ解除可)。SELECT 文は where= にできない
+      sqlDialogLayerFilterBtn.disabled = !item
+        || (isSqlDialogQueryEditor(item) ? parsed.mode !== "select" : parsed.mode === "select");
+    }
+    if (sqlDialogViewBtn) sqlDialogViewBtn.disabled = parsed.mode === "empty";
+    if (sqlDialogAddLayerBtn) sqlDialogAddLayerBtn.disabled = parsed.mode === "empty";
+    if (sqlDialogClearBtn) sqlDialogClearBtn.disabled = !vectorAttrSqlView;
+  }
+  function syncVectorAttrSqlButton() {
+    if (vectorAttrSqlBtn) {
+      vectorAttrSqlBtn.classList.toggle("active", !!(vectorAttrSqlView
+        && vectorAttrSqlView.layerId === (vectorAttrWidgetLayerSelect ? vectorAttrWidgetLayerSelect.value : "")));
+    }
+  }
+  function prefillSqlDialogInput() {
+    const item = sqlDialogItem();
+    const isSqlLayer = isSqlDialogQueryEditor(item);
+    if (sqlDialogInput) {
+      sqlDialogInput.value = isSqlLayer ? (item.query || "") : (item.where || "");
+      sqlDialogInput.placeholder = t(isSqlLayer ? "sqldlg.phQuery" : "sqldlg.phWhere");
+    }
+    setSqlDialogStatus("");
+    syncSqlDialogButtons();
+  }
+  function openSqlDialog(layerId) {
+    if (!sqlDialog) return;
+    const opts = getOrderedLayerItems().filter(isSqlDialogVectorItem);
+    if (sqlDialogLayer) {
+      sqlDialogLayer.innerHTML = opts.map(o => '<option value="' + escapeHtml(o.id) + '">' + escapeHtml(o.title || o.id) + '</option>').join("");
+      sqlDialogLayer.value = opts.some(o => o.id === layerId) ? layerId : (opts[0] ? opts[0].id : "");
+    }
+    prefillSqlDialogInput();
+    sqlDialog.hidden = false;
+    if (sqlDialogInput) sqlDialogInput.focus();
+  }
+  function closeSqlDialog() { if (sqlDialog) sqlDialog.hidden = true; }
+  uiHooks.openSqlDialog = openSqlDialog;
+  // 「一覧を絞る」用の評価ソース。描画用の保持データがあればそれを使い、
+  // 無ければローダ経由(クエリ系は再クエリ、geojson: 等は fetch+キャッシュ)で取得
+  async function sqlDialogSourceFc(item) {
+    if (item.geojsonSource?.features) return item.geojsonSource;
+    return loadVectorSourceCached(item, vectorDecoders.get(item.type));
+  }
+  async function runSqlDialogQuery(item, parsed) {
+    if (parsed.mode === "select") return executeOgrSelect(parsed.query, resolveOgrSqlFromRef);
+    const src = await sqlDialogSourceFc(item);
+    if (!src) throw new Error(t("sqldlg.noSource"));
+    return filterGeoJsonByWhere(src, parsed.where);
+  }
+  sqlDialogTestBtn?.addEventListener("click", async () => {
+    const item = sqlDialogItem();
+    const parsed = sqlDialogParsed();
+    if (!item || parsed.mode === "empty") return;
+    setSqlDialogStatus(t("sqldlg.testing"));
+    try {
+      const fc = await runSqlDialogQuery(item, parsed);
+      setSqlDialogStatus(t("sqldlg.count", { count: fc?.features?.length ?? 0 }));
+    } catch (e) {
+      setSqlDialogStatus(String(e?.message || e), true);
+    }
+  });
+  sqlDialogViewBtn?.addEventListener("click", async () => {
+    const item = sqlDialogItem();
+    const parsed = sqlDialogParsed();
+    if (!item || parsed.mode === "empty") return;
+    setSqlDialogStatus(t("sqldlg.testing"));
+    try {
+      const built = attrRowsFromFeatureCollection(await runSqlDialogQuery(item, parsed));
+      vectorAttrWidgetAttributes = built.attributes;
+      vectorAttrWidgetRows = built.rows;
+      vectorAttrWidgetSort = { column: -1, order: 1 };
+      vectorAttrSqlView = { layerId: item.id };
+      if (vectorAttrWidgetLayerSelect) vectorAttrWidgetLayerSelect.value = item.id;
+      // ⏷ から開いた場合は一覧が閉じているので、結果を見せるため表示する
+      vectorAttrWidget?.classList.add("visible");
+      renderVectorAttrWidget(vectorAttrWidgetSearch ? vectorAttrWidgetSearch.value : "");
+      closeSqlDialog();
+    } catch (e) {
+      setSqlDialogStatus(String(e?.message || e), true);
+    }
+  });
+  sqlDialogLayerFilterBtn?.addEventListener("click", async () => {
+    const item = sqlDialogItem();
+    const parsed = sqlDialogParsed();
+    if (!item) return;
+    if (isSqlDialogQueryEditor(item)) {
+      if (parsed.mode === "where") { setSqlDialogStatus(t("sqldlg.needSelect"), true); return; }
+      if (parsed.mode === "empty") return;
+    } else if (parsed.mode === "select") {
+      setSqlDialogStatus(t("sqldlg.selectNeedsLayer"), true);
+      return;
+    }
+    const value = isSqlDialogQueryEditor(item) ? parsed.query : (parsed.where || "");
+    if (await applyLayerQueryFilter(item, value)) closeSqlDialog();
+    else setSqlDialogStatus(t("sqldlg.failed", { error: "" }), true);
+  });
+  sqlDialogAddLayerBtn?.addEventListener("click", () => {
+    const item = sqlDialogItem();
+    const parsed = sqlDialogParsed();
+    if (!item || parsed.mode === "empty") return;
+    // WHERE 式のみの場合は選択中レイヤーを FROM にした SELECT 文を組み立てる
+    const query = parsed.mode === "select" ? parsed.query
+      : `SELECT * FROM "${String(item.title || "").replace(/"/g, '""')}" WHERE ${parsed.where}`;
+    const title = `${String(item.title || "query").replace(/[|\r\n]+/g, "/")} (SQL)`;
+    if (window.kasugaiApi?.addLayer?.(title, query, { type: "ogrsql" })) closeSqlDialog();
+    else setSqlDialogStatus(t("sqldlg.failed", { error: "" }), true);
+  });
+  sqlDialogClearBtn?.addEventListener("click", async () => {
+    vectorAttrSqlView = null;
+    syncVectorAttrSqlButton();
+    await buildVectorAttrWidgetRows();
+    renderVectorAttrWidget(vectorAttrWidgetSearch ? vectorAttrWidgetSearch.value : "");
+    syncSqlDialogButtons();
+  });
+  sqlDialogLayer?.addEventListener("change", prefillSqlDialogInput);
+  sqlDialogInput?.addEventListener("input", syncSqlDialogButtons);
+  sqlDialogInput?.addEventListener("keydown", ev => {
+    if (ev.key === "Enter" && (ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); sqlDialogViewBtn?.click(); }
+  });
+  document.querySelector("#sql-dialog-close")?.addEventListener("click", closeSqlDialog);
+  sqlDialog?.addEventListener("click", ev => { if (ev.target === sqlDialog) closeSqlDialog(); });
+  vectorAttrSqlBtn?.addEventListener("click", () => {
+    openSqlDialog(vectorAttrWidgetLayerSelect ? vectorAttrWidgetLayerSelect.value : (vectorLayer ? vectorLayer.value : null));
+  });
+  window.addEventListener("kasugai:language-changed", () => { if (sqlDialog && !sqlDialog.hidden) prefillSqlDialogInput(); });
 
   const onVectorAttrColFilter = () => renderVectorAttrWidget(vectorAttrWidgetSearch ? vectorAttrWidgetSearch.value : "");
   vectorAttrColFilterField?.addEventListener("change", () => {
@@ -11529,37 +12435,58 @@ async function unregisterDataLayer(idOrTitle) {
   return true;
 }
 
-// DataSource の entity を GeoJSON FeatureCollection に戻す。
-// AI が読み込み済みレイヤーのデータを取得・加工するための出口
-function entitiesToGeoJson(ds) {
+// entity → GeoJSON ジオメトリ。entitiesToGeoJson と属性テーブルの WKT 出力で共用
+function entityToGeoJsonGeometry(entity) {
   const time = viewer.clock && viewer.clock.currentTime;
   const toLngLat = position => {
     const c = Cesium.Cartographic.fromCartesian(position);
     const h = Math.round(c.height * 100) / 100;
     return [Cesium.Math.toDegrees(c.longitude), Cesium.Math.toDegrees(c.latitude), h];
   };
+  try {
+    if (entity.polygon?.hierarchy) {
+      const hierarchy = entity.polygon.hierarchy.getValue(time);
+      const positions = Array.isArray(hierarchy) ? hierarchy : (hierarchy?.positions || []);
+      if (positions.length >= 3) {
+        const ring = positions.map(toLngLat);
+        ring.push([...ring[0]]);
+        return { type: "Polygon", coordinates: [ring] };
+      }
+    }
+    if (entity.polyline?.positions) {
+      const positions = entity.polyline.positions.getValue(time) || [];
+      if (positions.length >= 2) return { type: "LineString", coordinates: positions.map(toLngLat) };
+    }
+    if (entity.position) {
+      const position = entity.position.getValue(time);
+      if (position) return { type: "Point", coordinates: toLngLat(position) };
+    }
+  } catch (e) { /* ignore */ }
+  return null;
+}
+
+// 同一属性値でまとめられた複数パート(GeoJsonDataSource が分割する MultiPolygon 等)
+// のジオメトリを1つに束ねる。同型は Multi*、混在は GeometryCollection
+function mergeGeoJsonGeometries(list) {
+  const geoms = (list || []).filter(Boolean);
+  if (!geoms.length) return null;
+  if (geoms.length === 1) return geoms[0];
+  const multiOf = { Point: "MultiPoint", LineString: "MultiLineString", Polygon: "MultiPolygon" };
+  if (geoms.every(g => g.type === geoms[0].type)) {
+    const t = geoms[0].type;
+    if (multiOf[t]) return { type: multiOf[t], coordinates: geoms.map(g => g.coordinates) };
+    if (t.startsWith("Multi")) return { type: t, coordinates: geoms.flatMap(g => g.coordinates) };
+  }
+  return { type: "GeometryCollection", geometries: geoms };
+}
+
+// DataSource の entity を GeoJSON FeatureCollection に戻す。
+// AI が読み込み済みレイヤーのデータを取得・加工するための出口
+function entitiesToGeoJson(ds) {
+  const time = viewer.clock && viewer.clock.currentTime;
   const features = [];
   for (const entity of ds.entities.values) {
-    let geometry = null;
-    try {
-      if (entity.polygon?.hierarchy) {
-        const hierarchy = entity.polygon.hierarchy.getValue(time);
-        const positions = Array.isArray(hierarchy) ? hierarchy : (hierarchy?.positions || []);
-        if (positions.length >= 3) {
-          const ring = positions.map(toLngLat);
-          ring.push([...ring[0]]);
-          geometry = { type: "Polygon", coordinates: [ring] };
-        }
-      }
-      if (!geometry && entity.polyline?.positions) {
-        const positions = entity.polyline.positions.getValue(time) || [];
-        if (positions.length >= 2) geometry = { type: "LineString", coordinates: positions.map(toLngLat) };
-      }
-      if (!geometry && entity.position) {
-        const position = entity.position.getValue(time);
-        if (position) geometry = { type: "Point", coordinates: toLngLat(position) };
-      }
-    } catch (e) { /* ignore */ }
+    const geometry = entityToGeoJsonGeometry(entity);
     if (!geometry) continue;
     let properties = {};
     try {
@@ -11605,9 +12532,15 @@ window.kasugaiApi = {
       pitch: Cesium.Math.toDegrees(viewer.camera.pitch),
     };
   },
+  // ogrsql: 行と同じ実行経路で OGR SQL SELECT を実行し GeoJSON を返す
+  // (AI ツール queryOgrSql 用。FROM は読み込み済みレイヤー名/DATA パス。
+  // 主経路は JS 実装で、解決不能時のみ QGIS Live の GDAL へフォールバック)
+  async runOgrSql(query) {
+    return loadOgrSqlLayerAsGeoJson({ title: "queryOgrSql", query: String(query || "") });
+  },
   listLayers() {
     return getOrderedLayerItems().map(layer => {
-      const entry = { id: layer.id, title: layer.title, sourceTitle: layer.sourceTitle || null, exclusiveGroup: !!layer.exclusiveGroup, group: layer.group || "", visible: !!layer.visible, type: layer.type, filter: layer.type === "sql" ? (layer.query || "") : (layer.where || ""), bboxAuto: layer.bboxAuto ?? null, entityLimited: layer.entityLimited || null, viewportSliced: !!layer.viewportSliced };
+      const entry = { id: layer.id, title: layer.title, sourceTitle: layer.sourceTitle || null, exclusiveGroup: !!layer.exclusiveGroup, group: layer.group || "", visible: !!layer.visible, type: layer.type, filter: (layer.type === "sql" || layer.type === "ogrsql") ? (layer.query || "") : (layer.where || ""), bboxAuto: layer.bboxAuto ?? null, entityLimited: layer.entityLimited || null, viewportSliced: !!layer.viewportSliced };
       const legend = layer.qmlStyle?.legend;
       if (legend?.length > 1) entry.legend = legend.map(e => ({ label: e.label || e.symbolName, visible: !layer.legendHidden?.has(e.symbolName) }));
       return entry;
@@ -11665,17 +12598,37 @@ window.kasugaiApi = {
     if (select) select.value = theme.name;
     return true;
   },
+  // view: 行の目的別プリセット一覧/適用/解除とポータル画面の開閉。
+  // 表示＋スタイル＋フィルタ(＋カメラ/背景)をまとめて適用するテーマの発展形
+  listViews() {
+    return inspectorViews.map(view => ({
+      name: view.name, desc: view.desc, img: view.img, cam: view.cam, base: view.base,
+      layers: [...view.layers], active: view.name === activeViewName,
+    }));
+  },
+  async applyView(name) {
+    const view = inspectorViews.find(entry => entry.name === name);
+    if (!view) return false;
+    await applyKascView(view);
+    return true;
+  },
+  async clearView() {
+    await clearKascView();
+    return true;
+  },
+  openPortal() { openPortal(); return portalAvailable(); },
+  closePortal() { closePortal(); return true; },
   async focusLayer(idOrTitle) {
     const layer = getOrderedLayerItems().find(item => item.id === idOrTitle || item.title === idOrTitle);
     if (!layer) return false;
     return focusLayer(layer);
   },
-  // クエリ系レイヤー(duckdb/sql/gpkg等)の絞り込み条件を変更する。
-  // レイヤー行の ⏷ ボタン（window.prompt ベースで AI から直接操作できない）の API 版
+  // ベクターレイヤーの絞り込み条件を変更する。
+  // レイヤー行の ⏷ ボタン(SQL ダイアログ)と同じ適用経路の API 版
   async setLayerFilter(idOrTitle, filter) {
     const layer = getOrderedLayerItems().find(item => item.id === idOrTitle || item.title === idOrTitle);
     if (!layer) return { ok: false, reason: "notFound" };
-    if (layer.type !== "sql" && !isQueryDecoder(vectorDecoders.get(layer.type), layer)) return { ok: false, reason: "unsupported" };
+    if (layer.type !== "geojson" && layer.type !== "layer" && !vectorDecoders.has(layer.type)) return { ok: false, reason: "unsupported" };
     const ok = await applyLayerQueryFilter(layer, String(filter ?? "").trim());
     return ok ? { ok: true } : { ok: false, reason: "failed" };
   },
@@ -12114,14 +13067,14 @@ window.kasugaiApi = {
     return { ok: true };
   },
   // ベクター系レイヤーを .kasc 行として末尾へ追記し即時適用する。
-  // type: geojson/layer/geoparquet/flatgeobuf/gpkg/duckdb(target は URL) / sql(target は SELECT 文)
+  // type: geojson/layer/geoparquet/flatgeobuf/gpkg/duckdb(target は URL) / sql・ogrsql(target は SELECT 文)
   addLayer(title, target, { type = "geojson", options = "" } = {}) {
     const input = document.querySelector("#inspector-input");
     const urlTypes = new Set(["geojson", "layer", "geoparquet", "flatgeobuf", "gpkg", "geopackage", "duckdb", "kml", "kmz", "wfs", "shp", "shapefile", "csv", "tsv", "image", "model", "geotiff", "cog", "tiff"]);
     const clean = value => String(value || "").replace(/[\r\n]+/g, " ").trim();
     title = clean(title); target = clean(target); options = clean(options);
     if (!title || !target || !input) return false;
-    if (!urlTypes.has(type) && type !== "sql") return false;
+    if (!urlTypes.has(type) && type !== "sql" && type !== "ogrsql") return false;
     // URL系は「タイトル|URL|出典|オプション」の形式のため、options 指定時は
     // 出典スロットを空で埋める(出典は options 側の attr= で指定できる)
     const line = `${type}:${title}|${target}${urlTypes.has(type) && options ? "|" : ""}${options ? `|${options}` : ""}`;

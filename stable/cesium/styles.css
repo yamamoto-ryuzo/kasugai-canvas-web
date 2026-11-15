@@ -106,6 +106,10 @@ a.panel-manage { display: inline-flex; align-items: center; justify-content: cen
 .info-content .tab-content { display: none; }
 .info-content .tab-content.active { display: block; }
 .embedded-content img { display: block; width: 100%; height: auto; border: 1px solid #cbd9de; border-radius: 4px; background: #fff; }
+/* legend: 行が無いプロジェクトでは src 未設定の <img> が壊れた画像アイコンになるのを防ぐ */
+#legend-panel > img:not([src]) { display: none; }
+/* 凡例タブのレイヤ選択凡例(legend-tab.js)のスウォッチは 100% 画像ルールから外す */
+#legend-panel .legend-layer-picker .legend-swatch { display: inline-block; width: 26px; height: 16px; border: 0; border-radius: 0; background: none; object-fit: contain; flex: 0 0 auto; }
 .field-label, .section-title { display: block; margin-bottom: 3px; color: #52636d; font-size: var(--basemap-select-font-size); font-weight: 700; }
 .drape-sub-group { margin-left: 1.4em; margin-bottom: 3px; }
 .control-panel select, .control-panel input { width: 100%; min-height: 30px; padding: 5px 7px; border: 1px solid #cbd9de; border-radius: 4px; background: #fff; color: #1d2b35; }
@@ -269,7 +273,12 @@ footer { padding: 0 28px 22px; }
 .vector-attr-widget-header { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; border-bottom: 1px solid #e4ecef; background: #f6f9fb; }
 .vector-attr-widget-title { font-weight: 700; font-size: 15px; }
 .vector-attr-widget-close { min-width: 28px; min-height: 28px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: #52636d; cursor: pointer; font-size: 20px; line-height: 1; }
-.vector-attr-widget-filter { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 14px; border-bottom: 1px solid #e4ecef; }
+.vector-attr-widget-filter { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 14px; border-bottom: 1px solid #e4ecef; }
+/* 検索・フィルター・出力の3群を薄い背景で区別 */
+.vector-attr-group { display: inline-flex; align-items: center; gap: 4px; padding: 3px 5px; border-radius: 6px; }
+.vector-attr-group.group-search { background: #a9d0f5; flex: 1 1 240px; min-width: 200px; }
+.vector-attr-group.group-filter { background: #f1d083; }
+.vector-attr-group.group-export { background: #a5dca5; }
 #vector-attr-widget-layer { flex: 0 1 140px; min-width: 110px; min-height: 26px; padding: 2px 6px; border: 1px solid #cbd9de; border-radius: 4px; font-size: 12px; background: #fff; }
 #vector-attr-widget-search { flex: 2 1 160px; min-width: 100px; min-height: 26px; padding: 2px 8px; border: 1px solid #cbd9de; border-radius: 4px; font-size: 13px; }
 #vector-attr-widget-colfilter-field { flex: 0 1 150px; min-width: 100px; min-height: 26px; padding: 2px 6px; border: 1px solid #cbd9de; border-radius: 4px; font-size: 12px; background: #fff; }
@@ -489,3 +498,55 @@ footer { padding: 0 28px 22px; }
 #profile-chart { display: block; width: 100%; max-width: 100%; height: 150px; margin-top: 3px; border: 1px solid #e4ecef; border-radius: 4px; box-sizing: border-box; }
 .vector-attr-widget-filter button { flex: 0 0 auto; min-height: 26px; padding: 2px 8px; border: 1px solid #cbd9de; border-radius: 4px; background: #fff; color: #31564f; cursor: pointer; font-size: 12px; font-weight: 600; }
 .vector-attr-widget-filter button:hover { background: #e7f3f0; }
+#vector-attr-sql.active { background: #d9ecf3; border-color: #7fb7cc; }
+#vector-attr-map-filter.active { background: #d9f0df; border-color: #6fb887; }
+.vector-attr-widget-wkt { display: inline-flex; align-items: center; gap: 3px; flex: 0 0 auto; font-size: 12px; color: #31564f; white-space: nowrap; }
+/* SQL ダイアログ(属性一覧の高度なフィルター) */
+.sql-dialog { position: fixed; inset: 0; z-index: 9600; display: flex; align-items: center; justify-content: center; background: rgba(20,32,40,.35); }
+.sql-dialog[hidden] { display: none; }
+.sql-dialog-inner { width: min(560px, 92vw); display: flex; flex-direction: column; background: #fff; border: 1px solid #cbd9de; border-radius: 10px; box-shadow: 0 16px 48px rgba(10,20,40,.35); overflow: hidden; }
+.sql-dialog-head { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid #e4ecef; background: #f6f9fb; font-weight: 700; font-size: 14px; }
+#sql-dialog-layer { flex: 1; min-width: 0; margin-left: auto; min-height: 26px; padding: 2px 6px; border: 1px solid #cbd9de; border-radius: 4px; font-size: 12px; background: #fff; }
+#sql-dialog-close { min-width: 28px; min-height: 28px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: #52636d; cursor: pointer; font-size: 20px; line-height: 1; }
+#sql-dialog-input { margin: 10px 14px 0; min-height: 72px; padding: 8px; border: 1px solid #cbd9de; border-radius: 6px; font-family: ui-monospace, Consolas, monospace; font-size: 13px; resize: vertical; }
+.sql-dialog-hint { padding: 6px 14px 0; font-size: 11px; color: #71818d; }
+.sql-dialog-status { min-height: 1.2em; padding: 4px 14px 0; font-size: 12px; color: #31564f; }
+.sql-dialog-status.error { color: #b03030; }
+.sql-dialog-actions { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 14px 12px; }
+.sql-dialog-actions-spacer { flex: 1; }
+.sql-dialog-actions button { min-height: 28px; padding: 4px 12px; border: 1px solid #cbd9de; border-radius: 4px; background: #fff; color: #31564f; cursor: pointer; font-size: 12px; font-weight: 600; }
+.sql-dialog-actions button:hover:not(:disabled) { background: #e7f3f0; }
+.sql-dialog-actions button:disabled { opacity: .45; cursor: default; }
+
+/* ---- ポータル(portal:/html:/view: 行の開始画面) ---- */
+.portal-open { flex: 0 0 auto; width: 32px; min-height: 28px !important; padding: 2px !important; border: 1px solid rgba(49,86,79,.35) !important; border-radius: 4px !important; background: rgba(49,86,79,.08) !important; color: #31564f !important; cursor: pointer; font-size: 20px !important; line-height: 1; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; }
+.portal-open span { line-height: 1; }
+.portal-open:hover { background: rgba(49,86,79,.18) !important; }
+.portal-open.active { background: rgba(49,86,79,.28) !important; border-color: #31564f !important; }
+.portal-overlay { position: fixed; inset: 0; z-index: 9500; display: flex; align-items: center; justify-content: center; background: rgba(20,32,40,.45); }
+.portal-overlay[hidden] { display: none; }
+.portal-dialog { width: min(720px, 92vw); max-height: 86vh; display: flex; flex-direction: column; background: rgba(255,255,255,.97); border: 1px solid #cbd9de; border-radius: 10px; box-shadow: 0 16px 48px rgba(10,20,40,.35); overflow: hidden; }
+.portal-head { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid #e4ecef; background: #f5f9fa; }
+.portal-title { flex: 1 1 auto; margin: 0; font-size: 18px; color: #1d2b35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.portal-close { flex: 0 0 auto; min-height: 30px; padding: 4px 14px; border: 1px solid #31564f; border-radius: 5px; background: #31564f; color: #fff; font-size: 14px; font-weight: 700; cursor: pointer; }
+.portal-close:hover { background: #264a44; }
+.portal-body { flex: 1 1 auto; overflow-y: auto; padding: 12px 14px; }
+.portal-section { margin-bottom: 14px; }
+.portal-section > h3 { margin: 0 0 6px; font-size: 14px; color: #31564f; border-left: 4px solid #31564f; padding-left: 8px; }
+.portal-section-body { font-size: 13px; color: #1d2b35; line-height: 1.6; }
+.portal-section-body img { max-width: 100%; }
+.portal-views-head { margin: 10px 0 8px; font-size: 13px; font-weight: 700; color: #52636d; }
+.portal-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; }
+.portal-card { display: flex; flex-direction: column; align-items: stretch; padding: 0; border: 2px solid #d5e2e6; border-radius: 8px; background: #fff; cursor: pointer; text-align: left; overflow: hidden; transition: border-color .12s, box-shadow .12s; }
+.portal-card:hover { border-color: #31564f; box-shadow: 0 4px 14px rgba(49,86,79,.22); }
+.portal-card.active { border-color: #31564f; background: #eef5f3; }
+.portal-card-img { display: flex; align-items: center; justify-content: center; height: 92px; background: #e8eff2; color: #31564f; font-size: 34px; font-weight: 800; }
+.portal-card-img img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.portal-card-img-empty { letter-spacing: .05em; }
+.portal-card-name { padding: 8px 10px 2px; font-size: 15px; font-weight: 700; color: #1d2b35; }
+.portal-card-desc { padding: 0 10px 10px; font-size: 12px; color: #52636d; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.portal-card-link .portal-card-name::after { content: "↗"; margin-left: 5px; font-weight: 400; color: #31564f; }
+.portal-footer { padding: 10px 14px; border-top: 1px solid #e4ecef; display: flex; justify-content: flex-end; }
+.portal-footer[hidden] { display: none; }
+.portal-footer button { min-height: 30px; padding: 4px 14px; border: 1px solid #cbd9de; border-radius: 5px; background: #fff; color: #31564f; font-size: 13px; font-weight: 600; cursor: pointer; }
+.portal-footer button:hover { background: #e7f3f0; }
