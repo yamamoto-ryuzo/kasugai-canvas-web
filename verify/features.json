@@ -1,0 +1,290 @@
+{
+  "component": "kasugai-canvas-web",
+  "component_type": "static_cdn_host",
+  "version": "7.1.0",
+  "driver": {
+    "type": "static",
+    "detect": "-",
+    "launch": "-",
+    "ready": "-",
+    "control": "-",
+    "detected_from": "manifest"
+  },
+  "updated": "2026-11-15T22:57:22+09:00",
+  "features": [
+    {
+      "id": "cdn.stable.cesium",
+      "kind": "ui_control",
+      "name": "stable/cesium エンジン",
+      "source": "stable/cesium/index.html",
+      "signature": "GET index",
+      "summary": "stable チャンネルの cesium フロント",
+      "needs_runtime": false,
+      "standalone_ok": true,
+      "depends": [],
+      "verify": {
+        "standalone": "静的検証",
+        "integrated": ""
+      },
+      "last_result": "pass",
+      "last_verified": "2026-11-15T22:57:22+09:00",
+      "note": "index.html 実在"
+    },
+    {
+      "id": "cdn.stable.maplibre",
+      "kind": "ui_control",
+      "name": "stable/maplibre エンジン",
+      "source": "stable/maplibre/index.html",
+      "signature": "GET index",
+      "summary": "stable チャンネルの maplibre フロント",
+      "needs_runtime": false,
+      "standalone_ok": true,
+      "depends": [],
+      "verify": {
+        "standalone": "静的検証",
+        "integrated": ""
+      },
+      "last_result": "pass",
+      "last_verified": "2026-11-15T22:57:22+09:00",
+      "note": "index.html 実在"
+    },
+    {
+      "id": "cdn.stable.openlayers",
+      "kind": "ui_control",
+      "name": "stable/openlayers エンジン",
+      "source": "stable/openlayers/index.html",
+      "signature": "GET index",
+      "summary": "stable チャンネルの openlayers フロント",
+      "needs_runtime": false,
+      "standalone_ok": true,
+      "depends": [],
+      "verify": {
+        "standalone": "静的検証",
+        "integrated": ""
+      },
+      "last_result": "pass",
+      "last_verified": "2026-11-15T22:57:22+09:00",
+      "note": "index.html 実在"
+    },
+    {
+      "id": "cdn.stable.leaflet",
+      "kind": "ui_control",
+      "name": "stable/leaflet エンジン",
+      "source": "stable/leaflet/index.html",
+      "signature": "GET index",
+      "summary": "stable チャンネルの leaflet フロント",
+      "needs_runtime": false,
+      "standalone_ok": true,
+      "depends": [],
+      "verify": {
+        "standalone": "静的検証",
+        "integrated": ""
+      },
+      "last_result": "pass",
+      "last_verified": "2026-11-15T22:57:22+09:00",
+      "note": "index.html 実在"
+    },
+    {
+      "id": "cdn.stable.navara",
+      "kind": "ui_control",
+      "name": "stable/navara エンジン",
+      "source": "stable/navara/index.html",
+      "signature": "GET index",
+      "summary": "stable チャンネルの navara フロント",
+      "needs_runtime": false,
+      "standalone_ok": true,
+      "depends": [],
+      "verify": {
+        "standalone": "静的検証",
+        "integrated": ""
+      },
+      "last_result": "pass",
+      "last_verified": "2026-11-15T22:57:22+09:00",
+      "note": "index.html 実在"
+    },
+    {
+      "id": "cdn.stable.gsimaps",
+      "kind": "ui_control",
+      "name": "stable/gsimaps エンジン",
+      "source": "stable/gsimaps/index.html",
+      "signature": "GET index",
+      "summary": "stable チャンネルの gsimaps フロント",
+      "needs_runtime": false,
+      "standalone_ok": true,
+      "depends": [],
+      "verify": {
+        "standalone": "静的検証",
+        "integrated": ""
+      },
+      "last_result": "pass",
+      "last_verified": "2026-11-15T22:57:22+09:00",
+      "note": "index.html 実在"
+    },
+    {
+      "id": "cdn.unstable.cesium",
+      "kind": "ui_control",
+      "name": "unstable/cesium エンジン",
+      "source": "unstable/cesium/index.html",
+      "signature": "GET index",
+      "summary": "unstable チャンネルの cesium フロント",
+      "needs_runtime": false,
+      "standalone_ok": true,
+      "depends": [],
+      "verify": {
+        "standalone": "静的検証",
+        "integrated": ""
+      },
+      "last_result": "pass",
+      "last_verified": "2026-11-15T22:57:22+09:00",
+      "note": "index.html 実在"
+    },
+    {
+      "id": "cdn.unstable.maplibre",
+      "kind": "ui_control",
+      "name": "unstable/maplibre エンジン",
+      "source": "unstable/maplibre/index.html",
+      "signature": "GET index",
+      "summary": "unstable チャンネルの maplibre フロント",
+      "needs_runtime": false,
+      "standalone_ok": true,
+      "depends": [],
+      "verify": {
+        "standalone": "静的検証",
+        "integrated": ""
+      },
+      "last_result": "pass",
+      "last_verified": "2026-11-15T22:57:22+09:00",
+      "note": "index.html 実在"
+    },
+    {
+      "id": "cdn.unstable.openlayers",
+      "kind": "ui_control",
+      "name": "unstable/openlayers エンジン",
+      "source": "unstable/openlayers/index.html",
+      "signature": "GET index",
+      "summary": "unstable チャンネルの openlayers フロント",
+      "needs_runtime": false,
+      "standalone_ok": true,
+      "depends": [],
+      "verify": {
+        "standalone": "静的検証",
+        "integrated": ""
+      },
+      "last_result": "pass",
+      "last_verified": "2026-11-15T22:57:22+09:00",
+      "note": "index.html 実在"
+    },
+    {
+      "id": "cdn.unstable.leaflet",
+      "kind": "ui_control",
+      "name": "unstable/leaflet エンジン",
+      "source": "unstable/leaflet/index.html",
+      "signature": "GET index",
+      "summary": "unstable チャンネルの leaflet フロント",
+      "needs_runtime": false,
+      "standalone_ok": true,
+      "depends": [],
+      "verify": {
+        "standalone": "静的検証",
+        "integrated": ""
+      },
+      "last_result": "pass",
+      "last_verified": "2026-11-15T22:57:22+09:00",
+      "note": "index.html 実在"
+    },
+    {
+      "id": "cdn.unstable.navara",
+      "kind": "ui_control",
+      "name": "unstable/navara エンジン",
+      "source": "unstable/navara/index.html",
+      "signature": "GET index",
+      "summary": "unstable チャンネルの navara フロント",
+      "needs_runtime": false,
+      "standalone_ok": true,
+      "depends": [],
+      "verify": {
+        "standalone": "静的検証",
+        "integrated": ""
+      },
+      "last_result": "pass",
+      "last_verified": "2026-11-15T22:57:22+09:00",
+      "note": "index.html 実在"
+    },
+    {
+      "id": "cdn.unstable.gsimaps",
+      "kind": "ui_control",
+      "name": "unstable/gsimaps エンジン",
+      "source": "unstable/gsimaps/index.html",
+      "signature": "GET index",
+      "summary": "unstable チャンネルの gsimaps フロント",
+      "needs_runtime": false,
+      "standalone_ok": true,
+      "depends": [],
+      "verify": {
+        "standalone": "静的検証",
+        "integrated": ""
+      },
+      "last_result": "pass",
+      "last_verified": "2026-11-15T22:57:22+09:00",
+      "note": "index.html 実在"
+    },
+    {
+      "id": "cdn.channels",
+      "kind": "data_source",
+      "name": "channels.json",
+      "source": "channels.json",
+      "signature": "channels.json",
+      "summary": "stable=7.1.0 unstable=7.1.0 default=stable",
+      "needs_runtime": false,
+      "standalone_ok": true,
+      "depends": [],
+      "verify": {
+        "standalone": "静的検証",
+        "integrated": ""
+      },
+      "last_result": "pass",
+      "last_verified": "2026-11-15T22:57:22+09:00",
+      "note": "両チャンネル 7.1.0、source_repo/Branch表記整合"
+    },
+    {
+      "id": "cdn.live_stable_cesium",
+      "kind": "data_source",
+      "name": "Pages 実配信 stable/cesium",
+      "source": "https://yamamoto-ryuzo.github.io/kasugai-canvas-web/stable/cesium/index.html",
+      "signature": "GET",
+      "summary": "CDN live 200",
+      "needs_runtime": true,
+      "standalone_ok": false,
+      "depends": [
+        "GitHub Pages"
+      ],
+      "verify": {
+        "standalone": "",
+        "integrated": ""
+      },
+      "last_result": "pass",
+      "last_verified": "2026-11-15T22:57:22+09:00",
+      "note": "curl 200"
+    },
+    {
+      "id": "cdn.live_unstable_version",
+      "kind": "data_source",
+      "name": "Pages 実配信 unstable/version.json",
+      "source": "https://yamamoto-ryuzo.github.io/kasugai-canvas-web/unstable/version.json",
+      "signature": "GET",
+      "summary": "version.json live 200",
+      "needs_runtime": true,
+      "standalone_ok": false,
+      "depends": [
+        "GitHub Pages"
+      ],
+      "verify": {
+        "standalone": "",
+        "integrated": ""
+      },
+      "last_result": "pass",
+      "last_verified": "2026-11-15T22:57:22+09:00",
+      "note": "curl 200 (7.1.0/unstable)"
+    }
+  ]
+}
