@@ -27,9 +27,18 @@ export function renderLayerLegendPicker(container, { images = [], layers = [] } 
     const first = state.selected != null && items.some(it => it.key === state.selected) ? state.selected : items[0].key;
     state.selectedKeys.add(first);
   }
+  // 選択UIは details ドロップダウンに格納し、普段は選択中タイトルの
+  // 1行バーのみ表示する(開閉状態は state.sourceOpen で保持)
+  const dd = document.createElement("details");
+  dd.className = "legend-source-dd";
+  dd.open = !!state.sourceOpen;
+  dd.addEventListener("toggle", () => { state.sourceOpen = dd.open; });
+  const summary = document.createElement("summary");
+  summary.className = "legend-source-summary";
+  summary.style.cssText = "cursor:pointer;user-select:none;padding:2px 6px;border:1px solid #8884;border-radius:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin:4px 0";
   const list = document.createElement("div");
   list.className = "legend-source-list";
-  list.style.cssText = "border:1px solid #8884;border-radius:4px;max-height:11em;overflow:auto;margin:4px 0";
+  list.style.cssText = "border:1px solid #8884;border-top:none;border-radius:0 0 4px 4px;max-height:11em;overflow:auto";
   list.setAttribute("role", "group");
   if (ariaLabel) list.setAttribute("aria-label", ariaLabel);
   const addItemRow = it => {
@@ -66,6 +75,7 @@ export function renderLayerLegendPicker(container, { images = [], layers = [] } 
   };
   addGroup(imageGroupLabel, imageItems);
   addGroup(layerGroupLabel, layerItems);
+  dd.append(summary, list);
   // 表示モード切替(縦積み / タブ)。選択は state.mode に保持
   if (state.mode !== "tabs") state.mode = "vertical";
   const modeBar = document.createElement("div");
@@ -156,6 +166,9 @@ export function renderLayerLegendPicker(container, { images = [], layers = [] } 
   const draw = () => {
     body.replaceChildren();
     const sel = items.filter(it => state.selectedKeys.has(it.key));
+    // ドロップダウンの見出しは選択中の凡例名(未選択時は案内文)
+    summary.textContent = sel.map(it => it.title || "凡例").join("、") || ariaLabel || "凡例";
+    summary.style.opacity = sel.length ? "1" : ".65";
     if (state.mode === "tabs") {
       if (!sel.length) return;
       if (!sel.some(it => it.key === state.activeTab)) state.activeTab = sel[0].key;
@@ -187,6 +200,6 @@ export function renderLayerLegendPicker(container, { images = [], layers = [] } 
       body.append(block);
     }
   };
-  container.append(list, modeBar, body);
+  container.append(dd, modeBar, body);
   draw();
 }
