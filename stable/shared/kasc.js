@@ -61,10 +61,36 @@ export function splitKascTail(tail) {
   return raw.map(part => part.trim());
 }
 
+// ---- role= によるロール別表示制御(#129) ----
+// 認証プラグイン(window.kasugaiAuth)の getRoles() が返すロール一覧と行の
+// `| role=ロール[,…]` 指定を照合する。これはUI制御であり、データ自体の
+// 秘匿が必要なレイヤは配信側で保護すること。
+// 戻り値: null=無制限(getRoles 未実装/認証なし)、配列=ユーザーのロール
+// (実装済みで [](空)ならロール無しユーザー=role= 行を全て隠す)
+export function kascUserRoles() {
+  try {
+    const auth = typeof window !== "undefined" ? window.kasugaiAuth : null;
+    if (!auth || typeof auth.getRoles !== "function") return null;
+    const roles = auth.getRoles();
+    if (!Array.isArray(roles)) return null;
+    return roles.map(r => String(r).trim()).filter(Boolean);
+  } catch {
+    return null;
+  }
+}
+
+// required=null/[] → 誰でも可。userRoles=null → 無制限。配列同士は交差判定
+export function kascRoleAllowed(required, userRoles) {
+  if (!required || !required.length) return true;
+  if (userRoles == null) return true;
+  return required.some(r => userRoles.includes(r));
+}
+
 // .kasc テキストを構造化する。lines は生の解釈結果、rest は型別の便利マップ
 export function parseKasc(text) {
-  const doc = { layers: [], bases: [], cams: [], bookmarks: [], unsupported: [], background: null, info: null, legends: [], themes: [], groups: [], terrain: null, scene3d: null, lights: [], title: null, live: null, views: [], htmlSections: [], links: [], portal: null, defaultStyles: { point: null, line: null, polygon: null } };
+  const doc = { layers: [], bases: [], cams: [], bookmarks: [], unsupported: [], background: null, info: null, legends: [], themes: [], groups: [], terrain: null, scene3d: null, lights: [], title: null, live: null, views: [], htmlSections: [], links: [], portal: null, dash: [], forms: [], projects: [], news: [], searches: [], defaultStyles: { point: null, line: null, polygon: null } };
   let order = 0;
+  const userRoles = kascUserRoles();
   for (const rawLine of String(text || "").split(/\r?\n/)) {
     const line = rawLine.trim();
     if (!line || line.startsWith("#") || line.startsWith("//")) continue;
@@ -76,6 +102,21 @@ export function parseKasc(text) {
     const parts = (type === "sql" || type === "ogrsql")
       ? line.slice(sep + 1).split("|").map(part => part.trim())
       : splitKascTail(line.slice(sep + 1));
+
+    // `| role=ロール[,…]` フィールド(#129): 要求ロールとユーザーのロールが
+    // 交差しない行は丸ごとスキップする(レイヤ行は読み込まず、ポータル要素も
+    // 出さない)。許可された行でも role= は各パーサーへ見せないよう parts
+    // から除去する(生行 line は保持)。先頭のタイトル/名前スロットは対象外。
+    // `where=` は行の最終オプションのため role= はその手前へ置く
+    let denied = false;
+    for (let i = parts.length - 1; i >= 1; i--) {
+      const m = /^role\s*=\s*(.+)$/i.exec(parts[i] || "");
+      if (!m) continue;
+      denied = !kascRoleAllowed(m[1].split(",").map(s => s.trim()).filter(Boolean), userRoles);
+      parts.splice(i, 1);
+      break;
+    }
+    if (denied) continue;
 
     if (type === "cam") {
       doc.cams.push(parseCamLine(parts));
@@ -136,16 +177,48 @@ export function parseKasc(text) {
       doc.htmlSections.push({ title: parts[0] || "", spec: line.slice(sep + 1).trim(), line });
       continue;
     }
+    if (type === "news") {
+      // news:<DATA/内ファイル|URL> | limit=件数 | title=見出し —
+      // ポータルのお知らせフィード(#128)。html: セクションの後に記述順で並ぶ
+      doc.news.push(parseKascNewsValue(parts, line));
+      continue;
+    }
+    if (type === "search") {
+      // search:<レイヤー名|all> | attr=属性名 | ph=プレースホルダ | title=見出し —
+      // ポータル埋め込み検索(#125)。ベクター検索索引の値索引から即時絞り込みし、
+      // 候補クリックでポータルを閉じて地物へズーム+選択する
+      doc.searches.push(parseKascSearchValue(parts, line));
+      continue;
+    }
     if (type === "link") {
       // link:名前 | url=https://… | desc=説明 | img=画像 —
       // ポータル画面の外部リンクカード。view: カードと宣言順で同じグリッドに並ぶ
       doc.links.push(parseKascLinkValue(parts, line));
       continue;
     }
+    if (type === "project") {
+      // project:id|名前|kasc URL | desc=説明 | img=画像 | keep=cam,base —
+      // ポータル画面のプロジェクト切替カード(#130)。view:/link: と宣言順で
+      // 同じグリッドに並び、押下で対象 .kasc へ切り替える
+      doc.projects.push(parseKascProjectValue(parts, line));
+      continue;
+    }
     if (type === "portal") {
       // portal:on|off | title=ポータル見出し | open=auto|manual —
       // 起動時・🏠ボタンで開くポータル画面の宣言。open=manual は自動表示しない
       doc.portal = parseKascPortalValue(parts);
+      continue;
+    }
+    if (type === "dash") {
+      // dash:名前 | layer=レイヤー名 | kpi=… | chart=列 | matrix=行,列 | filters=列 —
+      // 地図連動ダッシュボード(#123)。属性をクライアント集計して表示する
+      doc.dash.push(parseKascDashValue(parts, line));
+      continue;
+    }
+    if (type === "form") {
+      // form:名前 | title=見出し | to=URL|backend:パス | fields=… —
+      // ポータルのフォーム投稿カード(#131)。位置+属性をJSON POSTする
+      doc.forms.push(parseKascFormValue(parts, line));
       continue;
     }
     if (type === "group") {
@@ -206,7 +279,7 @@ export function parseKasc(text) {
     }
     if (["xyz", "tile", "geojson", "layer", "geoparquet", "parquet", "flatgeobuf", "fgb",
          "gpkg", "geopackage", "csv", "tsv", "duckdb", "sql", "ogrsql", "wms", "wmts",
-         "kml", "kmz", "wfs", "shp", "shapefile", "image"].includes(type)) {
+         "kml", "kmz", "wfs", "shp", "shapefile", "image", "cms"].includes(type)) {
       doc.layers.push(item);
       continue;
     }
@@ -230,7 +303,7 @@ export const NON_LAYER_TYPES = new Set([
   "cam", "background", "info", "legend", "theme", "base", "legendnode",
   "bookmark", "cloud", "plugin", "yahooappid", "title",
   "group", "terrain", "scene3d", "light", "fly_geojson", "live",
-  "view", "html", "portal", "link",
+  "view", "html", "portal", "link", "dash", "form", "news", "search",
 ]);
 
 // group: 行の初期折りたたみ状態をエンジンの expandedLayerGroups(Set) へ反映する。
@@ -463,6 +536,21 @@ export function parseKascLinkValue(parts, line = null) {
   return link;
 }
 
+// project: 行の値をパースする(#130)。
+// `project:id|名前|kasc URL | desc=説明 | img=画像 | keep=cam,base`
+// ポータルのプロジェクト切替カード。先頭は遷移先の指定(projects.json の id・
+// ?kasc= 群マニフェストの兄弟id/仮名・.kasc 直URL)。keep= は遷移時に引き継ぐ
+// 状態(cam=カメラ位置, base=背景)。未指定の項目は移動先の既定へ戻る
+export function parseKascProjectValue(parts, line = null) {
+  const project = { name: parts[0] || "", desc: "", img: "", keep: "", line };
+  for (const tok of parts.slice(1)) {
+    if (!tok) continue;
+    const kv = /^(desc|img|keep)\s*=\s*(.+)$/i.exec(tok);
+    if (kv) project[kv[1].toLowerCase()] = kv[2].trim();
+  }
+  return project;
+}
+
 // portal: 行の値をパースする。`portal:on|off | title=… | open=auto|manual | html=…`
 // html= はボディ全体を1つのHTML(ファイル/URL)で構成するフルカスタムモード
 export function parseKascPortalValue(parts) {
@@ -477,6 +565,271 @@ export function parseKascPortalValue(parts) {
     else portal.html = m[2].trim();
   }
   return portal;
+}
+
+// dash: 行の値をパースする(#123)。
+// `dash:名前 | layer=レイヤー名 | kpi=count,sum:列,avg:列,distinct:列,pct:列:値 |
+//   chart=列[,列…] | matrix=行,列 | filters=列[,列…] | detail=on|off`
+// layer= の属性をクライアント集計し、KPI・棒グラフ・クロス集計・一覧を表示する。
+// グラフ/セル選択はレイヤーの where= へ反映され地図が絞り込まれる。
+// detail=off は一覧を出さない統計のみ表示(公開用の権限別表示)
+export function parseKascDashValue(parts, line) {
+  const dash = { name: parts[0] || "", layer: "", kpis: [], charts: [], filters: [], matrix: null, detail: true, line };
+  const list = v => v.split(",").map(x => x.trim()).filter(Boolean);
+  for (const part of parts.slice(1)) {
+    const m = /^([^=]+)=(.*)$/.exec(part);
+    if (!m) continue;
+    const key = m[1].trim().toLowerCase(), val = m[2].trim();
+    if (key === "layer") dash.layer = val;
+    else if (key === "kpi") dash.kpis.push(...list(val));
+    else if (key === "chart" || key === "charts") dash.charts.push(...list(val));
+    else if (key === "filter" || key === "filters") dash.filters.push(...list(val));
+    else if (key === "matrix") {
+      const mm = list(val);
+      if (mm[0] && mm[1]) dash.matrix = { row: mm[0], col: mm[1] };
+    } else if (key === "detail") dash.detail = !/^(off|0|false|no)$/i.test(val);
+  }
+  return dash;
+}
+
+// form: 行の値をパースする(#131)。
+// `form:名前 | title=見出し | desc=説明 | img=画像 | to=URL|backend:パス |
+//   fields=名前[:型[:ラベル[:選択肢;区切り]]][,…] | cam=カメラ名`
+// ポータルのフォーム投稿カード。地図クリックで位置(loc)＋属性を入力し
+// {geometry:GeoJSON Point, properties:{…}} を to= へ JSON POST する。
+// フィールド型: text(既定)/textarea/select/date/photo/loc。
+// loc は地図クリックの位置指定で geometry に入り properties には含めない。
+// fields の各項は `名前:型:ラベル` (select は `名前:select:ラベル:選択肢;選択肢`)、
+// 型省略時は text、名前が loc で型省略なら loc とする
+export function parseKascFormValue(parts, line = null) {
+  const form = { name: parts[0] || "", title: "", desc: "", img: "", to: "", cam: "", fields: [], line };
+  const parseField = spec => {
+    const seg = spec.split(":").map(s => s.trim());
+    const name = seg[0];
+    if (!name) return null;
+    const type = (seg[1] || (name.toLowerCase() === "loc" ? "loc" : "text")).toLowerCase();
+    const field = { name, type, label: seg[2] || name, options: [] };
+    if (type === "select") {
+      field.options = seg.slice(3).join(":").split(";").map(s => s.trim()).filter(Boolean);
+    }
+    return field;
+  };
+  for (const tok of parts.slice(1)) {
+    if (!tok) continue;
+    const kv = /^(title|desc|img|to|url|fields|field|cam)\s*=\s*(.+)$/i.exec(tok);
+    if (kv) {
+      const key = kv[1].toLowerCase();
+      const value = kv[2].trim();
+      if (key === "fields" || key === "field") form.fields.push(...value.split(",").map(parseField).filter(Boolean));
+      else if (key === "to" || key === "url") form.to = value;
+      else form[key] = value;
+      continue;
+    }
+    if (/^(https?:\/\/|backend:)/i.test(tok)) form.to = tok;
+  }
+  return form;
+}
+
+// news: 行の値をパースする(#128)。
+// `news: <DATA/内ファイル|URL> | limit=件数 | title=見出し` —
+// ポータルのお知らせフィード。JSON または FrontMatter 付き Markdown 一覧を
+// fetch して日付降順で描画する
+export function parseKascNewsValue(parts, line = null) {
+  const news = { src: "", limit: 0, title: "", line };
+  for (const tok of parts) {
+    if (!tok) continue;
+    const kv = /^(src|url|href|limit|title)\s*=\s*(.+)$/i.exec(tok);
+    if (kv) {
+      const key = kv[1].toLowerCase();
+      const value = kv[2].trim();
+      if (key === "limit") {
+        const n = Number.parseInt(value, 10);
+        if (Number.isFinite(n) && n > 0) news.limit = n;
+      } else if (key === "title") news.title = value;
+      else news.src = value;
+      continue;
+    }
+    if (!news.src) news.src = tok;
+  }
+  return news;
+}
+
+// stat: 行の値をパースする(#126)。
+// `stat:レイヤー名 | group=属性 | value=属性|count | kind=kpi|bar|pie |
+//   agg=count|sum|avg|min|max | title=見出し | desc=説明`
+// ポータルの統計カード(dash: 行ダッシュボード #123 のポータル内プリミティブ)。
+// レイヤーの属性をクライアント集計(attr-stats.js)して KPI/棒/円グラフを描き、
+// group= のセグメントクリックで `"group" = '値'` の where= を地図へ適用する
+export function parseKascStatValue(parts, line = null) {
+  const stat = { layer: parts[0] || "", group: "", value: "count", kind: "", agg: "", title: "", desc: "", line };
+  for (const tok of parts.slice(1)) {
+    if (!tok) continue;
+    const kv = /^(group|value|kind|agg|title|desc)\s*=\s*(.+)$/i.exec(tok);
+    if (!kv) continue;
+    const key = kv[1].toLowerCase();
+    const val = kv[2].trim();
+    if (key === "kind") { if (/^(kpi|bar|pie)$/i.test(val)) stat.kind = val.toLowerCase(); }
+    else if (key === "agg") { if (/^(count|sum|avg|min|max)$/i.test(val)) stat.agg = val.toLowerCase(); }
+    else stat[key] = val;
+  }
+  // kind 既定: group= ありなら棒グラフ、無しなら KPI 単発表示
+  if (!stat.kind) stat.kind = stat.group ? "bar" : "kpi";
+  return stat;
+}
+
+// search: 行の値をパースする(#125)。
+// `search:<レイヤー名|all> | attr=属性名 | ph=プレースホルダ | title=見出し`
+// ポータル画面の検索セクション。ベクター検索索引の値索引から即時絞り込みし、
+// 候補クリックでポータルを閉じて地物へズーム+選択する。all または空指定は
+// 全ベクターレイヤー横断(クエリ系は索引対象外のため SQL フィルター側で検索)
+export function parseKascSearchValue(parts, line = null) {
+  const search = { layer: "", attr: "", ph: "", title: "", line };
+  for (const tok of parts) {
+    if (!tok) continue;
+    const kv = /^(layer|layers|attr|ph|placeholder|title)\s*=\s*(.+)$/i.exec(tok);
+    if (kv) {
+      const key = kv[1].toLowerCase();
+      const value = kv[2].trim();
+      if (key === "ph" || key === "placeholder") search.ph = value;
+      else if (key === "layers") search.layer = value;
+      else search[key] = value;
+      continue;
+    }
+    if (!search.layer) search.layer = tok;
+  }
+  return search;
+}
+
+// Markdown の最小レンダラ(ai-chat.js から移設。news: の本文描画でも使う)。
+// XSS 防止のため先にHTMLエスケープしてから
+// 見出し・箇条書き・太字・インラインコード・リンクのみ装飾する
+function escapeHtmlLite(value) {
+  return String(value ?? "").replace(/[&<>"']/g,
+    ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]);
+}
+export function renderMarkdownLite(markdown) {
+  const inline = text => String(text)
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (match, label, url) => {
+      // javascript: 等のスキームを除外し http(s)・相対パスのみリンク化する
+      if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(url) && !/^https?:/i.test(url)) return label;
+      return `<a href="${url}" target="_blank" rel="noopener">${label}</a>`;
+    });
+  const out = [];
+  let inList = false;
+  for (const raw of escapeHtmlLite(String(markdown ?? "")).split(/\r?\n/)) {
+    const heading = /^(#{1,4})\s+(.*)$/.exec(raw);
+    if (heading) {
+      if (inList) { out.push("</ul>"); inList = false; }
+      const level = Math.min(heading[1].length + 2, 6);
+      out.push(`<h${level}>${inline(heading[2])}</h${level}>`);
+      continue;
+    }
+    const bullet = /^[-*]\s+(.*)$/.exec(raw);
+    if (bullet) {
+      if (!inList) { out.push("<ul>"); inList = true; }
+      out.push(`<li>${inline(bullet[1])}</li>`);
+      continue;
+    }
+    if (inList) { out.push("</ul>"); inList = false; }
+    if (raw.trim()) out.push(`<p>${inline(raw)}</p>`);
+  }
+  if (inList) out.push("</ul>");
+  return out.join("");
+}
+
+// news: ファイル本文(JSON または FrontMatter 付き Markdown 一覧)を記事配列へ
+// 正規化する(#128)。ソート・件数制限は呼び出し側で行う。
+// JSON: `[{date,title,body,link,view,feature,tags,importance,format}]`
+//   (単一オブジェクト・{items|news|articles:[…]} も可。tags は配列 or カンマ区切り。
+//    body は既定 HTML、format:"md" で Markdown として描画)
+// Markdown: `---` 行で区切った FrontMatter ブロック列。
+//   非空行がすべて `key: value` の塊をメタ情報、次の塊を本文(Markdown)とする。
+//   メタのみの塊は本文なし記事、メタ無しの塊は本文のみの記事になる。
+// 戻り値: [{date,title,body,format:"html"|"md",link,view,feature,tags[],importance}]
+// JSON らしき先頭([/{)でパース失敗した場合はエラーを投げて表面化する
+export function parseKascNewsArticles(text) {
+  const trimmed = String(text || "").trim();
+  if (!trimmed) return [];
+  const normalize = (raw, defaultFormat = "html") => {
+    const src = raw && typeof raw === "object" ? raw : {};
+    // Re:Earth CMS アイテム({id,fields:{key:value|[{key,value}]},createdAt,…})は
+    // fields をトップレベルへ展開して記事フィールドとして解釈する。news: の
+    // src に CMS Public API のモデル URL(.json)を指定すれば、CMS 管理画面から
+    // お知らせを更新できる。値が {value:…} 形なら value を取り出す
+    const a = (() => {
+      const f = src.fields;
+      if (!f || typeof f !== "object") return src;
+      const flat = {};
+      const unwrap = v => (v && typeof v === "object" && "value" in v ? v.value : v);
+      if (Array.isArray(f)) {
+        f.forEach(x => { if (x && x.key != null) flat[x.key] = unwrap(x.value); });
+      } else {
+        for (const k of Object.keys(f)) flat[k] = unwrap(f[k]);
+      }
+      return Object.assign({}, flat, src);
+    })();
+    const tags = Array.isArray(a.tags)
+      ? a.tags.map(s => String(s).trim()).filter(Boolean)
+      : String(a.tags || "").split(/[,;]/).map(s => s.trim()).filter(Boolean);
+    const fmt = /^(md|markdown)$/i.test(String(a.format || a.bodyFormat || ""))
+      ? "md" : defaultFormat;
+    return {
+      date: String(a.date || a.published || a.datetime || a.createdAt || a.updatedAt || "").trim(),
+      title: String(a.title || a.name || "").trim(),
+      body: String(a.body ?? a.description ?? a.desc ?? "").trim(),
+      format: fmt,
+      link: String(a.link || a.url || a.href || "").trim(),
+      view: String(a.view || "").trim(),
+      feature: String(a.feature || "").trim(),
+      tags,
+      importance: String(a.importance || a.severity || "").trim(),
+    };
+  };
+  if (trimmed[0] === "[" || trimmed[0] === "{") {
+    const data = JSON.parse(trimmed);
+    const list = Array.isArray(data) ? data
+      : Array.isArray(data?.items) ? data.items
+      : Array.isArray(data?.news) ? data.news
+      : Array.isArray(data?.articles) ? data.articles
+      : [data];
+    return list.map(a => normalize(a)).filter(a => a.title || a.body);
+  }
+  // FrontMatter 付き Markdown 一覧。`---` 行で分割し、key:value のみの塊を
+  // メタ情報、直後の塊を本文とする
+  const articles = [];
+  let meta = null;
+  const parseMeta = chunk => {
+    const m = {};
+    for (const l of chunk.split(/\r?\n/)) {
+      const kv = /^\s*([A-Za-z_][\w-]*)\s*:\s*(.*)$/.exec(l);
+      if (!kv) continue;
+      const key = kv[1].toLowerCase();
+      let value = kv[2].trim().replace(/^["']|["']$/g, "");
+      if (key === "tags") {
+        value = value.replace(/^\[|\]$/g, "");
+        m.tags = value.split(/[,;]/).map(s => s.trim().replace(/^["']|["']$/g, "")).filter(Boolean);
+      } else {
+        m[key] = value;
+      }
+    }
+    return m;
+  };
+  for (const chunk of trimmed.split(/^---\s*$/m)) {
+    const part = chunk.trim();
+    if (!part) continue;
+    const isMeta = part.split(/\r?\n/).every(l => /^\s*[A-Za-z_][\w-]*\s*:/.test(l));
+    if (isMeta) {
+      if (meta) articles.push(meta); // メタ連続は前のを本文なし記事として確定
+      meta = parseMeta(part);
+      continue;
+    }
+    articles.push({ ...(meta || {}), body: part });
+    meta = null;
+  }
+  if (meta) articles.push(meta);
+  return articles.map(a => normalize(a, "md")).filter(a => a.title || a.body);
 }
 
 // #theme-select の中身を構築する。themes が空なら非表示化
@@ -1573,6 +1926,20 @@ export function hasUrlView(view) {
   return Number.isFinite(view?.latitude) && Number.isFinite(view?.longitude);
 }
 
+// ディープリンク用 URL パラメータ(#124): ビュー適用・地物フォーカス・即席フィルタ。
+// 選択子なのでクエリ側(?view=/&feature=/&where=)に置き、カメラ同様ハッシュ側も
+// フォールバックで読む。各値は未指定時 ""（view= は .kasc の view: 名、
+// feature= は <レイヤ>/<属性>=<値>、where= は <レイヤ名/>?式）
+export function parseUrlDeepLink(source = window.location.search + window.location.hash) {
+  const hashIndex = source.indexOf("#");
+  const searchPart = hashIndex >= 0 ? source.slice(0, hashIndex) : source;
+  const hashPart = hashIndex >= 0 ? source.slice(hashIndex + 1) : "";
+  const searchParams = new URLSearchParams(searchPart.startsWith("?") ? searchPart.slice(1) : searchPart);
+  const hashParams = new URLSearchParams(hashPart);
+  const get = name => (hashParams.get(name) ?? searchParams.get(name) ?? "").trim();
+  return { view: get("view"), feature: get("feature"), where: get("where") };
+}
+
 // 現在のクエリ（project= 等）を保ちつつビュー状態をハッシュへ反映する。
 // パラメータをクエリ側へ置いて来た古い URL 形式もハッシュ側へ寄せる
 export function writeUrlView(view, projectId) {
@@ -1603,13 +1970,18 @@ export function urlViewHash(view = {}) {
 }
 
 // 正典の共有 URL を組み立てる: ビュー状態はハッシュ、選択子はクエリ。
-// opts: { projectId, kascUrl（指定時 projectId より優先）, engine, base }。
+// opts: { projectId, kascUrl（指定時 projectId より優先）, engine, base,
+//         view（view: 名）, feature（<レイヤ>/<属性>=<値>）, where（<レイヤ名/>?式）}。
+// view/feature/where はディープリンク(#124)としてクエリ側へ付加する。
 // base 省略時は現在の origin+pathname（エンジン自身の URL）
-export function buildViewUrl(view = {}, { projectId, kascUrl, engine, base } = {}) {
+export function buildViewUrl(view = {}, { projectId, kascUrl, engine, base, view: viewName, feature, where } = {}) {
   const params = new URLSearchParams();
   if (engine) params.set("engine", engine);
   if (kascUrl) params.set("kasc", kascUrl);
   else if (projectId) params.set("project", projectId);
+  if (viewName) params.set("view", viewName);
+  if (feature) params.set("feature", feature);
+  if (where) params.set("where", where);
   const search = params.toString();
   const hash = urlViewHash(view);
   return `${base || `${window.location.origin}${window.location.pathname}`}${search ? `?${search}` : ""}${hash ? `#${hash}` : ""}`;
