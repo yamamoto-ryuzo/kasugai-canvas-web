@@ -1,6 +1,6 @@
 // KASUGAI Canvas — MapLibre フロント
 // .kasc プレイヤーモード: projects/<id>/ の .kasc+DATA/ を MapLibre GL で再生する
-import * as maplibregl from "https://cdn.jsdelivr.net/npm/maplibre-gl@6.16.0/dist/maplibre-gl.mjs";
+import * as maplibregl from "https://cdn.jsdelivr.net/npm/maplibre-gl@6.18.0/dist/maplibre-gl.mjs";
 import { loadKascProject, NON_LAYER_TYPES, parseKasc, resolveKascUrl, camToZoom, zoomToCamHeightView, heightToViewZoom, viewZoomToHeight, groundCenterFromCam, camFromGroundCenter, parseUrlView, hasUrlView, writeUrlView, geojsonExtent, splitKascTitle, appendGroupedTitleOptions, syncBasemapList, sanitizeAttributionFragment, layerAttribution, loadKascInfoContent, buildWmsTileTemplate, buildWmtsTileTemplate, rewriteKascVisibility, rewriteKascLineVisibility, rewriteKascLineOpt, themeShowSet, kascTitleInTheme, normKascTitle, fillThemeSelect, loadKascBookmarks, parseQgisBookmarksXml, qgisBookmarkToCam, downloadQgisBookmarksXml, downloadKascCamLines, projectsBaseUrl, applyPanelTitle, defaultPointRadius, cssColorAlpha, kascOptOn, parseImageOverlay, kascScaleZoomRange, applyKascGroupStates } from "../shared/kasc.js";
 import { initI18n, t, applyI18n } from "../shared/i18n.js";
 import { createKascPortal } from "../shared/portal.js";
@@ -928,6 +928,12 @@ function buildLayerRow(entry, exclusive, radioName) {
     });
     tg.setAttribute("aria-expanded", String(!item._legendCollapsed));
     row.append(tg);
+  } else {
+    // トグル無し行も同幅のスペーサを置き、チェックボックスの左位置を全行で揃える
+    const sp = document.createElement("span");
+    sp.className = "layer-legend-toggle-spacer";
+    sp.setAttribute("aria-hidden", "true");
+    row.append(sp);
   }
 
   const cb = document.createElement("input");
@@ -2109,9 +2115,17 @@ document.querySelector("#basemap-toggle").addEventListener("click", e => {
   });
   document.querySelector("#navigation-toggle")?.addEventListener("click", e => {
     const bar = e.currentTarget.closest(".navigation-toolbar");
-    const collapsed = bar.classList.toggle("collapsed");
+    if (bar.classList.contains("collapsed")) {
+      bar.classList.remove("collapsed");
+    } else if (bar.classList.contains("compass-only")) {
+      bar.classList.replace("compass-only", "collapsed");
+    } else {
+      bar.classList.add("compass-only");
+    }
+    const collapsed = bar.classList.contains("collapsed");
     e.currentTarget.textContent = collapsed ? "+" : "−";
     e.currentTarget.setAttribute("aria-label", collapsed ? "展開" : "最小化");
+    e.currentTarget.title = collapsed ? "展開" : "最小化";
   });
 }
 

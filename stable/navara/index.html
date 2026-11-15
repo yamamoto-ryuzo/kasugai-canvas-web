@@ -37,6 +37,7 @@
     "@navaramap/engine": "../vendor/navara/@navaramap/engine/navara_wasm.js",
     "@navaramap/engine-api": "../vendor/navara/@navaramap/engine-api/navara_wasm_api.js",
     "@navaramap/engine-worker": "../vendor/navara/@navaramap/engine-worker/navara_wasm_worker.js",
+    "@navaramap/engine-font-worker": "../vendor/navara/@navaramap/engine-font-worker/navara_wasm_font_worker.js",
     "@navaramap/three-default-plugin": "../vendor/navara/@navaramap/three-default-plugin/dist/index.js",
     "@navaramap/three-default-descs": "../vendor/navara/@navaramap/three-default-descs/dist/index.js"
   }
@@ -92,6 +93,11 @@
   .display-subpane .set-row input[type=range] { width: 100%; box-sizing: border-box; margin: 2px 0; }
   /* 効果ペインのスライダー行: 名前＋レンジ＋値の1行レイアウト */
   .display-subpane .set-row.fx { display: flex; align-items: center; gap: 6px; }
+  /* .tab-pane button:not(.tab)（濃緑）に負けないよう !important 付き（maplibre 版と同じ方式） */
+  .exagg-reset { min-height: 24px !important; padding: 1px 8px !important;
+    border: 1px solid rgba(49,86,79,.4) !important; border-radius: 4px !important;
+    background: rgba(255,255,255,.7) !important; color: #31564f !important; font-size: 12px !important;
+    vertical-align: middle; }
   .display-subpane .fx-name { flex: 0 0 auto; white-space: nowrap; }
   .display-subpane .fx-val { flex: 0 0 3.4em; text-align: right; font-size: 12px; color: #52636d; }
   .display-subpane .set-row.fx input[type=range] { flex: 1; min-width: 0; width: auto; }
@@ -119,10 +125,14 @@
     border: 0 !important; background: transparent !important; color: #52636d !important; font-size: 15px !important; line-height: 1; cursor: pointer; }
   .layer-legend-toggle { width: 14px; min-width: 14px !important; min-height: 16px !important; padding: 0 !important;
     border: 0 !important; background: transparent !important; color: #52636d !important; font-size: 11px !important; line-height: 1; cursor: pointer; }
+  /* span スペーサは .layer-row span{flex:1} に負けるため scoped 指定 */
+  .layer-row > .layer-legend-toggle-spacer { flex: 0 0 auto; width: 14px; min-height: 16px; }
   .layer-focus, .layer-filter { width: 24px; min-width: 24px !important; min-height: 16px !important; padding: 0 !important;
     border: 0 !important; background: transparent !important; color: #1d2b35 !important; font-size: 15px !important; line-height: 1; cursor: pointer; opacity: .7; }
   .layer-focus:hover, .layer-filter:hover { opacity: 1; }
-  .layer-group-children { margin-left: 14px; }
+  .layer-group-children { margin-left: 6px; }
+  /* グループ無し行もグループ子行と同じチェックボックス列に揃える */
+  #layers > .layer-item { margin-left: 6px; }
   .exclusive-badge { padding: 1px 4px; border-radius: 3px; background: #7b9ee8; color: #fff; font-size: 10px; font-weight: 700; margin-left: 2px; }
   .layer-legend-items { margin-left: 22px; }
   .legend-row { display: flex; align-items: center; gap: 6px; min-height: 16px; line-height: 1; font-size: 90%; }
@@ -227,6 +237,7 @@
     background: linear-gradient(#fff, #f1f4f8); color: #263643; cursor: pointer; font-size: 13px; }
   .navigation-toolbar button:hover { background: #e7f3f0; }
   .navigation-toolbar.collapsed button:not(.navigation-toggle) { display: none; }
+  .navigation-toolbar.compass-only > :not(.nav-item):not(.navigation-toggle) { display: none; }
   .navigation-toolbar.collapsed { width: 40px; height: 40px; padding: 7px; box-sizing: border-box; gap: 0; }
   .navigation-toolbar.collapsed .navigation-toggle { width: 26px; min-width: 26px; min-height: 26px; padding: 1px 4px; }
   .navigation-toggle { font-size: 17px !important; line-height: 1; }
@@ -367,6 +378,7 @@
     </div>
     <div class="display-subpane" id="display-terrain-panel">
       <label class="set-row"><input id="nv-terrain" type="checkbox" checked /> 地形（Re:Earth Terrain）</label>
+      <label class="set-row">地形の誇張 ×<input id="nv-terrain-exagg" type="number" min="0" step="0.1" value="1" style="width: 90px;" /> <button id="nv-terrain-exagg-reset" class="exagg-reset" type="button" title="リセット">↺</button></label>
     </div>
     <div class="display-subpane" id="display-general-panel" hidden>
       <label class="set-row"><input id="display-minimap" type="checkbox" /><span data-i18n="display.minimap"> ミニマップを表示</span></label>

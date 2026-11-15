@@ -86,7 +86,8 @@ const layerEntries = [];   // {item, sid, src, layer}
 const baseEntries = [];    // 選択中ベースマップ {item, src, layer}
 const themes = [];
 let baseDocs = [], basemapSrc = null, basemapLayer = null;
-let terrainSrc = null, terrainLayer = null;
+let terrainSrc = null, terrainLayer = null, terrainDesc = null;
+let terrainExaggeration = 1;
 let currentProjectId = "", lastBaseUrl = "", lastKascRaw = "", lastKascUrl = "", currentThemes = [];
 let currentCams = [], currentLegends = [], currentDefaultStyles = null;
 let lastCam = { lng: 139.767, lat: 35.681, height: 3000, heading: 0, pitch: -45, roll: 0 };
@@ -297,6 +298,12 @@ function buildLayerRow(entry, exclusive, radioName) {
     });
     tg.setAttribute("aria-expanded", String(!item._legendCollapsed));
     row.append(tg);
+  } else {
+    // トグル無し行も同幅のスペーサを置き、チェックボックスの左位置を全行で揃える
+    const sp = document.createElement("span");
+    sp.className = "layer-legend-toggle-spacer";
+    sp.setAttribute("aria-hidden", "true");
+    row.append(sp);
   }
 
   const cb = document.createElement("input");
@@ -620,18 +627,31 @@ panel.basemapSelect?.addEventListener("change", () => applyBasemap(Number(panel.
 
 // ---- 地形・写実 ----
 async function applyTerrain(on) {
-  if (terrainLayer) { try { terrainLayer.delete(); terrainSrc.delete(); } catch (_) {} terrainLayer = terrainSrc = null; }
+  if (terrainLayer) { try { terrainLayer.delete(); terrainSrc.delete(); } catch (_) {} terrainLayer = terrainSrc = terrainDesc = null; }
   if (!on) return;
   try {
     terrainSrc = view.addSource({ type: "quantized-mesh", url: TERRAIN_URL, maxZoom: 15, requestVertexNormals: true });
-    terrainLayer = view.addLayer({ type: "terrain", source: terrainSrc, terrain: { castShadow: true, receiveShadow: true } });
+    terrainDesc = { type: "terrain", source: terrainSrc,
+      terrain: { castShadow: true, receiveShadow: true,
+        ...(terrainExaggeration !== 1 ? { exaggeration: terrainExaggeration } : {}) } };
+    terrainLayer = view.addLayer(terrainDesc);
   } catch (e) {
     console.warn("terrain", e);
     try { terrainSrc?.delete(); } catch (_) {}
-    terrainLayer = terrainSrc = null;
+    terrainLayer = terrainSrc = terrainDesc = null;
     // 既定 ON のため失敗時はチェック状態も戻して UI と実態を合わせる
     const c = $("#nv-terrain"); if (c) c.checked = false;
   }
+}
+// 垂直誇張は Navara 0.3.x の TerrainMaterial.exaggeration で実現
+// (maplibre の terrain exaggeration・Cesium の verticalExaggeration と同等)
+function applyTerrainExaggeration(v) {
+  terrainExaggeration = v;
+  if (!terrainLayer || !terrainDesc) return;
+  try {
+    terrainDesc = { ...terrainDesc, terrain: { ...terrainDesc.terrain, exaggeration: v } };
+    terrainLayer.update(terrainDesc);
+  } catch (e) { console.warn("terrain exaggeration", e); }
 }
 let manualLights = [], manualSun = null, shadowOn = false;
 // ---- Navara 固有の光・エフェクト設定（表示タブ「効果」ペイン） ----
@@ -827,13 +847,14 @@ async function addKascLayer(item, baseUrl) {
     const gd = ds.polygon ? resolveDefaultPolygonStyle({}, ds.polygon, ds.line, {}) : null;
     // QML スタイル: 代表地物の spec からレイヤ既定色を取る（Navara はレイヤ単位マテリアル）
     let fillCss = item.opts?.fill, strokeCss = item.opts?.stroke || item.opts?.color, markerCss = item.opts?.marker_color;
+    let lineDash = null, lineCap = null;
     if (item.opts?.style) {
       try {
         const compiled = await loadCompiledQml(item.opts.style, baseUrl);
         item._qml = compiled;
         const spec = compiled.evaluate?.(item._geojson?.features?.[0]?.properties || {});
         const s = specToStyle(spec);
-        if (s) { fillCss ||= s.fill; strokeCss ||= s.stroke; markerCss ||= s.markerColor; }
+        if (s) { fillCss ||= s.fill; strokeCss ||= s.stroke; markerCss ||= s.markerColor; lineDash = s.dash; lineCap = s.cap; }
       } catch (_) {}
     }
     fillCss ||= gd?.fill;
@@ -848,9 +869,14 @@ async function addKascLayer(item, baseUrl) {
     const polyLineO = oNum(item.opts?.stroke_opacity) ?? oNum(item.opts?.opacity) ?? aOf(strokeCss) ?? gd?.strokeOpacity ?? ld?.opacity ?? 1;
     const pointO = oNum(item.opts?.opacity) ?? aOf(markerCss) ?? pd?.opacity ?? 1;
     const src = view.addSource({ type: "geojson", data: whereFilteredGeojson(item), tiled: true });
+    // 破線は Navara 0.3.x の PolylineMaterial.dashArray（線幅倍率）で実現。
+    // QML の dash は px 長なので線幅で割って倍率へ換算する
+    const polyWidth = Number(item.opts?.width) || gd?.strokeWidth || ld?.width || 3;
     const desc = { type: "vector", source: src,
       polygon: { color: css2hex(fillCss || "#3d7dd9"), clampToGround: true, opacity: polyFillO, transparent: polyFillO < 1 },
-      polyline: { color: css2hex(strokeCss || "#2c5ea8"), width: Number(item.opts?.width) || gd?.strokeWidth || ld?.width || 3, clampToGround: true, opacity: polyLineO, transparent: polyLineO < 1 },
+      polyline: { color: css2hex(strokeCss || "#2c5ea8"), width: polyWidth, clampToGround: true, opacity: polyLineO, transparent: polyLineO < 1,
+        ...(lineCap ? { cap: lineCap } : {}),
+        ...(lineDash?.length ? { dashArray: Float32Array.from(lineDash.map(d => d / polyWidth)) } : {}) },
       point: { color: css2hex(markerCss || "#d94f3d"), clampToGround: true, opacity: pointO, transparent: pointO < 1 } };
     const layer = view.addLayer(desc);
     return { src, layer, desc };
@@ -1016,6 +1042,16 @@ async function renderDoc(doc, baseUrl, presetBase) {
   await applyBasemap(noneSel ? -1 : initIdx);
 
   await renderLayers(doc, baseUrl);
+
+  // terrain: 行の垂直誇張(#60)。テレイン ON 時のみ即時反映、入力欄は常時同期
+  try {
+    const ex = Number(doc.terrain?.opts?.exaggeration);
+    if (Number.isFinite(ex) && ex >= 0 && ex !== 1) {
+      const inp = $("#nv-terrain-exagg");
+      if (inp) inp.value = String(ex);
+      applyTerrainExaggeration(ex);
+    }
+  } catch (_) {}
 
   // テーマ
   currentThemes = doc.themes || [];
@@ -1562,6 +1598,15 @@ configureFollow({
 
   // 表示タブの Navara 固有コントロール（index.html 側の静的マークアップへバインド）
   $("#nv-terrain")?.addEventListener("change", e => applyTerrain(e.target.checked));
+  const exInp = $("#nv-terrain-exagg");
+  exInp?.addEventListener("change", () => {
+    const v = Number(exInp.value);
+    if (Number.isFinite(v) && v >= 0) applyTerrainExaggeration(v);
+  });
+  $("#nv-terrain-exagg-reset")?.addEventListener("click", () => {
+    if (exInp) exInp.value = "1";
+    applyTerrainExaggeration(1);
+  });
   $("#nv-photoreal")?.addEventListener("change", e => applyPhotoreal(e.target.checked));
   $("#nv-shadow")?.addEventListener("change", e => { shadowOn = e.target.checked; applyShadow(); });
   // 光・エフェクト系の Navara 固有コントロールをバインド＋初期同期
@@ -1597,7 +1642,21 @@ configureFollow({
     for (const { item } of layerEntries) { const e = item._geojson && geojsonExtent(item._geojson); if (!e) continue; env = env ? { west: Math.min(env.west, e.west), south: Math.min(env.south, e.south), east: Math.max(env.east, e.east), north: Math.max(env.north, e.north) } : e; }
     focusExtent(env);
   });
-  $("#navigation-toggle")?.addEventListener("click", () => document.querySelector(".navigation-toolbar")?.classList.toggle("collapsed"));
+  $("#navigation-toggle")?.addEventListener("click", e => {
+    const bar = document.querySelector(".navigation-toolbar");
+    if (!bar) return;
+    if (bar.classList.contains("collapsed")) {
+      bar.classList.remove("collapsed");
+    } else if (bar.classList.contains("compass-only")) {
+      bar.classList.replace("compass-only", "collapsed");
+    } else {
+      bar.classList.add("compass-only");
+    }
+    const collapsed = bar.classList.contains("collapsed");
+    e.currentTarget.textContent = collapsed ? "+" : "−";
+    e.currentTarget.setAttribute("aria-label", collapsed ? "展開" : "最小化");
+    e.currentTarget.title = collapsed ? "展開" : "最小化";
+  });
   $("#basemap-toggle")?.addEventListener("click", () => panel.basemap?.classList.toggle("collapsed"));
   $("#basemap-globe")?.addEventListener("click", () => open(`https://earth.google.com/web/@${lastCam.lat},${lastCam.lng},${lastCam.height}d`, "_blank"));
 

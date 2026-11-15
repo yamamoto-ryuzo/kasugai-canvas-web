@@ -2121,9 +2121,10 @@ function renderLayerList() {
           const legendMulti = !!legendEntries && legendEntries.length > 1;
           const legendCollapsed = legendMulti && (collapsedLayerLegends.has(layer.id)
             || (legendEntries.length >= LEGEND_AUTO_COLLAPSE_MIN && !expandedLayerLegends.has(layer.id)));
+          // トグル無し行も同幅のスペーサを置き、チェックボックスの左位置を全行で揃える
           const legendToggle = legendMulti
             ? `<button class="layer-legend-toggle" type="button" data-layer-id="${escapeHtml(layer.id)}" aria-label="${escapeHtml(t("layer.legendToggle"))}" aria-expanded="${!legendCollapsed}">${legendCollapsed ? "▸" : "▾"}</button>`
-            : "";
+            : `<span class="layer-legend-toggle-spacer" aria-hidden="true"></span>`;
           const inlineSwatch = legendEntries && !legendMulti && legendEntries[0].desc
             ? `<img class="legend-swatch" src="${buildLegendSwatchDataUrl(legendEntries[0].desc)}" alt="">`
             : "";
@@ -9259,7 +9260,14 @@ function setupEvents() {
 
   document.querySelector("#navigation-toggle").addEventListener("click", event => {
     const toolbar = document.querySelector(".navigation-toolbar");
-    const collapsed = toolbar.classList.toggle("collapsed");
+    if (toolbar.classList.contains("collapsed")) {
+      toolbar.classList.remove("collapsed");
+    } else if (toolbar.classList.contains("compass-only")) {
+      toolbar.classList.replace("compass-only", "collapsed");
+    } else {
+      toolbar.classList.add("compass-only");
+    }
+    const collapsed = toolbar.classList.contains("collapsed");
     event.currentTarget.textContent = collapsed ? "+" : "−";
     event.currentTarget.setAttribute("aria-label", collapsed ? t("common.expand") : t("common.minimize"));
   });
