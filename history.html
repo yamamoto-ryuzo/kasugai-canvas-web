@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>KASUGAI Canvas Web — チャンネル履歴</title>
+<style>
+  body{font-family:system-ui,-apple-system,sans-serif;margin:0;color:#1f2328;background:#fff}
+  header{background:#0d1117;color:#fff;padding:16px 24px}
+  header h1{font-size:18px;margin:0 0 6px}
+  header a{color:#9ecbff}
+  main{max-width:960px;margin:0 auto;padding:24px}
+  h2{font-size:16px;border-bottom:1px solid #d0d7de;padding-bottom:4px}
+  h3{font-size:15px;margin:20px 0 6px}
+  .badge{display:inline-block;padding:6px 14px;border-radius:20px;color:#fff;
+         font-weight:600;margin:4px 12px 4px 0;text-decoration:none}
+  .badge small{font-weight:400;opacity:.85}
+  .badge.default{outline:3px solid #0969da;outline-offset:2px}
+  .meta{color:#57606a;font-size:13px}
+  table{border-collapse:collapse;width:100%;margin:8px 0 24px}
+  th,td{border:1px solid #d0d7de;padding:6px 10px;font-size:14px;text-align:left}
+  th{background:#f6f8fa}
+  code{background:#f6f8fa;padding:1px 5px;border-radius:4px}
+  .error{background:#ffebe9;border:1px solid #ff8182;padding:10px;border-radius:6px}
+</style>
+</head>
+<body>
+<header>
+  <h1>KASUGAI Canvas Web — チャンネル履歴・バージョン</h1>
+  <a href="./">トップ</a> / <a href="./guide/">ガイド</a> /
+  <a href="https://github.com/yamamoto-ryuzo/kasugai-canvas-web">GitHub</a>
+</header>
+<main>
+  <h2>現在バージョン</h2>
+  <div id="badges">読み込み中…</div>
+  <p id="diff" class="meta"></p>
+
+  <h2>デプロイ履歴</h2>
+  <div id="history">読み込み中…</div>
+</main>
+<script>
+'use strict';
+const CHANGELOG='https://github.com/yamamoto-ryuzo/kasugai_canvas/blob/main/CHANGELOG.md';
+const ORDER=['stable','unstable','V6'];
+const COLOR={stable:'#2da44e',unstable:'#bf8700',V6:'#57606a'};
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+async function getJSON(p){const r=await fetch(p);if(!r.ok)throw new Error(p+' -> HTTP '+r.status);return r.json();}
+function parseVer(v){const m=/^(\d+)\.(\d+)\.(\d+)/.exec(v);return m?[+m[1],+m[2],+m[3]]:null;}
+function cmpVer(a,b){for(let i=0;i<3;i++){if(a[i]!==b[i])return a[i]-b[i];}return 0;}
+function fmtDate(iso){const d=new Date(iso);return isNaN(d)?iso:d.toLocaleString('ja-JP');}
+function diffText(s,u){
+  const sv=parseVer(s),uv=parseVer(u);
+  if(!sv||!uv)return 'バージョン形式を比較できません。';
+  const d=cmpVer(uv,sv);
+  if(d===0)return 'stable と unstable は同一バージョン (v'+esc(s)+') です。';
+  const hi=d>0?uv:sv, lo=d>0?sv:uv;
+  let part;
+  if(hi[0]!==lo[0])part='major +'+(hi[0]-lo[0]);
+  else if(hi[1]!==lo[1])part='minor +'+(hi[1]-lo[1]);
+  else part='patch +'+(hi[2]-lo[2]);
+  const base=(d>0?'unstable は stable より先行しています':'unstable は stable より遅れています');
+  return base+'（差分: '+part+', v'+esc(lo.join('.'))+' → v'+esc(hi.join('.'))+'）。'+
+         '増えた機能・修正は <a href="'+CHANGELOG+'">kasugai_canvas CHANGELOG</a> の '+
+         'v'+esc(hi.join('.'))+' 節を参照してください。';
+}
+
+(async()=>{
+  const [ch,hist]=await Promise.all([getJSON('channels.json'),getJSON('history.json')]);
+  let bh='';
+  for(const c of ORDER){
+    const v=ch[c];
+    if(!v)continue;
+    const last=(hist.channels[c]||[])[0];
+    bh+='<a class="badge'+(ch.default===c?' default':'')+'" style="background:'+(COLOR[c]||'#57606a')+
+        '" href="'+esc(c)+'/version.json" title="version.json">'+esc(c)+' v'+esc(v)+
+        (ch.default===c?' <small>既定</small>':'')+'</a>';
+    if(last)bh+='<span class="meta">最終デプロイ: '+esc(fmtDate(last.deployed_at))+'</span><br>';
+  }
+  document.getElementById('badges').innerHTML=bh;
+  if(ch.stable&&ch.unstable)document.getElementById('diff').innerHTML=diffText(ch.stable,ch.unstable);
+  let h='';
+  for(const c of ORDER){
+    const rows=hist.channels[c]||[];
+    h+='<h3>'+esc(c)+' <span class="meta">'+rows.length+' 件</span></h3>';
+    if(!rows.length){h+='<p class="meta">履歴なし</p>';continue;}
+    h+='<table><tr><th>デプロイ日時</th><th>バージョン</th><th>コミット</th></tr>';
+    for(const r of rows){
+      h+='<tr><td>'+esc(fmtDate(r.deployed_at))+'</td><td>v'+esc(r.version)+'</td>'+
+         '<td><a href="'+esc(r.commit_url)+'"><code>'+esc(r.commit.slice(0,7))+'</code></a> '+
+         esc(r.message)+'</td></tr>';
+    }
+    h+='</table>';
+  }
+  document.getElementById('history').innerHTML=h;
+})().catch(e=>{
+  document.getElementById('badges').innerHTML='';
+  document.getElementById('history').innerHTML=
+    '<div class="error">履歴の読み込みに失敗しました: '+esc(e.message)+'</div>';
+});
+</script>
+</body>
+</html>

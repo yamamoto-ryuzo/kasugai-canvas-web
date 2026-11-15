@@ -18,7 +18,10 @@ KASUGAI Canvas 未インストール環境でもブラウザ再生できるよ�
 
 - **公開 URL**: `https://yamamoto-ryuzo.github.io/kasugai-canvas-web/`（`stable/` へリダイレクト）
 - **起動形式**: `…/kasugai-canvas-web/<stage>/<engine>/?kasc=<url>`
-- **ステージ**: `stable/`(安定版・既定) / `unstable/`(開発版)
+- **ステージ**: `stable/`(安定版・既定) / `unstable/`(開発版) / `V6/`(固定スナップショット)
+- **チャンネル履歴**: <https://yamamoto-ryuzo.github.io/kasugai-canvas-web/history.html>
+  （各チャンネルのバージョンバッジ・stable/unstable 差分・デプロイ履歴。
+  `history.json` はチャンネルへの push 時に Actions が git log から再生成する。`tools/generate_history.py` で手動再生成も可）
 
 ## 正本と更新ルール
 

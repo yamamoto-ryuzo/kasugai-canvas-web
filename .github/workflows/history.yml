@@ -1,0 +1,39 @@
+# チャンネル(stable/, unstable/, V6/)へのデプロイ push を検知して
+# git log から history.json を再生成・コミットする。
+# history.json 自体のコミットは paths フィルタで再トリガーされない。
+name: Regenerate deploy history
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "stable/**"
+      - "unstable/**"
+      - "V6/**"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  history:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate history.json
+        run: python3 tools/generate_history.py
+
+      - name: Commit history.json
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add history.json
+          if git diff --cached --quiet; then
+            echo "history.json unchanged"
+            exit 0
+          fi
+          git commit -m "chore: regenerate history.json"
+          git push
