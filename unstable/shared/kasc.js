@@ -1,5 +1,5 @@
 // .kasc 行パーサー + プロジェクトローダー（エンジン非依存コア）
-// 行形式: 種類:タイトル|URL|出典|オプション名=値|on/off   （docs/inspector.html 参照）
+// 行形式: 種類:タイトル|URL|出典|オプション名=値|on/off   （docs/use/6-2-インスペクター.html 参照）
 // 対象: /projects/<id>/ の標準プロジェクト（外部登録プロジェクトの @parent 解決は未対応）
 import { backendBaseUrl, detectBackend, markBackendUnreachable } from "./backend.js";
 
@@ -45,9 +45,25 @@ function parseCamLine(parts) {
   return cam;
 }
 
+// .kasc 行の残りを `|` で分割する。`where=` は行の最終オプションという
+// 規約で、先頭が `where=` のフィールド以降は行末まで値として1フィールド
+// に結合する(式中に `|` を自由に含められる)。`view:` の `;where=` には
+// 適用されない(フィールド先頭が where= の場合のみ)
+export function splitKascTail(tail) {
+  const raw = String(tail ?? "").split("|");
+  for (let i = 0; i < raw.length; i++) {
+    if (/^\s*where\s*=/i.test(raw[i])) {
+      const fields = raw.slice(0, i).map(part => part.trim());
+      fields.push(raw.slice(i).join("|").trim());
+      return fields;
+    }
+  }
+  return raw.map(part => part.trim());
+}
+
 // .kasc テキストを構造化する。lines は生の解釈結果、rest は型別の便利マップ
 export function parseKasc(text) {
-  const doc = { layers: [], bases: [], cams: [], bookmarks: [], unsupported: [], background: null, info: null, legends: [], themes: [], groups: [], terrain: null, scene3d: null, lights: [], title: null, live: null, defaultStyles: { point: null, line: null, polygon: null } };
+  const doc = { layers: [], bases: [], cams: [], bookmarks: [], unsupported: [], background: null, info: null, legends: [], themes: [], groups: [], terrain: null, scene3d: null, lights: [], title: null, live: null, views: [], htmlSections: [], links: [], portal: null, defaultStyles: { point: null, line: null, polygon: null } };
   let order = 0;
   for (const rawLine of String(text || "").split(/\r?\n/)) {
     const line = rawLine.trim();
@@ -55,7 +71,11 @@ export function parseKasc(text) {
     const sep = line.indexOf(":");
     if (sep < 0) continue;
     const type = line.slice(0, sep).trim().toLowerCase();
-    const parts = line.slice(sep + 1).split("|").map(part => part.trim());
+    // sql:/ogrsql: はクエリ全体が行末までの値なので where= マージを適用しない
+    // (クエリ内の `| where=` は式ではなくクエリ本文の一部として残す)
+    const parts = (type === "sql" || type === "ogrsql")
+      ? line.slice(sep + 1).split("|").map(part => part.trim())
+      : splitKascTail(line.slice(sep + 1));
 
     if (type === "cam") {
       doc.cams.push(parseCamLine(parts));
@@ -102,6 +122,32 @@ export function parseKasc(text) {
       doc.themes.push({ name: parts[0] || "", layers, styles, line });
       continue;
     }
+    if (type === "view") {
+      // view:名前 | desc=説明 | img=画像 | cam=カメラ名 | base=背景名 |
+      //   レイヤタイトル[;style=DATA/x.qml][;where=式] [|タイトル…]（`*` で全表示）
+      // ポータル画面の目的別カード。表示＋スタイル＋フィルタ(+カメラ/背景)を
+      // まとめて適用する theme: の発展形
+      doc.views.push(parseKascViewValue(parts, line));
+      continue;
+    }
+    if (type === "html") {
+      // html:タイトル | インラインHTML または HTMLファイル/URL —
+      // ポータル画面へ描画するセクション。記述順に並ぶ
+      doc.htmlSections.push({ title: parts[0] || "", spec: line.slice(sep + 1).trim(), line });
+      continue;
+    }
+    if (type === "link") {
+      // link:名前 | url=https://… | desc=説明 | img=画像 —
+      // ポータル画面の外部リンクカード。view: カードと宣言順で同じグリッドに並ぶ
+      doc.links.push(parseKascLinkValue(parts, line));
+      continue;
+    }
+    if (type === "portal") {
+      // portal:on|off | title=ポータル見出し | open=auto|manual —
+      // 起動時・🏠ボタンで開くポータル画面の宣言。open=manual は自動表示しない
+      doc.portal = parseKascPortalValue(parts);
+      continue;
+    }
     if (type === "group") {
       // group: パス | expanded|collapsed — レイヤ一覧の折りたたみ初期状態。
       // geo_webview が QGIS のレイヤーツリー展開状態をそのまま出す
@@ -140,16 +186,17 @@ export function parseKasc(text) {
       continue;
     }
 
-    const item = classifyParts(type === "sql" ? parts.slice(1) : parts.slice(2), {
+    const isQueryLine = type === "sql" || type === "ogrsql";
+    const item = classifyParts(isQueryLine ? parts.slice(1) : parts.slice(2), {
       type,
       title: parts[0] || "",
-      url: type === "sql" ? parts.slice(1).join("|") : (parts[1] || ""),
+      url: isQueryLine ? parts.slice(1).join("|") : (parts[1] || ""),
       line,
     });
     // 行の出現順（doc.layers と doc.unsupported に分かれても元の並びを復元できる）
     item._idx = order++;
-    // sql: には出典スロットが無い（クエリ断片を attr へ誤記録しないよう必ず空にする）
-    if (type === "sql") item.attr = "";
+    // sql:/ogrsql: には出典スロットが無い（クエリ断片を attr へ誤記録しないよう必ず空にする）
+    if (isQueryLine) item.attr = "";
     if (type === "base") {
       // base: 表示名 | transparent | none は URL ではなくモード指定
       const mode = parts[1] && parts[1].toLowerCase();
@@ -158,7 +205,7 @@ export function parseKasc(text) {
       continue;
     }
     if (["xyz", "tile", "geojson", "layer", "geoparquet", "parquet", "flatgeobuf", "fgb",
-         "gpkg", "geopackage", "csv", "tsv", "duckdb", "sql", "wms", "wmts",
+         "gpkg", "geopackage", "csv", "tsv", "duckdb", "sql", "ogrsql", "wms", "wmts",
          "kml", "kmz", "wfs", "shp", "shapefile", "image"].includes(type)) {
       doc.layers.push(item);
       continue;
@@ -183,6 +230,7 @@ export const NON_LAYER_TYPES = new Set([
   "cam", "background", "info", "legend", "theme", "base", "legendnode",
   "bookmark", "cloud", "plugin", "yahooappid", "title",
   "group", "terrain", "scene3d", "light", "fly_geojson", "live",
+  "view", "html", "portal", "link",
 ]);
 
 // group: 行の初期折りたたみ状態をエンジンの expandedLayerGroups(Set) へ反映する。
@@ -273,6 +321,7 @@ export function parseImageOverlay(item) {
 // show は「表示するタイトル」の Set、null/undefined なら全表示(`*` 相当)。
 // レイヤ行は末尾の既存 on/off/true/false トークンを除去した上で、
 // 非表示なら `| off` を付与、表示ならフラグなし(既定=on)に戻す。
+// `where=` は行の最終オプションなので off は where= の手前へ置く。
 // 非レイヤ行・コメント・空行はそのまま返す。
 export function rewriteKascLineVisibility(line, show) {
   const trimmed = String(line || "").trim();
@@ -281,15 +330,17 @@ export function rewriteKascLineVisibility(line, show) {
   if (sep < 0) return line;
   const type = trimmed.slice(0, sep).trim().toLowerCase();
   if (NON_LAYER_TYPES.has(type)) return line;
-  const fields = trimmed.split("|").map(f => f.trim());
+  const fields = splitKascTail(trimmed);
   // タイトルは / 区切りの空白揺れを正規化して照合する。
   // show は正規化済みキー(フルパス+葉名)を含む前提
   const rawTitle = (fields[0].slice(fields[0].indexOf(":") + 1) || "").trim();
   const title = rawTitle.split("/").map(s => s.trim()).join("/");
   const leaf = title.split("/").pop();
   const visible = show == null ? true : (show.has(title) || show.has(leaf));
+  const whereField = /^where\s*=/i.test(fields[fields.length - 1] || "") ? fields.pop() : null;
   if (BOOL_RE.test(fields[fields.length - 1] || "")) fields.pop();
   if (!visible) fields.push("off");
+  if (whereField) fields.push(whereField);
   return fields.join(" | ");
 }
 
@@ -305,13 +356,32 @@ export function rewriteKascVisibility(text, show) {
 // レイヤ行の key=value オプションを1つ書き換えた行文字列を返す。
 // 同じ key の既存フィールドは除去し、value が空(null/undefined/"")なら
 // 追加しない(=key 除去)。タイトル/URL/出典・on/off・他の key=value は保持する。
-// （sql: 行のように | を値に含む形式には使わないこと）
+// `where=` は行の最終オプションなので、key="where" の書き込みは必ず行末へ
+// 置き、他キーの書き換えは `| where=` 以降(値中の | を含む)をそのまま保持する。
 export function rewriteKascLineOpt(line, key, value) {
+  const isWhere = /^where$/i.test(String(key));
+  let head = String(line || "");
+  let tail = "";
+  const wm = /\|\s*where\s*=/i.exec(head);
+  if (wm) {
+    head = head.slice(0, wm.index);
+    tail = String(line).slice(wm.index);
+  }
+  if (isWhere) tail = "";
   const re = new RegExp(`^${String(key).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*=`, "i");
-  const fields = String(line || "").split("|").map(f => f.trim());
+  const fields = head.split("|").map(f => f.trim());
   const rest = fields.filter((f, i) => !(i > 0 && re.test(f)));
-  if (value !== null && value !== undefined && value !== "") rest.push(`${key}=${value}`);
-  return rest.join(" | ");
+  const hasValue = value !== null && value !== undefined && value !== "";
+  if (isWhere) {
+    if (hasValue) tail = ` | where=${value}`;
+    else tail = "";
+  } else if (hasValue) {
+    rest.push(`${key}=${value}`);
+    if (tail) tail = ` ${tail}`;
+  } else if (tail) {
+    tail = ` ${tail}`;
+  }
+  return rest.join(" | ") + tail;
 }
 
 // ---- theme: 行（QGIS マップテーマ相当の可視性プリセット）の共通処理 ----
@@ -340,6 +410,73 @@ export function themeShowSet(theme) {
 export function kascTitleInTheme(title, show) {
   const n = normKascTitle(title);
   return show.has(n) || show.has(n.split("/").pop());
+}
+
+// ---- view:/portal: 行（ポータル画面の目的別カード・開始画面宣言） ----
+
+// view: 行の値(| 区切り配列)をパースする。parseKasc と cesium/app.js の
+// 両方から使うため shared 側に置く。parts[0]=ビュー名、以降は
+// desc=/img=/cam=/base= ディレクティブかレイヤタイトル
+// (タイトルに ;style=DATA/x.qml / ;where=式 を `;` 区切りで付記可)
+export function parseKascViewValue(parts, line = null) {
+  const view = { name: parts[0] || "", desc: "", img: "", cam: "", base: "", layers: [], styles: {}, wheres: {}, line };
+  for (const tok of parts.slice(1)) {
+    if (!tok) continue;
+    const kv = /^(desc|img|cam|base)\s*=\s*(.+)$/i.exec(tok);
+    if (kv) {
+      view[kv[1].toLowerCase()] = kv[2].trim();
+      continue;
+    }
+    if (tok === "*") { view.layers.push("*"); continue; }
+    // レイヤ指定: `タイトル;style=…;where=…` の `;` 区切り修飾を分離
+    const segs = tok.split(";").map(s => s.trim()).filter(Boolean);
+    const title = segs[0];
+    if (!title) continue;
+    view.layers.push(title);
+    const key = normKascTitle(title);
+    for (const seg of segs.slice(1)) {
+      const eq = seg.indexOf("=");
+      if (eq < 0) continue;
+      const k = seg.slice(0, eq).trim().toLowerCase();
+      const v = seg.slice(eq + 1).trim();
+      if (k === "style" && v) view.styles[key] = v;
+      else if (k === "where" && v) view.wheres[key] = v;
+    }
+  }
+  return view;
+}
+
+// link: 行の値をパースする。`link:名前 | url=… | desc=… | img=…`
+// (URL は url=/href= または裸の http(s):/mailto: トークンでも可)
+export function parseKascLinkValue(parts, line = null) {
+  const link = { name: parts[0] || "", url: "", desc: "", img: "", line };
+  for (const tok of parts.slice(1)) {
+    if (!tok) continue;
+    const kv = /^(url|href|desc|img)\s*=\s*(.+)$/i.exec(tok);
+    if (kv) {
+      const key = kv[1].toLowerCase() === "href" ? "url" : kv[1].toLowerCase();
+      link[key] = kv[2].trim();
+      continue;
+    }
+    if (/^(https?:\/\/|mailto:)/i.test(tok)) link.url = tok;
+  }
+  return link;
+}
+
+// portal: 行の値をパースする。`portal:on|off | title=… | open=auto|manual | html=…`
+// html= はボディ全体を1つのHTML(ファイル/URL)で構成するフルカスタムモード
+export function parseKascPortalValue(parts) {
+  const first = String(parts[0] || "").toLowerCase();
+  const portal = { enabled: !/^(off|0|false|no)$/i.test(first), title: "", open: "auto", html: "" };
+  for (const tok of parts) {
+    const m = /^(title|open|html|body)\s*=\s*(.+)$/i.exec(tok);
+    if (!m) continue;
+    const key = m[1].toLowerCase();
+    if (key === "title") portal.title = m[2].trim();
+    else if (key === "open") portal.open = /^(manual|off|noauto)$/i.test(m[2].trim()) ? "manual" : "auto";
+    else portal.html = m[2].trim();
+  }
+  return portal;
 }
 
 // #theme-select の中身を構築する。themes が空なら非表示化

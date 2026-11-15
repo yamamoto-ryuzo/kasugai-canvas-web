@@ -3,7 +3,8 @@
 // エンジン別の描画フック）を持つため、エンジン差分は hooks として注入し、
 // kasugaiApi 互換の API 面をここで構成する。AI チャット（shared/ai-chat.js）の
 // ツールはこの api メソッドの有無で公開可否が決まる。
-import { camToZoom, viewZoomToHeight, geojsonExtent, splitKascTitle, buildViewUrl } from "./kasc.js";
+import { camToZoom, viewZoomToHeight, geojsonExtent, splitKascTitle, buildViewUrl, normKascTitle } from "./kasc.js";
+import { loadVectorItem } from "./vector-load.js";
 import { backendUrl } from "./backend.js";
 import { hasBackendFeature, isFetchProxyTarget, executeChatTool, showReportModal, listUiControls, controlUi } from "./ai-chat.js";
 import { getLanguage, t } from "./i18n.js";
@@ -85,19 +86,53 @@ async function googlePlacesSearch(query, key) {
   }));
 }
 
+// GSI AddressSearch の生順はデータセット順で関連度ではない。
+// 「東京」等では「〜町東」の町字候補が先頭に大量に並ぶため、
+// 完全一致>前方一致>部分一致>その他 の関連度順にクライアント側で並べ替える
+function rankSearchResults(items, query) {
+  const q = String(query || "");
+  return items.map((it, idx) => {
+    const t = String(it.title || "");
+    let g = 3;
+    if (q && t === q) g = 0;
+    else if (q && t.startsWith(q)) g = 1;
+    else if (q && t.includes(q)) g = 2;
+    return { g, len: t.length, idx, it };
+  }).sort((a, b) => a.g - b.g || a.len - b.len || a.idx - b.idx)
+    .map(x => x.it);
+}
+
+const GSI_ADMIN_SUFFIXES = "都道府県市区町村郡";
+
+async function gsiAddressFetch(query) {
+  const response = await fetch(`https://msearch.gsi.go.jp/address-search/AddressSearch?q=${encodeURIComponent(query)}`, { mode: "cors", signal: AbortSignal.timeout(15000) });
+  if (!response.ok) throw new Error(await response.text() || t("search.failedStatus", { status: response.status }));
+  const data = await response.json().catch(() => []);
+  return (Array.isArray(data) ? data : []).map(item => ({
+    title: item.properties?.title || item.properties?.name || item.properties?.Name || "",
+    address: item.properties?.address || item.properties?.Address || item.properties?.title || "",
+    latitude: Number(item.geometry?.coordinates?.[1]),
+    longitude: Number(item.geometry?.coordinates?.[0]),
+  }));
+}
+
 // 地名検索プロバイダ。いずれも {title,address,latitude,longitude}[] を返す。
 // 既定は gsi（地理院・キー不要）。google/places は Maps API キー必須
 const searchProviders = {
   async gsi(query) {
-    const response = await fetch(`https://msearch.gsi.go.jp/address-search/AddressSearch?q=${encodeURIComponent(query)}`, { mode: "cors", signal: AbortSignal.timeout(15000) });
-    if (!response.ok) throw new Error(await response.text() || t("search.failedStatus", { status: response.status }));
-    const data = await response.json().catch(() => []);
-    return (Array.isArray(data) ? data : []).map(item => ({
-      title: item.properties?.title || item.properties?.name || item.properties?.Name || "",
-      address: item.properties?.address || item.properties?.Address || item.properties?.title || "",
-      latitude: Number(item.geometry?.coordinates?.[1]),
-      longitude: Number(item.geometry?.coordinates?.[0]),
-    }));
+    const q = String(query || "").trim();
+    const items = await gsiAddressFetch(q);
+    // 行政区画接尾辞を持たない短い入力は "<q>都" の補完リクエストで
+    // 「東京都」「札幌市」「東京都台東区秋葉原」のような行政区画レベルの
+    // 候補を拾い、クエリを含むものだけ先頭へマージする
+    if (q.length >= 2 && q.length <= 10 && !GSI_ADMIN_SUFFIXES.includes(q.slice(-1)) && !/[0-9０-９]/.test(q)) {
+      try {
+        const extra = (await gsiAddressFetch(q + "都")).filter(it => String(it.title || "").includes(q));
+        const seen = new Set(items.map(it => `${it.title},${it.latitude},${it.longitude}`));
+        items.unshift(...extra.filter(it => !seen.has(`${it.title},${it.latitude},${it.longitude}`)));
+      } catch { /* 補完失敗時は本体の結果だけを使う */ }
+    }
+    return rankSearchResults(items, q);
   },
   // ハイブリッド検索: Geocoding（住所向け）と Places（施設向け）を並列で呼んでマージ
   async google(query) {
@@ -453,6 +488,19 @@ export function createPlayerApi(hooks) {
       if (!e) return { ok: false, reason: "notFound" };
       if (!hooks.reloadEntryData) return { ok: false, reason: "unsupported" };
       const t = e.item.type;
+      // sql:/ogrsql: はクエリ全文の差し替え(空文字は不可)。行の ⏷ 編集と同じ規則
+      if (t === "sql" || t === "ogrsql") {
+        const value = String(filter ?? "").trim();
+        if (!value) return { ok: false, reason: "empty" };
+        e.item.url = value;
+        e.item.line = `${t}:${e.item.title} | ${value}${e.item.visible === false ? " | off" : ""}`;
+        try {
+          await hooks.reloadEntryData(e);
+          return { ok: true };
+        } catch {
+          return { ok: false, reason: "failed" };
+        }
+      }
       if (!new Set(["gpkg", "geopackage", "duckdb", "flatgeobuf", "fgb", "geoparquet", "parquet"]).has(t)) {
         return { ok: false, reason: "unsupported" };
       }
@@ -662,6 +710,28 @@ export function createPlayerApi(hooks) {
       const e = findEntry(name);
       if (!e) return null;
       return hooks.getEntryGeoJson ? hooks.getEntryGeoJson(e) : (e.item._geojson || null);
+    },
+    // ogrsql: 行と同じ実行経路で OGR SQL SELECT を実行し GeoJSON を返す
+    // (AI ツール queryOgrSql 用。FROM は読み込み済みレイヤー名/DATA パス。
+    // 主経路は JS 実装で、解決不能時のみ QGIS Live の GDAL へフォールバック)
+    async runOgrSql(query) {
+      const resolveLayer = async name => {
+        const n = normKascTitle(name || "");
+        for (const e of hooks.getEntries()) {
+          const it = e?.item;
+          if (!it) continue;
+          const t = normKascTitle(it.title || "");
+          if (t === n || t.split("/").pop() === n) {
+            const gj = hooks.getEntryGeoJson ? hooks.getEntryGeoJson(e) : (it._geojson || null);
+            if (gj) return gj;
+          }
+        }
+        return null;
+      };
+      const { geojson } = await loadVectorItem(
+        { type: "ogrsql", title: "queryOgrSql", url: String(query || ""), opts: {} },
+        hooks.getBaseUrl?.() || "", null, { resolveLayer });
+      return geojson;
     },
 
     // ---- フライパス（flyToView hook 経由のカメラ巡回）----

@@ -59,6 +59,7 @@
               <button id="tools-open" class="panel-manage" type="button" title="ツール" data-i18n-attr="title:tools.open;aria-label:tools.open">🧰</button>
             </div>
             <nav class="panel-tabs" aria-label="Plugin panels">
+              <button id="portal-open" class="portal-open" type="button" hidden title="ポータルを開く" data-i18n-attr="title:portal.openTitle"><span>🏠</span></button>
               <button class="panel-tab active" type="button" data-panel="layers-panel" data-i18n="tab.layers">レイヤ</button>
               <button class="panel-tab" type="button" data-panel="legend-panel" data-i18n="tab.legend">凡例</button>
               <button class="panel-tab" type="button" data-panel="search-panel" data-i18n="tab.search">検索</button>
@@ -121,7 +122,7 @@
                 </div>
                 <ul id="vector-search-results" style="list-style:none;padding:0;margin:0;max-height:160px;overflow:auto;font-size:0.85em;"></ul>
                 <button id="vector-refresh-btn" type="button" style="width:100%;font-size:0.9em;margin-top:3px;" data-i18n="vector.refresh">ベクトルデータを更新</button>
-                <button id="vector-attr-list-btn" type="button" style="width:100%;font-size:0.9em;margin-top:3px;" data-i18n="vector.attrList">選択中のレイヤ属性一覧</button>
+                <button id="vector-attr-list-btn" type="button" style="width:100%;font-size:0.9em;margin-top:3px;" data-i18n="vector.attrList">選択中のレイヤ属性テーブル</button>
                 <div id="vector-search-status" style="font-size:0.85em;color:#666;margin-top:3px;"></div>
               </div>
               <div id="search-title" class="section-title" data-i18n="search.title">住所検索</div>
@@ -292,7 +293,7 @@
             </section>
             <section id="attr-panel" class="plugin-panel">
               <div class="section-title" data-i18n="attr.title">属性</div>
-              <button id="attr-vector-attr-list-btn" type="button" style="width:100%;font-size:0.9em;margin-bottom:3px;" data-i18n="vector.attrList">選択中のレイヤ属性一覧</button>
+              <button id="attr-vector-attr-list-btn" type="button" style="width:100%;font-size:0.9em;margin-bottom:3px;" data-i18n="vector.attrList">選択中のレイヤ属性テーブル</button>
               <div id="attr-content" class="attr-content" data-i18n="attr.empty">地物を選択すると属性を表示します。</div>
             </section>
             <div id="engines"></div>
@@ -504,12 +505,14 @@
                     <label class="field-label" for="chat-provider" data-i18n="chat.provider.label">AI プロバイダ</label>
                     <select id="chat-provider">
                       <option value="gemini" selected data-i18n="chat.provider.gemini">【API】Gemini (Google)</option>
-                      <option value="openai" data-i18n="chat.provider.openai">【API】OpenAI互換 (GitHub Models 等)</option>
+                      <option value="copilotapi" data-i18n="chat.provider.copilotapi">【API】GitHub Copilot</option>
+                      <option value="azure" data-i18n="chat.provider.azure">【API】Azure OpenAI</option>
                       <option value="sakura" data-i18n="chat.provider.sakura">【API】さくらAIEngine</option>
                       <option value="anthropic" data-i18n="chat.provider.anthropic">【API】Anthropic (Claude)</option>
-                      <option value="azure" data-i18n="chat.provider.azure">【API】Azure OpenAI</option>
-                      <option value="copilot" data-i18n="chat.provider.copilot">【ブリッジ】GitHub Copilot</option>
-                      <option value="devin" data-i18n="chat.provider.devin">【ブリッジ】Devin</option>
+                      <option value="openai" data-i18n="chat.provider.openai">【API】OpenAI互換 (GitHub Models 等)</option>
+                      <option value="copilot" data-i18n="chat.provider.copilot">【ACP】GitHub Copilot</option>
+                      <option value="devin" data-i18n="chat.provider.devin">【ACP】Devin</option>
+                      <option value="acp" data-i18n="chat.provider.acp">【ACP】カスタムエージェント</option>
                       <option value="antigravity" data-i18n="chat.provider.antigravity">【ブリッジ】Antigravity</option>
                       <option value="agent" data-i18n="chat.provider.agent">【ブリッジ】外部エージェント</option>
                     </select>
@@ -580,11 +583,30 @@
                       <label class="field-label" for="azure-api-version" style="margin-top:3px;" data-i18n="chat.azure.apiVersionLabel">API バージョン（省略可）</label>
                       <input id="azure-api-version" type="text" placeholder="2024-10-21" autocomplete="off" size="28" />
                     </div>
+                    <div id="copilotapi-fields" hidden>
+                      <p class="hint" data-i18n-html="chat.copilotapi.hint">GitHub Copilot を CLI・ブリッジなしで直接利用します。GitHub トークン（PAT）を短期トークンへ交換して api.githubcopilot.com（OpenAI互換）を呼びます。<strong>GitHub Copilot 契約が必要です</strong>。</p>
+                      <p class="hint" data-i18n-html="chat.openai.security"></p>
+                      <div style="display:flex;gap:6px;align-items:center;">
+                        <button id="copilotapi-signin" type="button" data-i18n="chat.copilotapi.signin">GitHubでサインイン</button>
+                      </div>
+                      <p id="copilotapi-signin-status" class="hint" aria-live="polite"></p>
+                      <label class="field-label" for="copilotapi-token" data-i18n="chat.copilotapi.tokenLabel">GitHub トークン</label>
+                      <input id="copilotapi-token" type="text" class="secret" data-1p-ignore data-lpignore="true" data-bwignore placeholder="OAuth トークン" data-i18n-attr="placeholder:chat.copilotapi.tokenPlaceholder" autocomplete="off" size="28" />
+                      <label class="field-label" for="copilotapi-base" style="margin-top:3px;" data-i18n="chat.copilotapi.baseLabel">エンドポイント ベースURL（省略可）</label>
+                      <input id="copilotapi-base" type="text" placeholder="https://api.githubcopilot.com" autocomplete="off" size="28" />
+                      <label class="field-label" for="copilotapi-model" style="margin-top:3px;" data-i18n="chat.openai.modelLabel">モデル</label>
+                      <select id="copilotapi-model"></select>
+                      <div style="display:flex;gap:6px;margin-top:6px;">
+                        <button id="copilotapi-fetch-models" type="button" data-i18n="chat.openai.fetchModels">モデル一覧を取得</button>
+                      </div>
+                      <p id="copilotapi-models-status" class="hint" aria-live="polite"></p>
+                    </div>
                     <div id="bridge-fields" hidden>
                       <p class="hint provider-only" data-for="agent" data-i18n-html="agent.externalHint" hidden>チャット入力を外部エージェントのHTTPエンドポイントへ POST します（Antigravity等で構築したエージェントを接続可能）。応答JSONの <code>actions</code> はチャットツールと同名で実行されます。</p>
                       <p class="hint provider-only" data-for="copilot" data-i18n-html="chat.copilot.hint" hidden>GitHub Copilot の場合はブリッジハブ経由で <code>copilot</code> CLI へ接続します（:8511 自動検出・空欄可）。GitHub Copilot 契約と <code>copilot</code> CLI の導入・ログインが必要です — 導入手順は <a href="https://github.com/github/copilot-cli" target="_blank" rel="noopener">github/copilot-cli</a> を参照（npm 版は <a href="https://nodejs.org/" target="_blank" rel="noopener">Node.js</a> も必要）。</p>
                       <p class="hint provider-only" data-for="devin" data-i18n-html="chat.devin.hint" hidden>Devin の場合はブリッジハブ経由で <code>devin acp</code>（Devin CLI）へ接続します（:8511 自動検出・空欄可）。Devin CLI と利用者自身の Devin プラン・本人の ACP 認証が必要です（Node.js 不要・ローカル・本人利用限定） — 手順と利用条件は bridge-hub/README.md。</p>
                       <p class="hint provider-only" data-for="antigravity" data-i18n-html="chat.antigravity.hint" hidden>Antigravity の場合はブリッジハブ経由で <code>agy</code> CLI へ接続します（:8511 自動検出・空欄可）。Antigravity CLI と利用者自身の Google アカウントでのログインが必要です（Node.js 不要・ローカル・本人利用限定） — 手順と利用条件は bridge-hub/README.md。</p>
+                      <p class="hint provider-only" data-for="acp" data-i18n-html="chat.acp.hint" hidden></p>
                       <label class="field-label" for="agent-endpoint" data-i18n="agent.endpointLabel">エンドポイントURL</label>
                       <input id="agent-endpoint" type="text" placeholder="http://127.0.0.1:9000/agent" data-i18n-attr="placeholder:agent.endpointPlaceholder" autocomplete="off" size="28" />
                       <p class="hint" id="bridge-install-hint" data-i18n-html="chat.bridge.installTabHint" hidden></p>
@@ -615,6 +637,12 @@
                         <select id="antigravity-model"></select>
                         <p class="hint" data-i18n="chat.antigravity.modelHint">ブリッジから取得した Antigravity のモデル一覧です。未取得時はブリッジの既定モデルが使われます。</p>
                         <p class="hint" id="antigravity-endpoint-status" aria-live="polite"></p>
+                      </div>
+                      <div id="acp-fields" class="provider-only" data-for="acp" hidden>
+                        <label class="field-label" for="acp-model" data-i18n="chat.acp.modelLabel">モデル</label>
+                        <select id="acp-model"></select>
+                        <p class="hint" data-i18n="chat.acp.modelHint">ブリッジから取得した ACP エージェントのモデル一覧です。未取得時はブリッジの既定モデルが使われます。</p>
+                        <p class="hint" id="acp-endpoint-status" aria-live="polite"></p>
                       </div>
                     </div>
                     <label class="field-label" for="google-tool-max-steps" style="margin-top:3px;" data-i18n="google.gemini.toolStepsLabel">ツール実行の上限往復数</label>
@@ -1024,29 +1052,39 @@
       <div class="vector-attr-widget-inner">
         <div class="vector-attr-widget-resizer" title="上下にドラッグして高さを変更" data-i18n-attr="title:vattr.resizer"></div>
         <div class="vector-attr-widget-header">
-          <span class="vector-attr-widget-title" data-i18n="vattr.title">属性・値一覧</span>
+          <span class="vector-attr-widget-title" data-i18n="vattr.title">属性テーブル</span>
           <button class="vector-attr-widget-close" type="button" aria-label="閉じる" data-i18n-attr="aria-label:vattr.close">×</button>
         </div>
         <div class="vector-attr-widget-filter">
-          <select id="vector-attr-widget-layer" class="vector-attr-widget-layer" title="レイヤを選択" data-i18n-attr="title:vattr.layerTitle"></select>
-          <input id="vector-attr-widget-search" type="text" placeholder="属性または値で検索" data-i18n-attr="placeholder:vattr.search" />
-          <select id="vector-attr-widget-colfilter-field" title="絞り込む属性" data-i18n-attr="title:vattr.colFilterField"></select>
-          <select id="vector-attr-widget-colfilter-op">
-            <option value="contains" data-i18n="vattr.colFilterContains">含む</option>
-            <option value="eq">=</option>
-            <option value="ne">≠</option>
-            <option value="lt">&lt;</option>
-            <option value="le">≦</option>
-            <option value="gt">&gt;</option>
-            <option value="ge">≧</option>
-          </select>
-          <input id="vector-attr-widget-colfilter-value" type="text" placeholder="条件値" data-i18n-attr="placeholder:vattr.colFilterValue" />
-          <button id="vector-attr-widget-colfilter-clear" type="button" title="フィルタを解除" data-i18n-attr="title:vattr.colFilterClear">×</button>
-          <button id="vector-attr-export-csv" type="button" title="表示中の行をCSVで出力" data-i18n-attr="title:vattr.exportCsv">CSV</button>
-          <button id="vector-attr-export-tsv" type="button" title="表示中の行をTSVで出力" data-i18n-attr="title:vattr.exportTsv">TSV</button>
-          <button id="vector-attr-widget-stats" type="button" title="属性を集計（GROUP BY）" data-i18n-attr="title:vattr.statsTitle">Σ</button>
-          <select id="vector-attr-widget-group" title="集計キー" data-i18n-attr="title:vattr.statsGroup" hidden></select>
-          <select id="vector-attr-widget-value" title="集計する数値属性" data-i18n-attr="title:vattr.statsValue" hidden></select>
+          <span class="vector-attr-group group-search">
+            <select id="vector-attr-widget-layer" class="vector-attr-widget-layer" title="レイヤを選択" data-i18n-attr="title:vattr.layerTitle"></select>
+            <input id="vector-attr-widget-search" type="text" placeholder="属性または値で検索" data-i18n-attr="placeholder:vattr.search" />
+          </span>
+          <span class="vector-attr-group group-filter">
+            <button id="vector-attr-map-filter" type="button" title="絞り込み条件を地図表示に適用/解除" data-i18n="vattr.mapFilterBtn" data-i18n-attr="title:vattr.mapFilter">フィルター反映</button>
+            <select id="vector-attr-widget-colfilter-field" title="絞り込む属性" data-i18n-attr="title:vattr.colFilterField"></select>
+            <select id="vector-attr-widget-colfilter-op">
+              <option value="contains" data-i18n="vattr.colFilterContains">含む</option>
+              <option value="eq">=</option>
+              <option value="ne">≠</option>
+              <option value="lt">&lt;</option>
+              <option value="le">≦</option>
+              <option value="gt">&gt;</option>
+              <option value="ge">≧</option>
+            </select>
+            <input id="vector-attr-widget-colfilter-value" type="text" placeholder="条件値" data-i18n-attr="placeholder:vattr.colFilterValue" />
+            <button id="vector-attr-widget-colfilter-clear" type="button" title="フィルタを解除" data-i18n-attr="title:vattr.colFilterClear">×</button>
+            <button id="vector-attr-widget-stats" type="button" title="属性を集計（GROUP BY）" data-i18n-attr="title:vattr.statsTitle">Σ</button>
+            <select id="vector-attr-widget-group" title="集計キー" data-i18n-attr="title:vattr.statsGroup" hidden></select>
+            <select id="vector-attr-widget-value" title="集計する数値属性" data-i18n-attr="title:vattr.statsValue" hidden></select>
+            <button id="vector-attr-sql" type="button" title="SQL で絞り込み・レイヤフィルタ・新規レイヤ" data-i18n-attr="title:vattr.sqlTitle">SQL</button>
+          </span>
+          <span class="vector-attr-group group-export">
+            <label class="vector-attr-widget-wkt" title="ジオメトリをWKT列として出力（QGIS GEOMETRY=AS_WKT 相当）" data-i18n-attr="title:vattr.exportWkt"><input id="vector-attr-export-wkt" type="checkbox" />WKT</label>
+            <button id="vector-attr-export-csv" type="button" title="表示中の行をCSVで出力" data-i18n-attr="title:vattr.exportCsv">CSV</button>
+            <button id="vector-attr-export-tsv" type="button" title="表示中の行をTSVで出力" data-i18n-attr="title:vattr.exportTsv">TSV</button>
+            <button id="vector-attr-export-xlsx" type="button" title="表示中の行をXLSXで出力" data-i18n-attr="title:vattr.exportXlsx">XLSX</button>
+          </span>
         </div>
         <div class="vector-attr-widget-table-wrap">
           <table class="vector-attr-widget-table">
@@ -1056,6 +1094,43 @@
         </div>
         <div class="vector-attr-widget-footer">
           <span id="vector-attr-widget-count"></span>
+        </div>
+      </div>
+    </div>
+    <!-- SQL ダイアログ: 属性一覧の高度なフィルター(QGIS 属性テーブルの
+         条件式フィルタ相当)。WHERE 式または SELECT 文(OGR SQL)を受け付け、
+         一覧絞り込み・レイヤフィルタ(where=)・新規レイヤ(ogrsql:)の3経路で適用 -->
+    <div id="sql-dialog" class="sql-dialog" hidden>
+      <div class="sql-dialog-inner" role="dialog" aria-modal="true" aria-labelledby="sql-dialog-title">
+        <div class="sql-dialog-head">
+          <span id="sql-dialog-title" data-i18n="sqldlg.title">SQL フィルター</span>
+          <select id="sql-dialog-layer"></select>
+          <button id="sql-dialog-close" type="button" aria-label="閉じる" data-i18n-attr="aria-label:vattr.close">×</button>
+        </div>
+        <textarea id="sql-dialog-input" rows="4" spellcheck="false"></textarea>
+        <div class="sql-dialog-hint" data-i18n="sqldlg.hint">WHERE 式または SELECT 文(OGR SQL)。FROM にはレイヤー名・DATA/ パスが使えます</div>
+        <div id="sql-dialog-status" class="sql-dialog-status"></div>
+        <div class="sql-dialog-actions">
+          <button id="sql-dialog-test" type="button" data-i18n="sqldlg.test">テスト</button>
+          <span class="sql-dialog-actions-spacer"></span>
+          <button id="sql-dialog-clear" type="button" data-i18n="sqldlg.clear">解除</button>
+          <button id="sql-dialog-view" type="button" data-i18n="sqldlg.view">一覧を絞る</button>
+          <button id="sql-dialog-layerfilter" type="button" data-i18n="sqldlg.layerfilter">レイヤフィルタ</button>
+          <button id="sql-dialog-addlayer" type="button" data-i18n="sqldlg.addlayer">新規レイヤ</button>
+        </div>
+      </div>
+    </div>
+    <!-- portal:/html:/view: 行で構成する開始画面(ポータル)。
+         起動時自動表示と 🏠 ボタンでの再表示に対応 -->
+    <div id="portal-overlay" class="portal-overlay" hidden>
+      <div class="portal-dialog" role="dialog" aria-modal="true">
+        <div class="portal-head">
+          <h2 id="portal-title" class="portal-title"></h2>
+          <button id="portal-close" class="portal-close" type="button" data-i18n="portal.close">地図を開く</button>
+        </div>
+        <div id="portal-body" class="portal-body"></div>
+        <div id="portal-footer" class="portal-footer" hidden>
+          <button id="portal-clear" type="button" data-i18n="portal.clearView">ビュー解除</button>
         </div>
       </div>
     </div>
