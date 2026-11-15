@@ -12,7 +12,7 @@ import {
   initAiChat, executeChatTool, showReportModal,
   listUiControls as sharedListUiControls, controlUi as sharedControlUi,
   updateChatPanelVisibility, updateBridgeProviderOptions, resyncProviderSelect,
-  startRemoteCommandLoop, isFetchProxyTarget, refreshCliSetupStates,
+  startRemoteCommandLoop, autoConnectQgis, isFetchProxyTarget, refreshCliSetupStates,
 } from "../shared/ai-chat.js";
 import {
   detectBackend, backendUrl, isBackendAlive, getBackendCapabilities, hasBackendFeature, backendBaseUrl,
@@ -27,10 +27,12 @@ import { diagnoseHubLayerError } from "../shared/hub-diag.js";
 import { createMinimap } from "../shared/minimap.js";
 import { mountSunControls } from "../shared/sun-time.js";
 import { initGeoTools } from "./geo-tools.js";
-import { buildWmsTileTemplate, buildWmtsTileTemplate, rewriteKascLineVisibility, rewriteKascLineOpt, themeShowSet, kascTitleInTheme, normKascTitle, fillThemeSelect, resolveKascUrl, readKascSource, loadKascBookmarks, parseQgisBookmarksXml, qgisBookmarkToCam, downloadQgisBookmarksXml, downloadKascCamLines, parseKasc, zoomToCamHeightView, appendGroupedTitleOptions, syncBasemapList, fetchKascProjectTitle, projectsBaseUrl, projectsManifestUrl, applyPanelTitle, loadKascInfoContent, clearKascInfoContent, parseDefaultStyleSpec as parseKascDefaultStyleSpec, rememberedKascUrl, heightToViewZoom, parseKascViewValue, parseKascPortalValue, parseKascLinkValue, splitKascTail, geojsonExtent } from "../shared/kasc.js";
+import { buildWmsTileTemplate, buildWmtsTileTemplate, rewriteKascLineVisibility, rewriteKascLineOpt, themeShowSet, kascTitleInTheme, normKascTitle, fillThemeSelect, resolveKascUrl, readKascSource, loadKascBookmarks, parseQgisBookmarksXml, qgisBookmarkToCam, downloadQgisBookmarksXml, downloadKascCamLines, parseKasc, zoomToCamHeightView, appendGroupedTitleOptions, syncBasemapList, fetchKascProjectTitle, projectsBaseUrl, projectsManifestUrl, applyPanelTitle, loadKascInfoContent, clearKascInfoContent, parseDefaultStyleSpec as parseKascDefaultStyleSpec, rememberedKascUrl, heightToViewZoom, parseKascViewValue, parseKascPortalValue, parseKascLinkValue, parseKascProjectValue, parseKascNewsValue, splitKascTail, geojsonExtent, parseUrlDeepLink } from "../shared/kasc.js";
 import { compileWhereExpression, filterGeoJsonByWhere } from "../shared/where-eval.js";
 import { executeOgrSelect } from "../shared/ogr-sql.js";
 import { createKascPortal } from "../shared/portal.js";
+import { createKascDashboard, featureCentroid } from "../shared/dashboard.js";
+import { parseKascDashValue, parseKascFormValue, parseKascStatValue, parseKascSearchValue } from "../shared/kasc.js";
 import { createMvtImageryProvider } from "../shared/mvt.js";
 import { configureLive, configureFollow, liveUpdate, liveNotifyCamera, liveNotifySelection, liveStatus, liveWritebackEntries, liveSendFeatures, liveIsActive, liveQueryFeatures, liveRenderUrl, liveSetFollow, liveIsFollowing } from "../shared/live.js";
 import { mountLivePanel, syncLivePanel } from "../shared/live-panel.js";
@@ -665,12 +667,12 @@ function applyLegendSymbolHidden(item) {
   if (!style) return;
   const entry = vectorDataSources.find(e => e.id === item.id);
   if (entry) {
-    try { applyQmlStyleToDataSource(entry.ds, style, { clamp: !!item._qmlClamp, hiddenSymbols: item.legendHidden, opacity: item.opacity ?? 1 }); }
+    try { applyQmlStyleToDataSource(entry.ds, style, { clamp: !!item._qmlClamp, hiddenSymbols: item.legendHidden, opacity: effectiveLayerOpacity(item) }); }
     catch (error) { console.warn("凡例の再適用に失敗しました:", error); }
   } else {
     const target = layerRuntimeTargets.get(item.id);
     if (Cesium.GeoJsonPrimitive && target instanceof Cesium.GeoJsonPrimitive) {
-      try { applyQmlStyleToPrimitive(target, style, item.legendHidden, item.opacity ?? 1); }
+      try { applyQmlStyleToPrimitive(target, style, item.legendHidden, effectiveLayerOpacity(item)); }
       catch (error) { console.warn("凡例の再適用に失敗しました:", error); }
     }
   }
@@ -782,10 +784,23 @@ const inspectorThemes = [];
 const inspectorViews = [];
 // インスペクタの html: 行で宣言されたポータル HTML セクション {title, spec, line}[]
 const inspectorHtmlSections = [];
+// インスペクタの news: 行で宣言されたお知らせフィード {src, limit, title, line}[](#128)
+const inspectorNews = [];
+// stat: 行の統計カード(#126)。parseKascStatValue でパースした宣言配列
+const inspectorStats = [];
+// search: 行のポータル埋め込み検索(#125)。parseKascSearchValue でパースした宣言配列
+const inspectorSearches = [];
 // インスペクタの link: 行で宣言された外部リンクカード {name, url, desc, img, line}[]
 const inspectorLinks = [];
-// ポータルのカード宣言順リスト {kind:"view"|"link", entry}[]
+// インスペクタの project: 行で宣言されたプロジェクト切替カード(#130)
+// {name, desc, img, keep, line}[]
+const inspectorProjects = [];
+// ポータルのカード宣言順リスト {kind:"view"|"link"|"form"|"project", entry}[]
 const inspectorPortalCards = [];
+// インスペクタの dash: 行で宣言されたダッシュボード定義(#123)
+const inspectorDashSpecs = [];
+// インスペクタの form: 行で宣言されたフォーム投稿定義(#131)
+const inspectorForms = [];
 // portal: 行の宣言 {enabled, title, open}。null=行なし
 let inspectorPortalSpec = null;
 // title: 行のパネルタイトル(ポータル見出しのフォールバックに使う)。null=行なし
@@ -1150,6 +1165,39 @@ async function loadProjects() {
 // 反映し、残り(可視性・テーマ)は初回適用後に反映する
 let switchRestore = null;
 
+// プロジェクトの in-place 切替。#project-select 変更とポータル project: カード(#130)の
+// 共通経路。linkedKascUrl 指定時は ?kasc= 直読み、null 時は ?project= モードへ移行する
+async function switchProjectInPlace(projectId, linkedKascUrl) {
+  currentProjectId = projectId;
+  const params = new URLSearchParams(window.location.search);
+  if (linkedKascUrl) {
+    // 群マニフェスト由来のエントリは ?kasc= 直読みのまま切り替える
+    currentKascUrl = linkedKascUrl;
+    params.set("kasc", linkedKascUrl);
+    params.delete("project");
+  } else {
+    // 実プロジェクトの選択は ?kasc= 直読みモードを抜ける
+    currentKascUrl = null;
+    kascBaseOverride = null;
+    if (currentProjectId) params.set("project", currentProjectId);
+    else params.delete("project");
+    params.delete("kasc");
+  }
+  window.history.replaceState(null, "", `${window.location.pathname}?${params.toString()}${window.location.hash}`);
+  updateProjectRootPath();
+  // scope:"project" のプラグインレイヤーはプロジェクト単位のデータとして切り離す
+  pluginLayers.filter(item => item.scope === "project").forEach(removePluginLayer);
+  // plugin: 行で起動したプラグインはレイヤーが除去されるため、新 .kasc 適用後に
+  // plugin-loader 側で再起動できるよう切替を通知する
+  window.kasugaiApi?.emit("project-changed", { projectId: currentProjectId });
+  try {
+    setInspectorStatus(t("inspector.status.loadingProject"));
+    await loadInspectorConfig();
+  } catch (error) {
+    setInspectorStatus(t("inspector.status.loadProjectFailed", { error: error instanceof Error ? error.message : error }), true);
+  }
+}
+
 async function loadInspectorConfig() {
   try {
     // プロジェクト読込ごとの起動時ポータル自動表示を1回に戻す
@@ -1308,11 +1356,11 @@ async function applyKascThemeStyles(theme, items) {
         if (entry) {
           applyQmlStyleToDataSource(entry.ds, style, {
             clamp: !!item._qmlClamp, hiddenSymbols: item.legendHidden,
-            opacity: item.opacity ?? 1 });
+            opacity: effectiveLayerOpacity(item) });
         } else {
           const target = layerRuntimeTargets.get(item.id);
           if (Cesium.GeoJsonPrimitive && target instanceof Cesium.GeoJsonPrimitive)
-            applyQmlStyleToPrimitive(target, style, item.legendHidden, item.opacity ?? 1);
+            applyQmlStyleToPrimitive(target, style, item.legendHidden, effectiveLayerOpacity(item));
         }
       } catch (e) { console.warn("テーマスタイルの適用に失敗:", e); }
     })());
@@ -1474,6 +1522,110 @@ async function clearKascView() {
   updatePortalButton();
 }
 
+// ---- URL ディープリンク(?view=/&feature=/&where=) ----
+// ポータル記事・外部台帳から「この箇所を地図で見る」リンクを発行する仕組み(#124)。
+// プロジェクト読込後に applyUrlDeepLink で適用する。view= はポータルの
+// カード押下と同等(適用後ポータルを閉じる)
+
+// feature=/where= のレイヤー指定を id・タイトル(フルパス/葉名)で照合する
+function findDeepLinkLayer(name) {
+  const norm = normKascTitle(name);
+  return getOrderedLayerItems().find(item =>
+    item.id === name || item.title === name || item.sourceTitle === name
+    || normKascTitle(item.sourceTitle || item.title) === norm
+    || normKascTitle(item.sourceTitle || item.title).split("/").pop() === norm) || null;
+}
+
+// feature=/where= の対象となるベクターレイヤー。sql:/ogrsql: は
+// フィルタが where 式ではなく SELECT 文全体のため対象外(view: と同じ規則)
+function deepLinkVectorLayers() {
+  return getOrderedLayerItems().filter(item =>
+    item.type !== "sql" && item.type !== "ogrsql"
+    && (item.type === "geojson" || item.type === "layer" || vectorDecoders.has(item.type)));
+}
+
+// feature=/data-feature の選択ハイライト。一時 GeoJsonDataSource を
+// 貼り替えで管理し、インスペクタ再適用や次の指定で置き換える
+let deepLinkHighlightDs = null;
+async function highlightDeepLinkFeature(feature) {
+  if (deepLinkHighlightDs) { viewer.dataSources.remove(deepLinkHighlightDs, true); deepLinkHighlightDs = null; }
+  if (!feature?.geometry) return;
+  const ds = await Cesium.GeoJsonDataSource.load(
+    { type: "FeatureCollection", features: [feature] },
+    { stroke: Cesium.Color.ORANGE, fill: Cesium.Color.ORANGE.withAlpha(0.2), strokeWidth: 4, markerColor: Cesium.Color.ORANGE, clampToGround: true });
+  deepLinkHighlightDs = ds;
+  await viewer.dataSources.add(ds);
+  requestRender();
+}
+
+// feature=<レイヤ>/<属性>=<値>: 指定レイヤ(省略時は全ベクター)の地物を属性値で
+// 検索し、範囲へズーム＋選択ハイライトする。ベクター検索索引と同じく
+// クエリ系レイヤーは読み込み済み行しか持たないため対象外
+async function applyUrlFeature(spec) {
+  const eq = String(spec || "").indexOf("=");
+  const lhs = eq >= 0 ? spec.slice(0, eq) : "";
+  const slash = lhs.lastIndexOf("/");
+  const layerName = slash >= 0 ? lhs.slice(0, slash).trim() : "";
+  const attr = (slash >= 0 ? lhs.slice(slash + 1) : lhs).trim();
+  const value = eq >= 0 ? spec.slice(eq + 1).trim() : "";
+  if (!attr) { console.warn("feature=: <レイヤ>/<属性>=<値> の形式で指定してください", spec); return false; }
+  const targets = layerName ? [findDeepLinkLayer(layerName)].filter(Boolean) : deepLinkVectorLayers();
+  if (!targets.length) { console.warn("feature=: レイヤーが見つかりません", layerName || spec); return false; }
+  for (const item of targets) {
+    const dec = vectorDecoders.get(item.type);
+    if (isQueryDecoder(dec, item)) continue;
+    let fc = null;
+    try { fc = await loadVectorSourceCached(item, dec); } catch (e) { console.warn(`feature=: ${item.title} の読み込みに失敗`, e); }
+    const hit = (fc?.features || []).find(f => String(f?.properties?.[attr] ?? "") === value);
+    if (!hit) continue;
+    await highlightDeepLinkFeature(hit);
+    const env = geojsonExtent({ type: "FeatureCollection", features: [hit] });
+    if (env && (env.east - env.west > 1e-9 || env.north - env.south > 1e-9)) {
+      flyToRectangle(env.west, env.south, env.east, env.north);
+    } else {
+      const c = featureCentroid(hit);
+      if (c) void flyToFeature(c[1], c[0]);
+      else if (env) void flyToFeature((env.south + env.north) / 2, (env.west + env.east) / 2);
+    }
+    return true;
+  }
+  console.warn("feature=: 地物が見つかりません", spec);
+  return false;
+}
+
+// where=<式>: view: を通さない即席フィルタ。`レイヤ名/式` 形式ならそのレイヤーのみ、
+// 裸の式は全ベクターレイヤーへ適用する。適用経路は ⏷フィルタと同じ
+// applyLayerQueryFilter(クエリ系は SQL・非クエリ系は where-eval のクライアント評価)
+async function applyUrlWhere(spec) {
+  const slash = String(spec || "").indexOf("/");
+  if (slash > 0) {
+    const layer = findDeepLinkLayer(spec.slice(0, slash).trim());
+    if (layer) return applyLayerQueryFilter(layer, spec.slice(slash + 1).trim());
+  }
+  let applied = 0;
+  for (const item of deepLinkVectorLayers()) {
+    if (await applyLayerQueryFilter(item, spec)) applied++;
+  }
+  if (!applied) console.warn("where=: 適用できるベクターレイヤーがありません", spec);
+  return applied > 0;
+}
+
+// 起動時ディープリンク適用。プロジェクト読込(applyInspector)後に呼ぶ。
+// view= → where= → feature= の順で適用し、最終カメラは feature= が優先される
+async function applyUrlDeepLink() {
+  if (!urlDeepLink) return;
+  if (urlDeepLink.view) {
+    const view = inspectorViews.find(entry => entry.name === urlDeepLink.view);
+    if (view) await applyKascView(view);
+    else console.warn("view=: ビューが見つかりません", urlDeepLink.view);
+  }
+  if (urlDeepLink.where) await applyUrlWhere(urlDeepLink.where);
+  if (urlDeepLink.feature) await applyUrlFeature(urlDeepLink.feature);
+  // ディープリンクの目的地は地図側にあるため、起動時ポータル(open=auto)が
+  // 開いていても閉じてリンク先の地物・フィルタを見せる
+  closePortal();
+}
+
 // ---- ポータル(portal:/html:/view:/link: 行で構成する開始画面) ----
 // UI 構築は shared/portal.js へ共通化。ここでは状態getterと
 // applyView/clearView を束ねた遅延インスタンスを提供する
@@ -1489,20 +1641,223 @@ function kascPortal() {
       clearView: () => clearKascView(),
       applyCam: name => applyViewCam(name),
       applyBase: name => applyViewBase(name),
+      applyFeature: spec => applyUrlFeature(spec),
+      resolveProject: entry => resolvePortalProject(entry?.name),
+      applyProject: entry => switchPortalProject(entry),
+      pickLocation: () => pickFormLocation(),
+      cancelPick: () => cancelFormPick(),
       getActiveViewName: () => activeViewName,
       getPortalSpec: () => inspectorPortalSpec,
       getPanelTitle: () => inspectorPanelTitle,
       getHtmlSections: () => inspectorHtmlSections,
+      getNews: () => inspectorNews,
+      getSearches: () => inspectorSearches,
+      // search: 行/data-search 属性(#125)の検索・結果適用アダプタ。
+      // ベクター検索索引の値索引で絞り込み、候補クリックは feature= と
+      // 同じ地物検索+ズーム+選択ハイライト経路へ渡す
+      searchIndex: (q, spec) => portalAttrSearch(q, spec),
+      applySearchResult: r => applyPortalSearchResult(r),
+      getStats: () => inspectorStats,
+      // stat: カード(#126)の集計・where= 連動アダプタ。集計はロード済みソース
+      // (item.geojsonSource→getLayerGeoJson)を使い、クリックは ⏷フィルタと
+      // 同じ applyLayerQueryFilter 経路で where= を適用する(dash: と同仕組み)
+      getStatFeatures: name => {
+        const it = findDeepLinkLayer(name);
+        return (it && getLayerGeoJson(it.id)?.features) || [];
+      },
+      setStatWhere: (name, where) => {
+        const it = findDeepLinkLayer(name);
+        return it ? applyLayerQueryFilter(it, where || null) : false;
+      },
       getCards: () => inspectorPortalCards,
     });
   }
   return _kascPortal;
 }
+// form: 行の loc フィールド用位置拾い。ポータルが閉じた状態での
+// 地図クリック1回を {lon,lat} で resolve する。ポータル再表示時に
+// 呼ばれる cancelFormPick で未確定分を破棄する
+let formPickResolve = null;
+function pickFormLocation() {
+  return new Promise(resolve => { formPickResolve = resolve; });
+}
+function cancelFormPick() {
+  const resolve = formPickResolve;
+  formPickResolve = null;
+  if (resolve) resolve(null);
+}
+
+// ---- ポータル埋め込み検索(#125) ----
+// search: 行 / data-search 属性の検索ボックス。ベクター検索索引
+// (buildVectorSearchIndex)の値索引から即時絞り込み、候補クリックで
+// feature= と同じ地物検索+ズーム+選択ハイライト(applyUrlFeature)へ渡す。
+// クエリ系レイヤーは索引対象外(検索は ⏷フィルタ側に一本化)のため候補に出ない
+const PORTAL_SEARCH_LIMIT = 50;
+async function portalAttrSearch(query, spec) {
+  const q = String(query || "").trim().toLowerCase();
+  if (!q) return [];
+  const targetAll = !spec?.layer || /^all$/i.test(spec.layer);
+  if (targetAll) {
+    // 検索パネルの「全選択」と同じく、未ロードレイヤーも検索実行時に
+    // まとめて読み込んで索引してから絞り込む
+    await ensureAllVectorSourcesIndexed();
+  } else {
+    // 指定レイヤーが未索引ならオンデマンドで読み込んで索引する
+    // (検索パネルで未ロードレイヤーを選んだときと同じ経路)
+    const item = findDeepLinkLayer(spec.layer);
+    if (item && !vectorSearchData?.layers?.[item.id] && !vectorSearchLoadFailed.has(item.id)) {
+      try {
+        const dec = vectorDecoders.get(item.type);
+        const src = await loadVectorSourceCached(item, dec);
+        if (src?.features?.length) {
+          vectorSearchLoadedSources.set(item.id, src);
+          buildVectorSearchIndex();
+        }
+      } catch (e) { vectorSearchLoadFailed.add(item.id); }
+    }
+  }
+  const data = vectorSearchData;
+  if (!data) return [];
+  const layerIds = targetAll
+    ? Object.keys(data.layers || {})
+    : [findDeepLinkLayer(spec.layer)?.id].filter(Boolean);
+  const res = [];
+  for (const layerId of layerIds) {
+    const source = data.layers?.[layerId];
+    if (!source) continue;
+    const attrs = spec?.attr ? [spec.attr] : (source.attributes || []);
+    for (const attr of attrs) {
+      for (const val of source.valuesByAttr?.[attr] || []) {
+        if (!String(val).toLowerCase().includes(q)) continue;
+        const pos = source.featureByAttr?.[attr]?.[val] || null;
+        res.push({ layerId, layerTitle: source.title || layerId, attr, value: val, lat: pos?.lat ?? null, lng: pos?.lng ?? null });
+        if (res.length >= PORTAL_SEARCH_LIMIT) return res;
+      }
+    }
+  }
+  return res;
+}
+
+// 検索パネルの結果クリックと同じく、対象レイヤーが非表示なら表示してから
+// feature= 経路(applyUrlFeature: 地物検索+範囲ズーム+選択ハイライト)へ渡す。
+// 地物を同定できなかった場合は索引の代表点への flyToFeature に留める
+async function applyPortalSearchResult(r) {
+  if (!r) return;
+  const item = (r.layerId && layerState.get(r.layerId)) || findDeepLinkLayer(r.layerTitle || "");
+  if (item && !item.visible) {
+    item.visible = true;
+    if (item.exclusiveGroup) {
+      getOrderedLayerItems().forEach(other => {
+        if (other !== item && other.group === item.group && other.exclusiveGroup) other.visible = false;
+      });
+    }
+    renderLayerList();
+    void refreshLayers();
+  }
+  const layerName = item ? (item.sourceTitle || item.title || item.id) : (r.layerTitle || "");
+  const spec = layerName ? `${layerName}/${r.attr}=${r.value}` : `${r.attr}=${r.value}`;
+  const ok = await applyUrlFeature(spec);
+  if (!ok && Number.isFinite(r.lat) && Number.isFinite(r.lng)) void flyToFeature(r.lat, r.lng);
+}
+
 const portalAvailable = () => kascPortal().available();
 const updatePortalButton = () => kascPortal().updateButton();
 const updatePortalUI = () => kascPortal().update();
 const openPortal = () => kascPortal().open();
 const closePortal = () => kascPortal().close();
+
+// 現在のカメラ位置をビュー状態{longitude,latitude,height,pitch,heading}で返す
+function currentCameraView() {
+  const c = Cesium.Cartographic.fromCartesian(viewer.camera.position);
+  if (!c) return null;
+  return {
+    longitude: Cesium.Math.toDegrees(c.longitude),
+    latitude: Cesium.Math.toDegrees(c.latitude),
+    height: c.height,
+    pitch: Cesium.Math.toDegrees(viewer.camera.pitch),
+    heading: Cesium.Math.toDegrees(viewer.camera.heading),
+  };
+}
+
+// project: カード/data-project の遷移先解決(#130)。
+// id → 群マニフェスト(kascLinkedUrls) → 記憶済み .kasc(rememberedKascUrl) →
+// プロジェクトマニフェスト(projectDefinitions) の id/タイトルの順で解決する。
+// http(s):/localfs:/kasczip: の .kasc 直URLはそのまま ?kasc= として使う
+function resolvePortalProject(rawTarget) {
+  const target = String(rawTarget || "").trim();
+  if (!target) return null;
+  if (/^(https?:\/\/|localfs:|kasczip:)/i.test(target)) {
+    const name = decodeURIComponent(target.split("/").pop() || target).replace(/\.kasc$/i, "") || target;
+    return { id: name, kascUrl: target, title: name };
+  }
+  const linked = kascLinkedUrls.get(target);
+  if (linked) return { id: target, kascUrl: linked, title: projectDefinitions.get(target)?.title || target };
+  const remembered = rememberedKascUrl(target);
+  if (remembered) return { id: target, kascUrl: remembered, title: projectDefinitions.get(target)?.title || target };
+  const byId = projectDefinitions.get(target);
+  if (byId) return { id: target, kascUrl: null, title: byId.title || target };
+  for (const [id, def] of projectDefinitions) {
+    if (def?.title === target) return { id, kascUrl: kascLinkedUrls.get(id) || null, title: def.title };
+  }
+  return null;
+}
+
+// project: カード/data-project の押下でプロジェクトを切り替える(#130)。
+// keep= に無い項目は移動先の既定へ戻る: cam 未指定なら先頭 cam: プリセットへ
+// 移動(なければ現位置のまま)、base 未指定なら移動先の既定背景。
+// ポータルは開いたままにして移動先のポータルへ連続して遷移できるようにする
+// (移動先が portal:off なら閉じる)
+async function switchPortalProject(entry) {
+  const resolved = resolvePortalProject(entry?.name);
+  if (!resolved) {
+    console.warn(`project: プロジェクトを解決できません: ${entry?.name}`);
+    return false;
+  }
+  const keep = new Set(String(entry?.keep || "").split(",").map(s => s.trim().toLowerCase()).filter(Boolean));
+  const savedCamera = keep.has("cam") ? currentCameraView() : null;
+  const savedBase = keep.has("base")
+    ? (globeHidden ? "transparent" : (selectedBasemap?.id || selectedBasemap?.title || "none"))
+    : null;
+  await switchProjectInPlace(resolved.id, resolved.kascUrl);
+  if (savedCamera) flyTo(savedCamera, 0);
+  else if (cameraPresets[0]) cameraPresets[0]._extent ? flyToExtent(cameraPresets[0]) : flyTo(cameraPresets[0]);
+  if (savedBase != null) applyViewBase(savedBase);
+  if (!kascPortal().available()) kascPortal().close();
+  return true;
+}
+
+// ---- ダッシュボード(dash: 行の地図連動集計ビュー #123) ----
+// UI 構築は shared/dashboard.js へ共通化。ここでは宣言 getter と
+// レイヤーアダプタ(地物取得・where= 適用・地物フォーカス)を束ねる
+
+let _kascDash = null;
+function kascDash() {
+  if (!_kascDash) {
+    _kascDash = createKascDashboard({
+      t,
+      getDashSpecs: () => inspectorDashSpecs,
+      listLayers: () => getOrderedLayerItems()
+        .filter(i => i.type === "geojson" || i.type === "layer" || vectorDecoders.has(i.type))
+        .map(i => ({ id: i.id, title: i.title })),
+      getFeatures: id => (getLayerGeoJson(id)?.features) || [],
+      getLayerWhere: id => {
+        const it = getOrderedLayerItems().find(i => i.id === id || i.title === id);
+        return it?.where || null;
+      },
+      // グラフ選択 → レイヤーの where= へ反映(⏷フィルタと同じ applyLayerQueryFilter 経路。
+      // 非クエリ系は where-eval のクライアント評価、クエリ系は再クエリで地図が絞り込まれる)
+      setLayerWhere: (id, where) => {
+        const it = getOrderedLayerItems().find(i => i.id === id || i.title === id);
+        return it ? applyLayerQueryFilter(it, where || null) : false;
+      },
+      focusFeature: feature => {
+        const c = featureCentroid(feature);
+        if (c) void flyToFeature(c[1], c[0]);
+      },
+    });
+  }
+  return _kascDash;
+}
 
 function updateInspectorFromLayerOrder() {
   const input = document.querySelector("#inspector-input");
@@ -2637,7 +2992,7 @@ function collectDrapeProviders() {
       minimumLevel: selectedBasemap.minimumLevel,
       bbox: selectedBasemap.bbox,
       tileSize: selectedBasemap.tileSize || 256,
-      opacity: selectedBasemap.opacity ?? 1.0,
+      opacity: (selectedBasemap.opacity ?? 1.0) * basemapOpacityFactor,
       proxy: selectedBasemap.proxy,
     });
   }
@@ -2651,7 +3006,7 @@ function collectDrapeProviders() {
         minimumLevel: item.minimumLevel,
         bbox: item.bbox,
         tileSize: item.tileSize || 256,
-        opacity: item.opacity ?? 0.8,
+        opacity: (item.opacity ?? 0.8) * layerOpacityFactor,
         proxy: item.proxy,
       });
     });
@@ -4264,6 +4619,8 @@ async function refreshLayersImpl() {
               ? buildModelDataSource(item)
               : await buildGeoTiffOverlayDataSource(Cesium, item, proxyFetchUrl(item.url, item.proxy)));
         ds.show = effectiveLayerShow(item);
+        // geotiff overlay は item.opacity のみ焼き付くため、実効透過度(係数込み)で上書きする
+        applyLayerOpacityToEntities(ds, effectiveLayerOpacity(item));
         await viewer.dataSources.add(ds);
         vectorDataSources.push({ ds, id: item.id, title: item.title });
         layerRuntimeTargets.set(item.id, ds);
@@ -4408,14 +4765,58 @@ function primitiveDrapeHeightReference(dem, tiles3d) {
   return Cesium.HeightReference.CLAMP_TO_GROUND;
 }
 
+// レイヤー個別の opacity= × 表示>一般タブ「レイヤー透過度」係数。
+// スタイル・マテリアル適用時の実効アルファとして使う(0-1 にクランプ)
+function effectiveLayerOpacity(item) {
+  return Math.max(0, Math.min(1, (item?.opacity ?? 1) * layerOpacityFactor));
+}
+
 // primitive 経路のスタイル適用。style= の QML があればそちら、
 // なければ default_style: 行の既定値(地物側 simplestyle がさらに優先)を適用する
 function applyPrimitiveVectorStyle(primitive, item) {
+  const effOpacity = effectiveLayerOpacity(item);
   if (item?.qmlStyle) {
-    applyQmlStyleToPrimitive(primitive, item.qmlStyle, item.legendHidden, item.opacity ?? 1);
+    applyQmlStyleToPrimitive(primitive, item.qmlStyle, item.legendHidden, effOpacity);
     return;
   }
-  applyVectorDefaultStyleToPrimitive(primitive, item?.opacity ?? 1);
+  const dflt = vectorDefaultStyles;
+  if (dflt.point || dflt.line || dflt.polygon) {
+    applyVectorDefaultStyleToPrimitive(primitive, effOpacity);
+    return;
+  }
+  // スタイル未指定の primitive は描画済みマテリアルのアルファを直接乗算する
+  applyPrimitiveMaterialOpacity(primitive, effOpacity);
+}
+
+// スタイル未指定 GeoJsonPrimitive の透過度。Buffer コレクションのマテリアル
+// アルファへ係数を乗算する。初回適用時の元アルファを primitive._kascOpacityBases
+// に保持するため、スライダ往復でも元の見た目へ戻る
+function applyPrimitiveMaterialOpacity(primitive, opacity) {
+  if (!primitive) return;
+  if (!(opacity < 1) && !primitive._kascOpacityBases) return;
+  const bases = primitive._kascOpacityBases || (primitive._kascOpacityBases = new Map());
+  const each = (collection, ctor, matCtor, kind) => {
+    if (!collection) return;
+    const scratch = new ctor();
+    const matScratch = new matCtor();
+    for (let i = 0; i < collection.primitiveCount; i++) {
+      collection.get(i, scratch);
+      const mat = scratch.getMaterial(matScratch);
+      if (!mat) continue;
+      const key = kind + i;
+      let b = bases.get(key);
+      if (!b) {
+        b = { color: mat.color?.alpha ?? null, outline: mat.outlineColor?.alpha ?? null };
+        bases.set(key, b);
+      }
+      if (mat.color && b.color != null) mat.color = mat.color.withAlpha(b.color * opacity);
+      if (mat.outlineColor && b.outline != null) mat.outlineColor = mat.outlineColor.withAlpha(b.outline * opacity);
+      scratch.setMaterial(mat);
+    }
+  };
+  each(primitive.points, Cesium.BufferPoint, Cesium.BufferPointMaterial, "p");
+  each(primitive.polylines, Cesium.BufferPolyline, Cesium.BufferPolylineMaterial, "l");
+  each(primitive.polygons, Cesium.BufferPolygon, Cesium.BufferPolygonMaterial, "g");
 }
 
 // default_style: 行の既定を GeoJsonPrimitive(バッチ描画)へ適用する。
@@ -4622,9 +5023,10 @@ function buildImageOverlayDataSource(item) {
   const material = new Cesium.ImageMaterialProperty({
     image: item.url,
     transparent: true,
-    color: Cesium.Color.WHITE.withAlpha(item.opacity ?? 1),
+    color: Cesium.Color.WHITE.withAlpha(effectiveLayerOpacity(item)),
   });
   const ds = new Cesium.CustomDataSource(item.title);
+  ds._kascImageMaterial = material;
   if (item.imageCorners && item.imageCorners.length >= 3) {
     ds.entities.add({
       polygon: {
@@ -4720,15 +5122,17 @@ async function buildHeatmapDataSource(item, source) {
   const inst = h337.create({ container: div, radius: radiusPx, maxOpacity: 0.75, minOpacity: 0.05, blur: 0.85 });
   inst.setData({ max, data });
   const canvas = div.querySelector("canvas");
+  const material = new Cesium.ImageMaterialProperty({
+    image: canvas,
+    transparent: true,
+    color: Cesium.Color.WHITE.withAlpha(effectiveLayerOpacity(item)),
+  });
   const ds = new Cesium.CustomDataSource(item.title);
+  ds._kascImageMaterial = material;
   ds.entities.add({
     rectangle: {
       coordinates: Cesium.Rectangle.fromDegrees(west, south, east, north),
-      material: new Cesium.ImageMaterialProperty({
-        image: canvas,
-        transparent: true,
-        color: Cesium.Color.WHITE.withAlpha(item.opacity ?? 1),
-      }),
+      material,
       classificationType: Cesium.ClassificationType.BOTH,
     },
   });
@@ -5124,7 +5528,7 @@ async function buildStyledGeoJsonDataSource(source, drape, item = null) {
   if (item?.qmlStyle) {
     item._qmlClamp = clamp;
     try {
-      applyQmlStyleToDataSource(ds, item.qmlStyle, { clamp, hiddenSymbols: item.legendHidden, opacity: item.opacity ?? 1 });
+      applyQmlStyleToDataSource(ds, item.qmlStyle, { clamp, hiddenSymbols: item.legendHidden, opacity: effectiveLayerOpacity(item) });
       // QGIS の「重なったラベルを隠す」相当の衝突回避。カメラ停止時に再計算する
       if (ds._qmlLabels?.length) {
         const qmlSources = () => {
@@ -5145,7 +5549,7 @@ async function buildStyledGeoJsonDataSource(source, drape, item = null) {
     // opacity=0-1 : QML を持たないベクターレイヤーのレイヤー透過度(#58)。
     // 既定スタイル色へアルファ乗算して反映する（QML 適用レイヤーは
     // applyQmlStyleToDataSource の opacity 引数が担う）
-    applyLayerOpacityToEntities(ds, item?.opacity ?? 1);
+    applyLayerOpacityToEntities(ds, effectiveLayerOpacity(item));
   }
   // cluster=on または QML pointCluster: 点を含むレイヤーのみクラスタを有効化する
   if ((item?.cluster || item?.qmlStyle?.cluster?.kind === "cluster") && geoJsonHasPoints(source)) {
@@ -5156,15 +5560,26 @@ async function buildStyledGeoJsonDataSource(source, drape, item = null) {
   return ds;
 }
 
-// opacity=0-1 : 非QML ベクターレイヤーのレイヤー透過度(#58)。
-// 地物の塗り・輪郭・線・点・ピン・ラベル色へアルファを乗算する
+// opacity=0-1 : 非QML ベクター/オーバーレイレイヤーの実効透過度(#58)。
+// 地物の塗り・輪郭・線・点・ピン・ラベル色へアルファを乗算する。
+// 初回適用時の元アルファを ds._kascOpacityBases に保持するため、
+// 透過度スライダの往復でも元の色へ戻る(累乗で劣化しない)。
+// 画像オーバーレイ系(ds._kascImageMaterial)はマテリアル色を直接差し替える
 function applyLayerOpacityToEntities(ds, opacity) {
-  if (!ds || !(opacity < 1)) return;
+  if (!ds) return;
+  if (ds._kascImageMaterial) {
+    ds._kascImageMaterial.color = new Cesium.ConstantProperty(Cesium.Color.WHITE.withAlpha(opacity));
+    return;
+  }
+  if (!(opacity < 1) && !ds._kascOpacityBases) return;
   const now = Cesium.JulianDate.now();
+  const bases = ds._kascOpacityBases || (ds._kascOpacityBases = new Map());
   const fade = prop => {
     if (typeof prop?.getValue !== "function" || typeof prop?.setValue !== "function") return;
     const v = prop.getValue(now);
-    if (v instanceof Cesium.Color) prop.setValue(v.withAlpha(v.alpha * opacity));
+    if (!(v instanceof Cesium.Color)) return;
+    if (!bases.has(prop)) bases.set(prop, v.alpha);
+    prop.setValue(v.withAlpha(bases.get(prop) * opacity));
   };
   for (const e of ds.entities.values) {
     if (e.polygon) { fade(e.polygon.material?.color); fade(e.polygon.outlineColor); }
@@ -5172,6 +5587,36 @@ function applyLayerOpacityToEntities(ds, opacity) {
     if (e.point) fade(e.point.color);
     if (e.billboard) fade(e.billboard.color);
     if (e.label) { fade(e.label.fillColor); fade(e.label.outlineColor); }
+  }
+}
+
+// 表示>一般タブ「レイヤー透過度」係数をベクター・オーバーレイ・GeoJsonPrimitive
+// レイヤーへ再適用する(ImageryLayer はスライダ側で alpha を直接更新する)
+function applyLayerOpacityFactorToVectors() {
+  for (const entry of vectorDataSources) {
+    const item = layerState.get(entry.id);
+    const eff = item ? effectiveLayerOpacity(item) : layerOpacityFactor;
+    // スライダドラッグ中の連続 input で同じ値への再適用(全地物再スタイル)を避ける
+    if (entry.ds._kascAppliedOpacity === eff) continue;
+    entry.ds._kascAppliedOpacity = eff;
+    try {
+      if (item?.qmlStyle) {
+        applyQmlStyleToDataSource(entry.ds, item.qmlStyle, {
+          clamp: !!item._qmlClamp, hiddenSymbols: item.legendHidden, opacity: eff });
+      } else {
+        applyLayerOpacityToEntities(entry.ds, eff);
+      }
+    } catch (error) { console.warn("レイヤー透過度の再適用に失敗しました:", error); }
+  }
+  for (const [id, target] of layerRuntimeTargets) {
+    if (!(Cesium.GeoJsonPrimitive && target instanceof Cesium.GeoJsonPrimitive)) continue;
+    const item = layerState.get(id);
+    if (!item) continue;
+    const eff = effectiveLayerOpacity(item);
+    if (target._kascAppliedOpacity === eff) continue;
+    target._kascAppliedOpacity = eff;
+    try { applyPrimitiveVectorStyle(target, item); }
+    catch (error) { console.warn("レイヤー透過度の再適用に失敗しました:", error); }
   }
 }
 
@@ -5859,8 +6304,16 @@ function applyInspector(text) {
   inspectorThemes.splice(0, inspectorThemes.length);
   inspectorViews.splice(0, inspectorViews.length);
   inspectorHtmlSections.splice(0, inspectorHtmlSections.length);
+  inspectorNews.splice(0, inspectorNews.length);
+  inspectorStats.splice(0, inspectorStats.length);
+  inspectorSearches.splice(0, inspectorSearches.length);
+  // ディープリンク(feature=/data-feature)のハイライトはプロジェクト単位で破棄する
+  if (deepLinkHighlightDs) { viewer.dataSources.remove(deepLinkHighlightDs, true); deepLinkHighlightDs = null; }
   inspectorLinks.splice(0, inspectorLinks.length);
+  inspectorProjects.splice(0, inspectorProjects.length);
   inspectorPortalCards.splice(0, inspectorPortalCards.length);
+  inspectorDashSpecs.splice(0, inspectorDashSpecs.length);
+  inspectorForms.splice(0, inspectorForms.length);
   inspectorPortalSpec = null;
   inspectorPanelTitle = null;
   activeViewName = null;
@@ -6008,6 +6461,31 @@ function applyInspector(text) {
       inspectorHtmlSections.push({ title: parts.length > 1 ? parts[0] : "", spec, line });
     }
 
+    // news: <DATA/内ファイル|URL> | limit=件数 | title=見出し —
+    // ポータルのお知らせフィード(#128)。JSON/FrontMatter Markdown を
+    // 日付降順で描画する。src はポータル描画時に resolveProjectUrl で解決
+    if (type === "news") {
+      const parts = value.split("|").map(part => part.trim());
+      inspectorNews.push(parseKascNewsValue(parts, line));
+    }
+
+    // stat: レイヤー名 | group=属性 | value=属性|count | kind=kpi|bar|pie |
+    //   agg=… | title=見出し —
+    // ポータルの統計カード(#126)。属性をクライアント集計して
+    // KPI/棒/円グラフを描き、セグメントクリックで where= を地図へ適用
+    if (type === "stat") {
+      const parts = value.split("|").map(part => part.trim());
+      inspectorStats.push(parseKascStatValue(parts, line));
+    }
+
+    // search: レイヤー名|all | attr=属性名 | ph=プレースホルダ | title=見出し —
+    // ポータル埋め込み検索(#125)。ベクター検索索引で即時絞り込みし、
+    // 候補クリックで地物へズーム+選択する
+    if (type === "search") {
+      const parts = value.split("|").map(part => part.trim());
+      inspectorSearches.push(parseKascSearchValue(parts, line));
+    }
+
     // link: 名前 | url=… | desc=説明 | img=画像 —
     // ポータル画面の外部リンクカード。view: カードと宣言順で同じグリッドに並ぶ
     if (type === "link") {
@@ -6017,11 +6495,36 @@ function applyInspector(text) {
       inspectorPortalCards.push({ kind: "link", entry: link });
     }
 
+    // project: id|名前|kasc URL | desc=説明 | img=画像 | keep=cam,base —
+    // ポータル画面のプロジェクト切替カード(#130)。宣言順で同じグリッドに並ぶ
+    if (type === "project") {
+      const parts = value.split("|").map(part => part.trim());
+      const project = parseKascProjectValue(parts, line);
+      inspectorProjects.push(project);
+      inspectorPortalCards.push({ kind: "project", entry: project });
+    }
+
     // portal: on|off | title=見出し | open=auto|manual —
     // 起動時・🏠ボタンで開くポータル画面の宣言
     if (type === "portal") {
       const parts = value.split("|").map(part => part.trim());
       inspectorPortalSpec = parseKascPortalValue(parts);
+    }
+
+    // dash: 名前 | layer=レイヤー名 | kpi=… | chart=列 | matrix=行,列 | filters=列 —
+    // 地図連動ダッシュボードの宣言(#123)。属性をクライアント集計して表示する
+    if (type === "dash") {
+      const parts = value.split("|").map(part => part.trim());
+      inspectorDashSpecs.push(parseKascDashValue(parts, line));
+    }
+
+    // form: 名前 | title=見出し | to=URL|backend:パス | fields=… —
+    // ポータルのフォーム投稿カード(#131)。位置+属性をJSON POSTする
+    if (type === "form") {
+      const parts = value.split("|").map(part => part.trim());
+      const form = parseKascFormValue(parts, line);
+      inspectorForms.push(form);
+      inspectorPortalCards.push({ kind: "form", entry: form });
     }
 
     // group: グループパス( / 区切り) | expanded|collapsed —
@@ -6850,6 +7353,7 @@ function applyInspector(text) {
   renderLayerList();
   updateThemeSelect();
   updatePortalUI();
+  kascDash().updateButton();
   renderFlyPathSelect();
   void ensureDrawnRouteFlyPath();
   refreshLayers();
@@ -7583,12 +8087,17 @@ function setupEvents() {
   if (layerOpacityInput) {
     layerOpacityInput.addEventListener("input", event => {
       layerOpacityFactor = Number(event.target.value) || 0;
+      // タイル/ライブ描画などの ImageryLayer は alpha を直接更新する。
+      // _baseAlpha 未設定のレイヤー(/live/render 等)は現在値を初回の基準値にする
       const len = viewer.imageryLayers.length;
       for (let i = 0; i < len; i++) {
         const l = viewer.imageryLayers.get(i);
         if (l === basemapImageryLayer) continue;
-        l.alpha = (l._baseAlpha ?? l.alpha) * layerOpacityFactor;
+        if (!Number.isFinite(l._baseAlpha)) l._baseAlpha = l.alpha;
+        l.alpha = l._baseAlpha * layerOpacityFactor;
       }
+      // ベクター・画像オーバーレイ・GeoJsonPrimitive はスタイル側へ実効透過度を再適用する
+      applyLayerOpacityFactorToVectors();
       requestRender();
     });
   }
@@ -9576,35 +10085,7 @@ function setupEvents() {
 
 
   document.querySelector("#project-select")?.addEventListener("change", async event => {
-    currentProjectId = event.target.value;
-    const linkedKascUrl = kascLinkedUrls.get(currentProjectId);
-    const params = new URLSearchParams(window.location.search);
-    if (linkedKascUrl) {
-      // 群マニフェスト由来のエントリは ?kasc= 直読みのまま切り替える
-      currentKascUrl = linkedKascUrl;
-      params.set("kasc", linkedKascUrl);
-      params.delete("project");
-    } else {
-      // 実プロジェクトの選択は ?kasc= 直読みモードを抜ける
-      currentKascUrl = null;
-      kascBaseOverride = null;
-      if (currentProjectId) params.set("project", currentProjectId);
-      else params.delete("project");
-      params.delete("kasc");
-    }
-    window.history.replaceState(null, "", `${window.location.pathname}?${params.toString()}${window.location.hash}`);
-    updateProjectRootPath();
-    // scope:"project" のプラグインレイヤーはプロジェクト単位のデータとして切り離す
-    pluginLayers.filter(item => item.scope === "project").forEach(removePluginLayer);
-    // plugin: 行で起動したプラグインはレイヤーが除去されるため、新 .kasc 適用後に
-    // plugin-loader 側で再起動できるよう切替を通知する
-    window.kasugaiApi?.emit("project-changed", { projectId: currentProjectId });
-    try {
-      setInspectorStatus(t("inspector.status.loadingProject"));
-      await loadInspectorConfig();
-    } catch (error) {
-      setInspectorStatus(t("inspector.status.loadProjectFailed", { error: error instanceof Error ? error.message : error }), true);
-    }
+    await switchProjectInPlace(event.target.value, kascLinkedUrls.get(event.target.value) || null);
   });
 
   const shareCopyBtn = document.querySelector("#share-copy");
@@ -10486,6 +10967,21 @@ function setupEvents() {
 
   const clickHandler = new Cesium.ScreenSpaceEventHandler(viewer.canvas);
   clickHandler.setInputAction(movement => {
+    // form: loc フィールドの位置拾いモード: 1クリックで座標をPromiseへ返す
+    if (formPickResolve) {
+      const resolve = formPickResolve;
+      formPickResolve = null;
+      const ray = viewer.camera.getPickRay(movement.position);
+      const cartesian = ray
+        ? ((() => { try { return viewer.scene.globe.pick(ray, viewer.scene); } catch (e) { return null; } })()
+          || viewer.camera.pickEllipsoid(movement.position, viewer.scene.globe.ellipsoid))
+        : null;
+      if (cartesian) {
+        const carto = Cesium.Cartographic.fromCartesian(cartesian);
+        resolve({ lon: carto.longitude * 180 / Math.PI, lat: carto.latitude * 180 / Math.PI });
+      } else resolve(null);
+      return;
+    }
     // Street View 地点拾いモード: クリック位置の地表座標で Street View を開く
     if (streetViewPickMode) {
       streetViewPickMode = false;
@@ -12005,6 +12501,26 @@ function setupVectorSearch() {
     });
   }
 
+  // 属性一覧の表示中はミニマップを一覧の上端まで持ち上げる。
+  // ミニマップの z-index(1004) が一覧(100)より高く、そのままでは一覧を覆い
+  // 隠すため、z-index ではなく位置をずらして両方を見える状態にする。
+  // 開閉(class 変化)と高さ変更(リサイザー/CSS resize)の両方に追従する
+  const minimapEl = document.querySelector("#minimap");
+  if (minimapEl && vectorAttrWidget) {
+    const syncMinimapAboveAttrWidget = () => {
+      if (!vectorAttrWidget.classList.contains("visible")) {
+        minimapEl.style.bottom = "";
+        return;
+      }
+      // 画面高さが足りない場合はミニマップが上にはみ出さないようクランプする
+      const bottom = Math.min(vectorAttrWidget.offsetHeight + 14, window.innerHeight - 160);
+      minimapEl.style.bottom = Math.max(74, bottom) + "px";
+    };
+    new MutationObserver(syncMinimapAboveAttrWidget)
+      .observe(vectorAttrWidget, { attributes: true, attributeFilter: ["class"] });
+    if (window.ResizeObserver) new ResizeObserver(syncMinimapAboveAttrWidget).observe(vectorAttrWidget);
+  }
+
   window.vectorAttrWidget = { open: openVectorAttrWidget, close: closeVectorAttrWidget };
 }
 
@@ -12274,6 +12790,7 @@ setupThreeJs();
 applyInspector("");
 updateEffectSettings();
 const urlCamera = parseUrlCamera(initialCameraSource);
+const urlDeepLink = parseUrlDeepLink(initialCameraSource);
 
 function parseUrlCamera(source = window.location.search + window.location.hash) {
   const hashIndex = source.indexOf("#");
@@ -12625,6 +13142,7 @@ window.kasugaiApi = {
     return true;
   },
   openPortal() { openPortal(); return portalAvailable(); },
+  openDashboard() { kascDash().open(); return inspectorDashSpecs.length > 0; },
   closePortal() { closePortal(); return true; },
   async focusLayer(idOrTitle) {
     const layer = getOrderedLayerItems().find(item => item.id === idOrTitle || item.title === idOrTitle);
@@ -13408,6 +13926,9 @@ window.addEventListener("pagehide", () => {
     if (boxResult === "done") console.log("[mcp] Box OAuth 接続が完了しました");
   } catch (e) { console.error(e); }
   void connectEnabledMcpServers();
+  // 起動時の QGIS Live 自動接続（manageBackend:false のため startAiBackend 経由では
+  // 呼ばれないので、ここで同じ順序（connectEnabledMcpServers 直後）で呼ぶ）
+  void autoConnectQgis();
   updateAppPanelVisibility();
   // capabilities 確定後に Copilot/Devin 選択肢の可否を再評価する（アプリ版のみ表示）
   updateBridgeProviderOptions();
@@ -13535,6 +14056,10 @@ window.addEventListener("pagehide", () => {
   } else {
     if (initialCamera) flyTo(initialCamera, 0);   // 履歴がない or 同じURL
   }
+  // URL ディープリンク(view=/feature=/where=)を適用(#124)。初期カメラ位置と
+  // エンジン切替の引継ぎ状態より後に適用し、view= の cam=/feature= のズームと
+  // フィルタが最終状態になるようにする
+  try { await applyUrlDeepLink(); } catch (e) { console.error(e); }
   renderPresets();
   window.kasugaiApi.isReady = true;
   window.kasugaiApi.emit("ready");
