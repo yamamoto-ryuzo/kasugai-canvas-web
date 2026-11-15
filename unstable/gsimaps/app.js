@@ -1116,6 +1116,13 @@ function buildLayerRow(entry, exclusive, radioName) {
   const row = document.createElement("label");
   row.className = "layer-row";
 
+  // 他エンジンの凡例トグル列に相当するスペーサを置き、
+  // チェックボックスの左位置を全行で揃える
+  const sp = document.createElement("span");
+  sp.className = "layer-legend-toggle-spacer";
+  sp.setAttribute("aria-hidden", "true");
+  row.append(sp);
+
   const cb = document.createElement("input");
   cb.type = exclusive ? "radio" : "checkbox";
   // 未対応形式も session-state 正典の一覧どおり行は残し、グレーアウト＋
