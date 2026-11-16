@@ -263,7 +263,7 @@ async function waitForWebgisHub(timeoutMs, until) {
   }
   return null;
 }
-// ハブ未検出時の自動インストール誘導。
+// ハブ未検出時のインストール誘導（案内表示のみ。DL はユーザー明示操作時のみ）。
 // フロー: bridge-hub.exe（自己インストール型）を DL → ユーザーが実行すると
 // %LOCALAPPDATA%\kasugai\bridge-hub へコピー＋自動起動登録＋8511 で起動 →
 // こちらは /health ポーリングで検出して接続まで自動完了する。
@@ -295,7 +295,10 @@ function fetchHubBundleVersion() {
 let hubInstallWait = null; // 重複実行ガード
 // prev = 更新元の旧ハブ情報 {version}（旧ハブ検出からの更新導線で渡す。
 // 未定義なら新規インストール待ち＝最初に応答したハブを返す）
-async function offerHubInstall(provider, auto, prev) {
+// ダウンロードは「ハブを自動インストール」ボタン・DLリンクの明示操作のみ。
+// resyncProviderSelect の change 発火などプログラム経路でもこの関数へ来るため、
+// ここで自動 DL するとページを開くだけで繰り返しダウンロードが発生する
+async function offerHubInstall(provider, prev) {
   const note = document.querySelector("#bridge-hub-note");
   const btn = document.querySelector("#bridge-hub-install");
   const status = document.querySelector("#bridge-hub-status");
@@ -342,8 +345,6 @@ async function offerHubInstall(provider, auto, prev) {
     return hubInstallWait;
   };
   btn.onclick = () => void start();
-  // プロバイダ選択（ユーザーの明示操作）に続けて自動でも DL+待機を開始する
-  if (auto) void start();
 }
 // ブリッジ系プロバイダの利用可否。アプリ版は capabilities の feature 通知、
 // ブラウザ WebGIS 用はハブの providers.<名>.available で判定する
@@ -1068,7 +1069,7 @@ export function setupAiSettings() {
       if (bundledVersion && found.version && compareVersions(bundledVersion, found.version) <= 0) {
         console.warn(`[bridge] 配布中 bridge-hub ${bundledVersion} は実行中ハブ ${found.version} 以下のため更新導線をスキップします`);
       } else {
-        void offerHubInstall(provider, false, { version: found.version });
+        void offerHubInstall(provider, { version: found.version });
       }
     } else {
       setBridgeStatus(ui,
@@ -1155,12 +1156,13 @@ export function setupAiSettings() {
       // ここでの重い検証（Devin の acp 起動・ブラウザ認証を含み得る）はスキップする
       if (!suppressSettingsVerify) {
         // エンドポイント未入力なら疎通するブリッジを自動検出して入力する。
-        // 見つからずユーザーが明示選択した場合はハブの自動インストールを開始する
+        // 見つからずユーザーが明示選択した場合はハブのインストール案内を表示する
+        //（DL自体は行わない — インストールタブのボタン/リンクの明示操作のみ）
         if (endpointInput && !endpointInput.value.trim()) {
           void detectBridge(v).then(found => {
             if (found && endpointInput && !endpointInput.value.trim()) endpointInput.value = found.endpoint;
             void refreshBridgeStatus(v);
-            if (!found && userAction) void offerHubInstall(v, true);
+            if (!found && userAction) void offerHubInstall(v);
           });
         } else {
           void refreshBridgeStatus(v);
