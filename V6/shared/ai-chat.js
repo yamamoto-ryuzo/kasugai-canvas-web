@@ -293,12 +293,44 @@ function fetchHubBundleVersion() {
   return hubBundleVersionPromise;
 }
 let hubInstallWait = null; // 重複実行ガード
-// prev = 更新元の旧ハブ情報 {version}（旧ハブ検出からの更新導線で渡す。
-// 未定義なら新規インストール待ち＝最初に応答したハブを返す）
-// ダウンロードは「ハブを自動インストール」ボタン・DLリンクの明示操作のみ。
-// resyncProviderSelect の change 発火などプログラム経路でもこの関数へ来るため、
-// ここで自動 DL するとページを開くだけで繰り返しダウンロードが発生する
-async function offerHubInstall(provider, prev) {
+// 「ハブを自動インストール」ボタンの待機条件。offerHubInstall が旧ハブ検出時に
+// 「新版への置き換わり」条件を設定する（null＝新規＝最初に応答したハブで完了）
+let hubInstallUntil = null;
+// bridge-hub.zip の DL を発火させてハブの起動を待つ。
+// 呼び出しは必ずユーザーの明示操作（「ハブを自動インストール」ボタン）から —
+// resyncProviderSelect の change 発火などプログラム経路で DL すると
+// CDN を開くだけで繰り返しダウンロードが発生するため自動 DL は行わない
+async function startHubInstall() {
+  const status = document.querySelector("#bridge-hub-status");
+  // ダウンロードはクリックごとに発火する（待機中の再クリック＝再DL・再案内
+  // のリトライ導線。ポーリング自体は1本に保つ）
+  const a = document.createElement("a");
+  a.href = "../download/bridge-hub.zip";
+  a.download = "bridge-hub.zip";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  if (status) status.textContent = t("chat.bridge.hubWaitExe");
+  if (hubInstallWait) return hubInstallWait;
+  hubInstallWait = (async () => {
+    const hub = await waitForWebgisHub(180000, hubInstallUntil);
+    if (hub) {
+      const input = document.querySelector("#agent-endpoint");
+      if (input && !input.value.trim()) input.value = hub.endpoint;
+      if (status) status.textContent = t("chat.bridge.hubDetected");
+      void refreshCliSetupStates();
+      void refreshChatProviderSwitch();
+    } else if (status) {
+      status.textContent = webgisHubBlocked
+        ? t("chat.bridge.hubLnaBlocked") : t("chat.bridge.hubNotFound");
+    }
+  })().finally(() => { hubInstallWait = null; });
+  return hubInstallWait;
+}
+// ハブ未検出時のインストール案内を表示する。DL は開始せず、
+// 「ハブを自動インストール」ボタンの待機条件（hubInstallUntil）だけを更新する
+// prev = 更新元の旧ハブ情報 {version}（旧ハブ検出からの更新導線で渡す）
+async function offerHubInstall(prev) {
   const note = document.querySelector("#bridge-hub-note");
   const btn = document.querySelector("#bridge-hub-install");
   const status = document.querySelector("#bridge-hub-status");
@@ -317,34 +349,8 @@ async function offerHubInstall(provider, prev) {
   // 更新待ち: 旧ハブは実行前から応答しているため「応答した」だけでは完了と
   // みなせない。/vector 対応フィールドの出現（新ビルドの標識）か、
   // version の変化をもって新版へ置き換わったと判定する
-  const until = prev === undefined ? null
+  hubInstallUntil = prev === undefined ? null
     : (h) => h.hasVector || (h.version !== null && h.version !== prev.version);
-  const start = async () => {
-    // exe のダウンロードは常に発火する（待機中の再クリック＝再DL・再案内
-    // のリトライ導線。ポーリング自体は1本に保つ）
-    const a = document.createElement("a");
-    a.href = "../download/bridge-hub.zip";
-    a.download = "bridge-hub.zip";
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    if (status) status.textContent = t("chat.bridge.hubWaitExe");
-    if (hubInstallWait) return hubInstallWait;
-    hubInstallWait = (async () => {
-      const hub = await waitForWebgisHub(180000, until);
-      if (hub) {
-        const input = document.querySelector("#agent-endpoint");
-        if (input && !input.value.trim()) input.value = hub.endpoint;
-        if (status) status.textContent = t("chat.bridge.hubDetected");
-        void refreshBridgeStatus(provider);
-      } else if (status) {
-        status.textContent = webgisHubBlocked
-          ? t("chat.bridge.hubLnaBlocked") : t("chat.bridge.hubNotFound");
-      }
-    })().finally(() => { hubInstallWait = null; });
-    return hubInstallWait;
-  };
-  btn.onclick = () => void start();
 }
 // ブリッジ系プロバイダの利用可否。アプリ版は capabilities の feature 通知、
 // ブラウザ WebGIS 用はハブの providers.<名>.available で判定する
@@ -1069,7 +1075,7 @@ export function setupAiSettings() {
       if (bundledVersion && found.version && compareVersions(bundledVersion, found.version) <= 0) {
         console.warn(`[bridge] 配布中 bridge-hub ${bundledVersion} は実行中ハブ ${found.version} 以下のため更新導線をスキップします`);
       } else {
-        void offerHubInstall(provider, { version: found.version });
+        void offerHubInstall({ version: found.version });
       }
     } else {
       setBridgeStatus(ui,
@@ -1162,7 +1168,7 @@ export function setupAiSettings() {
           void detectBridge(v).then(found => {
             if (found && endpointInput && !endpointInput.value.trim()) endpointInput.value = found.endpoint;
             void refreshBridgeStatus(v);
-            if (!found && userAction) void offerHubInstall(v);
+            if (!found && userAction) void offerHubInstall();
           });
         } else {
           void refreshBridgeStatus(v);
@@ -1385,6 +1391,11 @@ export function setupAiSettings() {
 
   // 指示書（agents/skills）管理 UI を「追加指示」ペインへ描画する
   renderAiInstruments();
+
+  // 「ハブを自動インストール」ボタン — bridge-hub.zip を DL して起動を待つ。
+  // 旧ハブからの更新導線（offerHubInstall）が待機条件を差し替える場合がある
+  document.querySelector("#bridge-hub-install")
+    ?.addEventListener("click", () => void startHubInstall());
 
   // 「CLI を自動インストール」ボタン — ハブの /setup を呼び、
   // 検出状況 → 確認 → install ジョブの完了までを進行表示する
