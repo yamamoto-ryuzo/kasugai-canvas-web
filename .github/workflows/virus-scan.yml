@@ -26,7 +26,11 @@ jobs:
           sudo apt-get install -y clamav
 
       - name: Update virus definitions
-        run: sudo freshclam
+        # ubuntu-26.04 では clamav インストール時に freshclam サービスが自動起動し
+        # /var/log/clamav/freshclam.log を掴むため、停止してから手動更新する
+        run: |
+          sudo systemctl stop clamav-freshclam.service clamav-freshclam.timer 2>/dev/null || true
+          sudo freshclam
 
       - name: Scan tracked binary artifacts
         run: |
