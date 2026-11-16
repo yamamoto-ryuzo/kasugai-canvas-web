@@ -1,7 +1,352 @@
 {
-  "generated_at": "2026-11-16T09:46:00.249439+00:00",
+  "generated_at": "2026-11-16T10:57:14.797230+00:00",
   "repo": "yamamoto-ryuzo/kasugai-canvas-web",
   "channels": {
+    "unstable": [
+      {
+        "version": "7.1.0",
+        "deployed_at": "2026-11-16T19:56:52+09:00",
+        "commit": "bc77190",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/bc77190",
+        "message": "Sync web/ to unstable (v7.1.0)"
+      },
+      {
+        "version": "7.1.0",
+        "deployed_at": "2026-11-16T18:31:17+09:00",
+        "commit": "13a941b",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/13a941b",
+        "message": "Sync web/ to unstable (v7.1.0)"
+      },
+      {
+        "version": "7.1.0",
+        "deployed_at": "2026-11-16T07:32:09+09:00",
+        "commit": "3521527",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/3521527",
+        "message": "Sync web/ to unstable (v7.1.0)"
+      },
+      {
+        "version": "7.1.0",
+        "deployed_at": "2026-11-15T17:17:22+09:00",
+        "commit": "fae2029",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/fae2029",
+        "message": "Sync web/ to unstable (v7.1.0)"
+      },
+      {
+        "version": "7.0.0",
+        "deployed_at": "2026-11-15T14:19:59+09:00",
+        "commit": "49912ca",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/49912ca",
+        "message": "Sync web/ to unstable (v7.0.0)"
+      },
+      {
+        "version": "6.24.0",
+        "deployed_at": "2026-11-15T11:49:48+09:00",
+        "commit": "7183419",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/7183419",
+        "message": "Sync web/ to unstable (v6.24.0)"
+      },
+      {
+        "version": "6.24.0",
+        "deployed_at": "2026-11-15T11:43:50+09:00",
+        "commit": "ef29806",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/ef29806",
+        "message": "Sync web/ to unstable (v6.24.0)"
+      },
+      {
+        "version": "6.24.0",
+        "deployed_at": "2026-11-12T20:19:25+09:00",
+        "commit": "d07c7b1",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/d07c7b1",
+        "message": "Sync web/ to unstable (v6.24.0)"
+      },
+      {
+        "version": "6.24.0",
+        "deployed_at": "2026-11-09T19:57:32+09:00",
+        "commit": "2716be9",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/2716be9",
+        "message": "Sync web/ to unstable (v6.24.0)"
+      },
+      {
+        "version": "6.24.0",
+        "deployed_at": "2026-11-09T19:38:05+09:00",
+        "commit": "5b9cfae",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/5b9cfae",
+        "message": "Sync web/ to unstable (v6.24.0)"
+      },
+      {
+        "version": "6.24.0",
+        "deployed_at": "2026-11-09T18:59:09+09:00",
+        "commit": "f8c5949",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/f8c5949",
+        "message": "Sync web/ to unstable (v6.24.0)"
+      },
+      {
+        "version": "6.23.0",
+        "deployed_at": "2026-11-08T01:10:11+09:00",
+        "commit": "fb3a842",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/fb3a842",
+        "message": "Sync web/ to unstable (v6.23.0)"
+      },
+      {
+        "version": "6.23.0",
+        "deployed_at": "2026-11-07T23:33:59+09:00",
+        "commit": "e768179",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/e768179",
+        "message": "Sync web/ to unstable (v6.23.0)"
+      },
+      {
+        "version": "6.22.0",
+        "deployed_at": "2026-11-07T23:11:45+09:00",
+        "commit": "aa71dff",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/aa71dff",
+        "message": "Sync web/ to unstable (v6.22.0)"
+      },
+      {
+        "version": "6.21.0",
+        "deployed_at": "2026-11-07T10:58:02+09:00",
+        "commit": "be98f05",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/be98f05",
+        "message": "Sync web/ to unstable (v6.21.0)"
+      },
+      {
+        "version": "6.21.0",
+        "deployed_at": "2026-11-07T10:32:14+09:00",
+        "commit": "d50ffec",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/d50ffec",
+        "message": "Sync web/ to unstable (v6.21.0)"
+      },
+      {
+        "version": "6.20.0",
+        "deployed_at": "2026-11-07T08:59:20+09:00",
+        "commit": "4176a8f",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/4176a8f",
+        "message": "Sync web/ to unstable (v6.20.0)"
+      },
+      {
+        "version": "6.20.0",
+        "deployed_at": "2026-11-07T08:36:09+09:00",
+        "commit": "2267332",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/2267332",
+        "message": "Sync web/ to unstable (v6.20.0)"
+      },
+      {
+        "version": "6.20.0",
+        "deployed_at": "2026-11-07T08:28:44+09:00",
+        "commit": "e49609e",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/e49609e",
+        "message": "Sync web/ to unstable (v6.20.0)"
+      },
+      {
+        "version": "6.20.0",
+        "deployed_at": "2026-11-07T08:25:40+09:00",
+        "commit": "5d82b15",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/5d82b15",
+        "message": "Sync web/ to unstable (v6.20.0)"
+      },
+      {
+        "version": "6.20.0",
+        "deployed_at": "2026-11-07T08:22:06+09:00",
+        "commit": "d1f12c3",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/d1f12c3",
+        "message": "Sync web/ to unstable (v6.20.0)"
+      },
+      {
+        "version": "6.20.0",
+        "deployed_at": "2026-11-07T07:04:56+09:00",
+        "commit": "ff49411",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/ff49411",
+        "message": "Sync web/ to unstable (v6.20.0)"
+      },
+      {
+        "version": "6.20.0",
+        "deployed_at": "2026-11-07T06:57:58+09:00",
+        "commit": "fe6e543",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/fe6e543",
+        "message": "Sync web/ to unstable (v6.20.0)"
+      },
+      {
+        "version": "6.20.0",
+        "deployed_at": "2026-11-07T06:45:16+09:00",
+        "commit": "874161f",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/874161f",
+        "message": "Sync web/ to unstable (v6.20.0)"
+      },
+      {
+        "version": "6.20.0",
+        "deployed_at": "2026-11-07T02:45:42+09:00",
+        "commit": "3f7189b",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/3f7189b",
+        "message": "Sync web/ to unstable (v6.20.0)"
+      },
+      {
+        "version": "6.20.0",
+        "deployed_at": "2026-11-07T00:15:31+09:00",
+        "commit": "df7b996",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/df7b996",
+        "message": "Sync web/ to unstable (v6.20.0)"
+      },
+      {
+        "version": "6.13.0",
+        "deployed_at": "2026-11-02T00:34:09+09:00",
+        "commit": "dad89e1",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/dad89e1",
+        "message": "Sync web/ to unstable (v6.13.0)"
+      },
+      {
+        "version": "6.11.0",
+        "deployed_at": "2026-11-01T09:54:42+09:00",
+        "commit": "bd9f609",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/bd9f609",
+        "message": "Sync web/ to unstable (v6.11.0)"
+      },
+      {
+        "version": "6.9.0",
+        "deployed_at": "2026-11-01T07:50:33+09:00",
+        "commit": "78f35dd",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/78f35dd",
+        "message": "Sync web/ to unstable (v6.9.0)"
+      },
+      {
+        "version": "6.9.0",
+        "deployed_at": "2026-11-01T07:12:54+09:00",
+        "commit": "26484eb",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/26484eb",
+        "message": "Sync web/ to unstable (v6.9.0)"
+      },
+      {
+        "version": "6.9.0",
+        "deployed_at": "2026-11-01T07:10:42+09:00",
+        "commit": "af418d8",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/af418d8",
+        "message": "Sync web/ to unstable (v6.9.0)"
+      },
+      {
+        "version": "6.9.0",
+        "deployed_at": "2026-11-01T06:56:33+09:00",
+        "commit": "bd382ce",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/bd382ce",
+        "message": "Sync web/ to unstable (v6.9.0)"
+      },
+      {
+        "version": "6.9.0",
+        "deployed_at": "2026-11-01T06:48:46+09:00",
+        "commit": "1ff13f6",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/1ff13f6",
+        "message": "Sync web/ to unstable (v6.9.0)"
+      },
+      {
+        "version": "6.8.0",
+        "deployed_at": "2026-10-31T22:35:10+09:00",
+        "commit": "51b666e",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/51b666e",
+        "message": "Sync web/ to unstable (v6.8.0)"
+      },
+      {
+        "version": "6.5.17",
+        "deployed_at": "2026-10-31T12:51:44+09:00",
+        "commit": "293ba24",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/293ba24",
+        "message": "Sync web/ to unstable (v6.5.17)"
+      },
+      {
+        "version": "6.2.0",
+        "deployed_at": "2026-10-29T22:56:36+09:00",
+        "commit": "a9b9b21",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/a9b9b21",
+        "message": "Sync web/ to unstable (v6.2.0)"
+      },
+      {
+        "version": "6.2.0",
+        "deployed_at": "2026-10-29T20:00:09+09:00",
+        "commit": "39ddf1d",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/39ddf1d",
+        "message": "Sync web/ to unstable (v6.2.0)"
+      },
+      {
+        "version": "6.1.2",
+        "deployed_at": "2026-10-29T11:18:11+09:00",
+        "commit": "8b521c0",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/8b521c0",
+        "message": "Sync web/ to unstable (v6.1.2)"
+      },
+      {
+        "version": "6.1.2",
+        "deployed_at": "2026-10-29T09:15:03+09:00",
+        "commit": "673f730",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/673f730",
+        "message": "Sync web/ to unstable (v6.1.2)"
+      },
+      {
+        "version": "6.1.2",
+        "deployed_at": "2026-10-29T09:09:51+09:00",
+        "commit": "045dba5",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/045dba5",
+        "message": "Sync web/ to unstable (v6.1.2)"
+      },
+      {
+        "version": "6.0.0",
+        "deployed_at": "2026-10-28T22:50:09+09:00",
+        "commit": "c60960d",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/c60960d",
+        "message": "Sync web/ to unstable (v6.0.0)"
+      },
+      {
+        "version": "5.31.0",
+        "deployed_at": "2026-10-28T22:38:16+09:00",
+        "commit": "d77440f",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/d77440f",
+        "message": "Sync web/ to unstable (v5.31.0)"
+      },
+      {
+        "version": "5.31.0",
+        "deployed_at": "2026-10-28T18:30:53+09:00",
+        "commit": "97b33a1",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/97b33a1",
+        "message": "Sync web/ to unstable (v5.31.0)"
+      },
+      {
+        "version": "5.31.0",
+        "deployed_at": "2026-10-28T18:26:09+09:00",
+        "commit": "aae701f",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/aae701f",
+        "message": "Sync web/ to unstable (v5.31.0)"
+      },
+      {
+        "version": "5.31.0",
+        "deployed_at": "2026-10-28T18:14:36+09:00",
+        "commit": "c8c9803",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/c8c9803",
+        "message": "Sync web/ to unstable (v5.31.0)"
+      },
+      {
+        "version": "5.31.0",
+        "deployed_at": "2026-10-28T18:10:04+09:00",
+        "commit": "a123beb",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/a123beb",
+        "message": "Sync web/ to unstable (v5.31.0)"
+      },
+      {
+        "version": "5.31.0",
+        "deployed_at": "2026-10-28T17:58:43+09:00",
+        "commit": "f7f6de5",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/f7f6de5",
+        "message": "Sync web/ to unstable (v5.31.0)"
+      },
+      {
+        "version": "5.31.0",
+        "deployed_at": "2026-10-28T17:52:45+09:00",
+        "commit": "d913436",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/d913436",
+        "message": "Sync web/ to unstable (v5.31.0)"
+      },
+      {
+        "version": "5.31.0",
+        "deployed_at": "2026-10-28T17:39:16+09:00",
+        "commit": "3d54b40",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/3d54b40",
+        "message": "Sync web/ to unstable (v5.31.0)"
+      }
+    ],
     "stable": [
       {
         "version": "7.1.0",
@@ -674,344 +1019,6 @@
         "commit": "7d173b5",
         "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/7d173b5",
         "message": "Sync web/ to stable (v5.28.0)"
-      }
-    ],
-    "unstable": [
-      {
-        "version": "7.1.0",
-        "deployed_at": "2026-11-16T18:31:17+09:00",
-        "commit": "13a941b",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/13a941b",
-        "message": "Sync web/ to unstable (v7.1.0)"
-      },
-      {
-        "version": "7.1.0",
-        "deployed_at": "2026-11-16T07:32:09+09:00",
-        "commit": "3521527",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/3521527",
-        "message": "Sync web/ to unstable (v7.1.0)"
-      },
-      {
-        "version": "7.1.0",
-        "deployed_at": "2026-11-15T17:17:22+09:00",
-        "commit": "fae2029",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/fae2029",
-        "message": "Sync web/ to unstable (v7.1.0)"
-      },
-      {
-        "version": "7.0.0",
-        "deployed_at": "2026-11-15T14:19:59+09:00",
-        "commit": "49912ca",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/49912ca",
-        "message": "Sync web/ to unstable (v7.0.0)"
-      },
-      {
-        "version": "6.24.0",
-        "deployed_at": "2026-11-15T11:49:48+09:00",
-        "commit": "7183419",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/7183419",
-        "message": "Sync web/ to unstable (v6.24.0)"
-      },
-      {
-        "version": "6.24.0",
-        "deployed_at": "2026-11-15T11:43:50+09:00",
-        "commit": "ef29806",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/ef29806",
-        "message": "Sync web/ to unstable (v6.24.0)"
-      },
-      {
-        "version": "6.24.0",
-        "deployed_at": "2026-11-12T20:19:25+09:00",
-        "commit": "d07c7b1",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/d07c7b1",
-        "message": "Sync web/ to unstable (v6.24.0)"
-      },
-      {
-        "version": "6.24.0",
-        "deployed_at": "2026-11-09T19:57:32+09:00",
-        "commit": "2716be9",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/2716be9",
-        "message": "Sync web/ to unstable (v6.24.0)"
-      },
-      {
-        "version": "6.24.0",
-        "deployed_at": "2026-11-09T19:38:05+09:00",
-        "commit": "5b9cfae",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/5b9cfae",
-        "message": "Sync web/ to unstable (v6.24.0)"
-      },
-      {
-        "version": "6.24.0",
-        "deployed_at": "2026-11-09T18:59:09+09:00",
-        "commit": "f8c5949",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/f8c5949",
-        "message": "Sync web/ to unstable (v6.24.0)"
-      },
-      {
-        "version": "6.23.0",
-        "deployed_at": "2026-11-08T01:10:11+09:00",
-        "commit": "fb3a842",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/fb3a842",
-        "message": "Sync web/ to unstable (v6.23.0)"
-      },
-      {
-        "version": "6.23.0",
-        "deployed_at": "2026-11-07T23:33:59+09:00",
-        "commit": "e768179",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/e768179",
-        "message": "Sync web/ to unstable (v6.23.0)"
-      },
-      {
-        "version": "6.22.0",
-        "deployed_at": "2026-11-07T23:11:45+09:00",
-        "commit": "aa71dff",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/aa71dff",
-        "message": "Sync web/ to unstable (v6.22.0)"
-      },
-      {
-        "version": "6.21.0",
-        "deployed_at": "2026-11-07T10:58:02+09:00",
-        "commit": "be98f05",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/be98f05",
-        "message": "Sync web/ to unstable (v6.21.0)"
-      },
-      {
-        "version": "6.21.0",
-        "deployed_at": "2026-11-07T10:32:14+09:00",
-        "commit": "d50ffec",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/d50ffec",
-        "message": "Sync web/ to unstable (v6.21.0)"
-      },
-      {
-        "version": "6.20.0",
-        "deployed_at": "2026-11-07T08:59:20+09:00",
-        "commit": "4176a8f",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/4176a8f",
-        "message": "Sync web/ to unstable (v6.20.0)"
-      },
-      {
-        "version": "6.20.0",
-        "deployed_at": "2026-11-07T08:36:09+09:00",
-        "commit": "2267332",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/2267332",
-        "message": "Sync web/ to unstable (v6.20.0)"
-      },
-      {
-        "version": "6.20.0",
-        "deployed_at": "2026-11-07T08:28:44+09:00",
-        "commit": "e49609e",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/e49609e",
-        "message": "Sync web/ to unstable (v6.20.0)"
-      },
-      {
-        "version": "6.20.0",
-        "deployed_at": "2026-11-07T08:25:40+09:00",
-        "commit": "5d82b15",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/5d82b15",
-        "message": "Sync web/ to unstable (v6.20.0)"
-      },
-      {
-        "version": "6.20.0",
-        "deployed_at": "2026-11-07T08:22:06+09:00",
-        "commit": "d1f12c3",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/d1f12c3",
-        "message": "Sync web/ to unstable (v6.20.0)"
-      },
-      {
-        "version": "6.20.0",
-        "deployed_at": "2026-11-07T07:04:56+09:00",
-        "commit": "ff49411",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/ff49411",
-        "message": "Sync web/ to unstable (v6.20.0)"
-      },
-      {
-        "version": "6.20.0",
-        "deployed_at": "2026-11-07T06:57:58+09:00",
-        "commit": "fe6e543",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/fe6e543",
-        "message": "Sync web/ to unstable (v6.20.0)"
-      },
-      {
-        "version": "6.20.0",
-        "deployed_at": "2026-11-07T06:45:16+09:00",
-        "commit": "874161f",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/874161f",
-        "message": "Sync web/ to unstable (v6.20.0)"
-      },
-      {
-        "version": "6.20.0",
-        "deployed_at": "2026-11-07T02:45:42+09:00",
-        "commit": "3f7189b",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/3f7189b",
-        "message": "Sync web/ to unstable (v6.20.0)"
-      },
-      {
-        "version": "6.20.0",
-        "deployed_at": "2026-11-07T00:15:31+09:00",
-        "commit": "df7b996",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/df7b996",
-        "message": "Sync web/ to unstable (v6.20.0)"
-      },
-      {
-        "version": "6.13.0",
-        "deployed_at": "2026-11-02T00:34:09+09:00",
-        "commit": "dad89e1",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/dad89e1",
-        "message": "Sync web/ to unstable (v6.13.0)"
-      },
-      {
-        "version": "6.11.0",
-        "deployed_at": "2026-11-01T09:54:42+09:00",
-        "commit": "bd9f609",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/bd9f609",
-        "message": "Sync web/ to unstable (v6.11.0)"
-      },
-      {
-        "version": "6.9.0",
-        "deployed_at": "2026-11-01T07:50:33+09:00",
-        "commit": "78f35dd",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/78f35dd",
-        "message": "Sync web/ to unstable (v6.9.0)"
-      },
-      {
-        "version": "6.9.0",
-        "deployed_at": "2026-11-01T07:12:54+09:00",
-        "commit": "26484eb",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/26484eb",
-        "message": "Sync web/ to unstable (v6.9.0)"
-      },
-      {
-        "version": "6.9.0",
-        "deployed_at": "2026-11-01T07:10:42+09:00",
-        "commit": "af418d8",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/af418d8",
-        "message": "Sync web/ to unstable (v6.9.0)"
-      },
-      {
-        "version": "6.9.0",
-        "deployed_at": "2026-11-01T06:56:33+09:00",
-        "commit": "bd382ce",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/bd382ce",
-        "message": "Sync web/ to unstable (v6.9.0)"
-      },
-      {
-        "version": "6.9.0",
-        "deployed_at": "2026-11-01T06:48:46+09:00",
-        "commit": "1ff13f6",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/1ff13f6",
-        "message": "Sync web/ to unstable (v6.9.0)"
-      },
-      {
-        "version": "6.8.0",
-        "deployed_at": "2026-10-31T22:35:10+09:00",
-        "commit": "51b666e",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/51b666e",
-        "message": "Sync web/ to unstable (v6.8.0)"
-      },
-      {
-        "version": "6.5.17",
-        "deployed_at": "2026-10-31T12:51:44+09:00",
-        "commit": "293ba24",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/293ba24",
-        "message": "Sync web/ to unstable (v6.5.17)"
-      },
-      {
-        "version": "6.2.0",
-        "deployed_at": "2026-10-29T22:56:36+09:00",
-        "commit": "a9b9b21",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/a9b9b21",
-        "message": "Sync web/ to unstable (v6.2.0)"
-      },
-      {
-        "version": "6.2.0",
-        "deployed_at": "2026-10-29T20:00:09+09:00",
-        "commit": "39ddf1d",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/39ddf1d",
-        "message": "Sync web/ to unstable (v6.2.0)"
-      },
-      {
-        "version": "6.1.2",
-        "deployed_at": "2026-10-29T11:18:11+09:00",
-        "commit": "8b521c0",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/8b521c0",
-        "message": "Sync web/ to unstable (v6.1.2)"
-      },
-      {
-        "version": "6.1.2",
-        "deployed_at": "2026-10-29T09:15:03+09:00",
-        "commit": "673f730",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/673f730",
-        "message": "Sync web/ to unstable (v6.1.2)"
-      },
-      {
-        "version": "6.1.2",
-        "deployed_at": "2026-10-29T09:09:51+09:00",
-        "commit": "045dba5",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/045dba5",
-        "message": "Sync web/ to unstable (v6.1.2)"
-      },
-      {
-        "version": "6.0.0",
-        "deployed_at": "2026-10-28T22:50:09+09:00",
-        "commit": "c60960d",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/c60960d",
-        "message": "Sync web/ to unstable (v6.0.0)"
-      },
-      {
-        "version": "5.31.0",
-        "deployed_at": "2026-10-28T22:38:16+09:00",
-        "commit": "d77440f",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/d77440f",
-        "message": "Sync web/ to unstable (v5.31.0)"
-      },
-      {
-        "version": "5.31.0",
-        "deployed_at": "2026-10-28T18:30:53+09:00",
-        "commit": "97b33a1",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/97b33a1",
-        "message": "Sync web/ to unstable (v5.31.0)"
-      },
-      {
-        "version": "5.31.0",
-        "deployed_at": "2026-10-28T18:26:09+09:00",
-        "commit": "aae701f",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/aae701f",
-        "message": "Sync web/ to unstable (v5.31.0)"
-      },
-      {
-        "version": "5.31.0",
-        "deployed_at": "2026-10-28T18:14:36+09:00",
-        "commit": "c8c9803",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/c8c9803",
-        "message": "Sync web/ to unstable (v5.31.0)"
-      },
-      {
-        "version": "5.31.0",
-        "deployed_at": "2026-10-28T18:10:04+09:00",
-        "commit": "a123beb",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/a123beb",
-        "message": "Sync web/ to unstable (v5.31.0)"
-      },
-      {
-        "version": "5.31.0",
-        "deployed_at": "2026-10-28T17:58:43+09:00",
-        "commit": "f7f6de5",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/f7f6de5",
-        "message": "Sync web/ to unstable (v5.31.0)"
-      },
-      {
-        "version": "5.31.0",
-        "deployed_at": "2026-10-28T17:52:45+09:00",
-        "commit": "d913436",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/d913436",
-        "message": "Sync web/ to unstable (v5.31.0)"
-      },
-      {
-        "version": "5.31.0",
-        "deployed_at": "2026-10-28T17:39:16+09:00",
-        "commit": "3d54b40",
-        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/3d54b40",
-        "message": "Sync web/ to unstable (v5.31.0)"
       }
     ],
     "V6": [
