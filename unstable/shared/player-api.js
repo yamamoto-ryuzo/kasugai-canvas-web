@@ -3,7 +3,7 @@
 // エンジン別の描画フック）を持つため、エンジン差分は hooks として注入し、
 // kasugaiApi 互換の API 面をここで構成する。AI チャット（shared/ai-chat.js）の
 // ツールはこの api メソッドの有無で公開可否が決まる。
-import { camToZoom, viewZoomToHeight, geojsonExtent, splitKascTitle, buildViewUrl, normKascTitle } from "./kasc.js";
+import { camToZoom, viewZoomToHeight, geojsonExtent, splitKascTitle, buildViewUrl, normKascTitle, rewriteKascLineOpt } from "./kasc.js";
 import { loadVectorItem, summarizeFlatGeobufHeader, summarizeGeoParquetHeader } from "./vector-load.js";
 import { backendUrl } from "./backend.js";
 import { hasBackendFeature, isFetchProxyTarget, executeChatTool, showReportModal, listUiControls, controlUi } from "./ai-chat.js";
@@ -31,6 +31,9 @@ import { getLanguage, t } from "./i18n.js";
 //   mountEntry(entry, preloaded) : 新規エントリを地図へ追加（item._preloaded に GeoJSON 可）
 //   unmountEntry(entry)          : 地図から除去
 //   reloadEntryData(entry)       : item.opts.where 反映後の再読み込み（setLayerFilter 用）
+//   getEntryGeoJson(entry)       : エントリの GeoJSON を返す（検索・属性操作用フルソース）
+//   getEntryFilteredGeoJson(entry): where= 等 適用後の表示中地物のみ返す（省略可。
+//                                  省略時は getEntryGeoJson と同じ結果＝無絞込）
 //   getEntryGeoJson(entry)       : () => GeoJSON（未対応なら省略可）
 //   setBaseEntryVisible(entry, on) : ベースマップ1枚の表示切替
 //   getCams()                   : () => cam: プリセット配列
@@ -435,6 +438,7 @@ export function createPlayerApi(hooks) {
           visible: item.visible !== false,
           type: item.type,
           filter: item.opts?.where || "",
+          options: { ...(item.opts || {}) },
         };
         // flatgeobuf: のヘッダメタ(件数/索引有無/列/CRS)を listLayers へ露出
         const fgbMeta = summarizeFlatGeobufHeader(item.fgbHeader);
@@ -454,8 +458,8 @@ export function createPlayerApi(hooks) {
         const gpkgpLids = (e.lids || []).filter(id => /gpkgp/.test(id));
         if (gpkgpLids.length) entry.gpkgpLids = gpkgpLids;
         const legend = item._qml?.legend;
-        if (legend?.length > 1) {
-          entry.legend = legend.map(le => ({ label: le.label || le.symbolName, visible: !item._legendHidden?.has(le.symbolName) }));
+        if (legend?.length) {
+          entry.legend = legend.map(le => ({ label: le.label || le.symbolName, symbolName: le.symbolName || "", spec: le.spec || null, visible: !item._legendHidden?.has(le.symbolName) }));
         }
         return entry;
       });
@@ -478,6 +482,9 @@ export function createPlayerApi(hooks) {
       hooks.applyEntryVisibility(e);
       hooks.maybeLoadEntry(e);
       e._groupCtl?.sync?.();
+      // 標準一覧は行 DOM を直更新するため rerenderLayers を通らない。
+      // プラグインパネル等の外部ビューへはここで変更を通知する
+      this.emit("layers-changed");
       return true;
     },
     setLayerLegendVisible(name, label, visible) {
@@ -492,12 +499,46 @@ export function createPlayerApi(hooks) {
       else e.item._legendHidden.add(le.symbolName);
       if (!e.item._legendHidden.size) e.item._legendHidden = null;
       hooks.applyLegendFilter(e);
+      this.emit("layers-changed");
       return true;
     },
     async focusLayer(name) {
       const e = findEntry(name);
       if (!e) return false;
       hooks.focusEntry(e);
+      return true;
+    },
+    // listLayers().legend[].spec から凡例スウォッチの dataURL を生成する。
+    // プラグインが独自凡例を描くための公開ヘルパ
+    legendSwatchUrl(spec) {
+      return spec ? (hooks.legendSwatchUrl?.(spec) || null) : null;
+    },
+    // 表示順の制御（プラグイン用）: 指定したキー(id/title)同士の相対順を
+    // keys の順に並べ替える。指定していないレイヤーは現在の位置を維持する
+    // （＝指定レイヤが占めていたスロットを指定順で埋める）。先頭=最前面。
+    // 実描画順の反映はエンジン別フック hooks.applyEntryOrder が担う
+    async setLayerOrder(keys) {
+      const arr = hooks.getEntries();
+      const byKey = new Map();
+      arr.forEach(e => {
+        const item = e.item || {};
+        for (const k of [item.id, e.sid, item.title]) {
+          if (k != null && !byKey.has(String(k))) byKey.set(String(k), e);
+        }
+      });
+      const wanted = [];
+      const seen = new Set();
+      for (const key of keys || []) {
+        const e = byKey.get(String(key));
+        if (e && !seen.has(e)) { seen.add(e); wanted.push(e); }
+      }
+      if (!wanted.length) return false;
+      const wantSet = new Set(wanted);
+      const slots = arr.map((e, i) => wantSet.has(e) ? i : -1).filter(i => i >= 0);
+      wanted.forEach((e, i) => { arr[slots[i]] = e; });
+      await hooks.applyEntryOrder?.(arr);
+      hooks.rerenderLayers();
+      this.emit("layers-changed");
       return true;
     },
     async setLayerFilter(name, filter) {
@@ -518,13 +559,31 @@ export function createPlayerApi(hooks) {
           return { ok: false, reason: "failed" };
         }
       }
-      if (!new Set(["gpkg", "geopackage", "duckdb", "flatgeobuf", "fgb", "geoparquet", "parquet"]).has(t)) {
-        return { ok: false, reason: "unsupported" };
-      }
+      // where= を受け付けるベクター全型(クエリ系はローダ側の SQL、
+      // それ以外は shared/where-eval.js のクライアント評価で絞り込む。
+      // sql:/ogrsql: は上の分岐でクエリ全文として扱う)
+      const WHERE_TYPES = new Set([
+        "gpkg", "geopackage", "duckdb", "flatgeobuf", "fgb", "geoparquet", "parquet",
+        "geojson", "layer", "csv", "tsv", "kml", "kmz", "gpx", "czml", "topojson",
+        "esrijson", "arcgis", "geojsonl", "ndjson", "jsonl", "geojsonseq", "fgseq",
+        "geojson-seq", "wkt", "wkb", "igc", "polyline", "gml", "wfs", "shp", "shapefile",
+      ]);
+      if (!WHERE_TYPES.has(t)) return { ok: false, reason: "unsupported" };
+      const value = String(filter ?? "").trim();
       e.item.opts ||= {};
-      e.item.opts.where = String(filter ?? "").trim() || undefined;
+      e.item.opts.where = value || undefined;
+      // インスペクタの .kasc 行へ where= を書き戻す(各エンジンの ⏷ 編集と同じ規則)
+      const oldLine = e.item.line;
+      if (oldLine) {
+        e.item.line = rewriteKascLineOpt(oldLine, "where", value || null);
+        if (e.item.line && e.item.line !== oldLine && hooks.getInspectorText && hooks.setInspectorText) {
+          hooks.setInspectorText(hooks.getInspectorText()
+            .split(/\r?\n/).map(l => (l.trim() === oldLine.trim() ? e.item.line : l)).join("\n"));
+        }
+      }
       try {
         await hooks.reloadEntryData(e);
+        this.emit?.("layers-changed");
         return { ok: true };
       } catch {
         return { ok: false, reason: "failed" };
@@ -726,6 +785,15 @@ export function createPlayerApi(hooks) {
     getLayerGeoJson(name) {
       const e = findEntry(name);
       if (!e) return null;
+      return hooks.getEntryGeoJson ? hooks.getEntryGeoJson(e) : (e.item._geojson || null);
+    },
+    // where= (と属性テーブルの表示限定)適用後の「実際に表示中」の地物だけを返す。
+    // getLayerGeoJson はフルソース/クエリ適用済みソースを返す設計のまま維持。
+    // hooks.getEntryFilteredGeoJson 未実装エンジンではフルソースにフォールバック。
+    getLayerFilteredGeoJson(name) {
+      const e = findEntry(name);
+      if (!e) return null;
+      if (hooks.getEntryFilteredGeoJson) return hooks.getEntryFilteredGeoJson(e);
       return hooks.getEntryGeoJson ? hooks.getEntryGeoJson(e) : (e.item._geojson || null);
     },
     // ogrsql: 行と同じ実行経路で OGR SQL SELECT を実行し GeoJSON を返す

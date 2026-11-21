@@ -93,6 +93,7 @@ const CHAT_TOOL_API = {
   getPluginCode: "getStoragePlugin", removePlugin: "removeStoragePlugin",
   setPluginEnabled: "setStoragePluginEnabled", publishPlugin: "publishStoragePlugin",
   fetchData: "fetchData", getLayerGeoJson: "getLayerGeoJson",
+  getLayerFilteredGeoJson: "getLayerFilteredGeoJson",
   addDataLayer: "addDataLayer", removeDataLayer: "removeDataLayer",
   setToolMaxSteps: "local:setToolMaxSteps",
   setLayerFilter: "setLayerFilter", queryOgrSql: "queryOgrSql",
@@ -1691,7 +1692,7 @@ async function handleLocalChatCommand(text) {
 
 // AIが書き込むコードの適用前確認。コード全文を表示し、ユーザーが明示承認した場合のみ true。
 // ストレージプラグインは読み込まれると kasugaiApi へフルアクセスできるため必須のガード
-function confirmPluginApply({ id, name, code }) {
+export function confirmPluginApply({ id, name, code }) {
   return new Promise(resolve => {
     const overlay = document.createElement("div");
     overlay.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:9999;display:flex;align-items:center;justify-content:center;";
@@ -2296,6 +2297,17 @@ const CHAT_TOOLS = [{
     {
       name: "getLayerGeoJson",
       description: "読み込み済みレイヤーの地物をGeoJSONで取得する。属性検索より前にデータ全体が必要な時・変換加工の入力に使う",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          name: { type: "STRING", description: "レイヤ名またはID(listLayersで確認)" },
+        },
+        required: ["name"],
+      },
+    },
+    {
+      name: "getLayerFilteredGeoJson",
+      description: "レイヤーの where= フィルタ適用後・実際に地図へ表示中の地物だけをGeoJSONで取得する。getLayerGeoJson はフィルタ前のフルソースを返す。「今表示されている地物」「フィルタで残っている値」の確認に使う",
       parameters: {
         type: "OBJECT",
         properties: {
@@ -3544,6 +3556,15 @@ export async function executeChatTool(name, args = {}) {
   }
   if (name === "getLayerGeoJson") {
     const geojson = window.kasugaiApi.getLayerGeoJson(args.name);
+    if (!geojson) return { ok: false, message: t("tool.layerDataNotFound", { name: args.name }) };
+    const size = JSON.stringify(geojson).length;
+    if (size > 400000) {
+      return { ok: false, message: t("tool.dataTooLarge", { size, count: geojson.features?.length ?? 0 }) };
+    }
+    return { geojson };
+  }
+  if (name === "getLayerFilteredGeoJson") {
+    const geojson = window.kasugaiApi.getLayerFilteredGeoJson(args.name);
     if (!geojson) return { ok: false, message: t("tool.layerDataNotFound", { name: args.name }) };
     const size = JSON.stringify(geojson).length;
     if (size > 400000) {
