@@ -1,7 +1,7 @@
 // KASUGAI Canvas — MapLibre フロント
 // .kasc プレイヤーモード: projects/<id>/ の .kasc+canvas_data/ を MapLibre GL で再生する
 import * as maplibregl from "https://cdn.jsdelivr.net/npm/maplibre-gl@6.19.0/dist/maplibre-gl.mjs";
-import { loadKascProject, NON_LAYER_TYPES, parseKasc, resolveKascUrl, camToZoom, zoomToCamHeightView, heightToViewZoom, viewZoomToHeight, groundCenterFromCam, camFromGroundCenter, parseUrlView, hasUrlView, writeUrlView, geojsonExtent, splitKascTitle, appendGroupedTitleOptions, syncBasemapList, sanitizeAttributionFragment, layerAttribution, loadKascInfoContent, buildWmsTileTemplate, buildWmtsTileTemplate, rewriteKascVisibility, rewriteKascLineVisibility, rewriteKascLineOpt, themeShowSet, kascTitleInTheme, normKascTitle, fillThemeSelect, loadKascBookmarks, parseQgisBookmarksXml, qgisBookmarkToCam, downloadQgisBookmarksXml, downloadKascCamLines, projectsBaseUrl, applyPanelTitle, defaultPointRadius, cssColorAlpha, markerSymbolSpec, togeojsonIconSpec, kascOptOn, parseImageOverlay, kascScaleZoomRange, applyKascGroupStates, setAllLayerGroupsExpanded } from "../shared/kasc.js";
+import { loadKascProject, NON_LAYER_TYPES, parseKasc, resolveKascUrl, camToZoom, zoomToCamHeightView, heightToViewZoom, viewZoomToHeight, groundCenterFromCam, camFromGroundCenter, parseUrlView, hasUrlView, writeUrlView, geojsonExtent, splitKascTitle, appendGroupedTitleOptions, syncBasemapList, sanitizeAttributionFragment, layerAttribution, loadKascInfoContent, buildWmsTileTemplate, buildWmtsTileTemplate, rewriteKascVisibility, rewriteKascLineVisibility, rewriteKascLineOpt, themeShowSet, kascTitleInTheme, normKascTitle, fillThemeSelect, loadKascBookmarks, parseQgisBookmarksXml, qgisBookmarkToCam, downloadQgisBookmarksXml, downloadKascCamLines, projectsBaseUrl, applyPanelTitle, defaultPointRadius, cssColorAlpha, markerSymbolSpec, togeojsonIconSpec, kascOptOn, parseImageOverlay, kascScaleZoomRange, applyKascGroupStates, setAllLayerGroupsExpanded, parseKascPluginLine } from "../shared/kasc.js";
 import { initI18n, t, applyI18n } from "../shared/i18n.js";
 import { createKascPortal } from "../shared/portal.js";
 import { compileWhereExpression } from "../shared/where-eval.js";
@@ -20,7 +20,7 @@ import { createPlayerApi } from "../shared/player-api.js";
 import { configureLive, configureFollow, liveUpdate, liveNotifyCamera, liveNotifySelection, liveWritebackEntries, liveIsActive, liveRenderUrl } from "../shared/live.js";
 import { mountLivePanel, syncLivePanel } from "../shared/live-panel.js";
 import { mountEngineSwitcher } from "../shared/engine-switch.js";
-import { matchSessionState, bindSessionState, applySessionState, sessionBootView } from "../shared/session-state.js";
+import { matchSessionState, bindSessionState, applySessionState, sessionBootView, sessionInspectorFor, markSessionKascBase } from "../shared/session-state.js";
 import { initNavTools } from "../shared/nav-tools.js";
 import { coordPins } from "../shared/coord-pins.js";
 import { formatLatLng } from "../shared/coords-format.js";
@@ -32,6 +32,9 @@ import { groundDeckTileset } from "../shared/deck-ground.js";
 import { buildDeckDrapeLayers, invalidateDeckTerrainCovers, isGoogle3dTilesUrl, withGoogleTileKey, ensureGoogleTileKeyFetch, parseDeckTile3dOpts, ensureI3sLoader, deckWantsI3s } from "../shared/deck-drape.js";
 import { qmlLegendSwatchDataUrl, defaultVectorLegendSpec, installLayerVisibilityResolver, bakeQmlLabels, maplibreApplyQml, setMapScaleGetter } from "../shared/qml-2d.js";
 import { renderLayerLegendPicker } from "../shared/legend-tab.js";
+import { createPanelHost, attachPanelApi } from "../shared/plugin-panels.js";
+import { renderLayerView, bindLayerView } from "../shared/layer-view.js";
+import { installStoragePluginSupport } from "../shared/plugin-storage.js";
 
 await initI18n();
 applyI18n();
@@ -1023,7 +1026,9 @@ async function addKascLayer(item, baseUrl, preloaded, beforeIdFn) {
         const { loadCompiledQml, maplibreApplyQml, compiledScaleToResRange, resToZoom } = await import("../shared/qml-2d.js");
         const compiled = item.opts?.style
           ? await loadCompiledQml(item.opts.style, baseUrl, "maplibre")
-          : await compileEmbeddedStyle(embStyle, baseUrl, "maplibre");
+          : embStyle
+            ? await compileEmbeddedStyle(embStyle, baseUrl, "maplibre")
+            : await loadCompiledQml(item.styleUrl, baseUrl, "maplibre");
         item._qml = compiled;
         const applied = maplibreApplyQml(geojson, compiled);
         kinds = applied.kinds;
@@ -1572,6 +1577,8 @@ function renderLayerRows(entries, unsupported) {
   // "グループ/レイヤ名"（"//"は排他グループ）でグループセクション化する
   const grouped = new Map();
   for (const entry of entries) {
+    // list=off 付きレイヤは標準タブに出さない(地図には描画される)
+    if (entry.item.opts?.list === "off") continue;
     const sp = splitKascTitle(entry.item.title);
     entry._leaf = sp.title;
     const key = `${sp.group}|${sp.exclusiveGroup ? "exclusive" : "regular"}`;
@@ -1668,6 +1675,8 @@ function renderLayerRows(entries, unsupported) {
   attrWidget.refresh();
   // 凡例タブのレイヤ選択凡例も最新へ追従させる
   renderLegendPicker();
+  // プラグインパネル等の外部ビュー向けに一覧更新を通知する
+  window.kasugaiApi?.emit("layers-changed");
 }
 
 // ---- 段階読み込み: 行ステータス・進捗・遅延ロード ----
@@ -1819,7 +1828,10 @@ async function loadProject(id) {
   const { id: loadedId, baseUrl, doc, manifest, raw, kascUrl } = await loadKascProject(id);
   switchRestore = pendingSwitchState;
   pendingSwitchState = null;
-  const text = switchRestore?.inspector ?? raw;
+  // セッション inspector はファイルが外部更新されていなければ引継ぐ
+  // (kascBase 不一致=再エクスポート等ならファイルを優先)
+  const text = sessionInspectorFor(switchRestore, raw) ?? raw;
+  markSessionKascBase(raw);
   inspectorInput.value = text;
   lastKascUrl = kascUrl || "";
   await renderProject(loadedId, baseUrl, text === raw ? doc : parseKasc(text), manifest);
@@ -2022,6 +2034,12 @@ async function renderProject(loadedId, baseUrl, doc, manifest) {
   // 未対応通知から外す。3dtiles は _idx（.kasc 上の行順）で doc.layers と
   // 混ぜてレイヤツリー順を再現する
   kascFlyPaths.setItems(doc.unsupported);
+  // plugin: 行 → ユーザーパネル等の起動（url= の .kasc 埋め込み / IndexedDB id 解決。
+  // plugin-storage.js の setInspectorPlugins が差分ロード/停止する）
+  void window.kasugaiApi?.setInspectorPlugins?.(
+    doc.unsupported.filter(i => i.type === "plugin").map(i => parseKascPluginLine(i.line))
+      .filter(Boolean)
+      .map(s => s.url ? { ...s, url: resolveKascUrl(s.url, baseUrl) } : s));
   const unsupported = doc.unsupported.filter(i => i.type !== "3dtiles" && i.type !== "fly_geojson" && i.type !== "mvt" && i.type !== "pmtiles" && !NON_LAYER_TYPES.has(i.type));
 
   currentBaseEntries = [];
@@ -3445,6 +3463,7 @@ async function saveToDataDir(name, content) {
 // ---- AI チャット連携（kasugaiApi アダプタ + shared/ai-chat.js） ----
 window.kasugaiApi = createPlayerApi({
   engine: "maplibre",
+  legendSwatchUrl: qmlLegendSwatchDataUrl,
   getEntries: () => layerEntries,
   getBaseEntries: () => currentBaseEntries,
   getProjectId: () => currentProjectId,
@@ -3455,6 +3474,23 @@ window.kasugaiApi = createPlayerApi({
   setInspectorText: v => { inspectorInput.value = v; },
   applyEntryVisibility, focusEntry, maybeLoadEntry, applyLegendFilter,
   rerenderLayers: () => renderLayerRows(layerEntries, currentUnsupported),
+  // setLayerOrder の実描画反映: style レイヤーは後方(最背面)から順に最前面へ
+  // 積み直し、deck(3dtiles等)は def.order を新エントリ順に更新して再構成
+  applyEntryOrder: entries => {
+    for (let i = entries.length - 1; i >= 0; i--) {
+      for (const lid of entries[i].lids || []) {
+        try { if (!deckDefs.has(lid) && map.getLayer(lid)) map.moveLayer(lid); } catch (_) {}
+      }
+    }
+    let deckChanged = false;
+    entries.forEach((e, i) => {
+      for (const lid of e.lids || []) {
+        const def = deckDefs.get(lid);
+        if (def && def.order !== i) { def.order = i; deckChanged = true; }
+      }
+    });
+    if (deckChanged) syncDeckLayers();
+  },
   getThemes: () => currentThemes,
   applyThemeByName: name => {
     const theme = currentThemes.find(t => t.name === name);
@@ -3502,6 +3538,8 @@ window.kasugaiApi = createPlayerApi({
   },
   reloadEntryData,
   getEntryGeoJson: entry => entry.item._geojson || null,
+  // where=/表示限定 適用後の表示中地物(getLayerFilteredGeoJson フック)
+  getEntryFilteredGeoJson: entry => applyClientWhere(entry.item, entry.item._geojson || null),
   geoTools: () => geoTools,
   getFlyPaths: kascFlyPaths.getFlyPaths,
   persistFlyPath: kascFlyPaths.persistFlyPath,
@@ -3536,6 +3574,18 @@ Object.assign(window.kasugaiApi, {
   openPortal() { openPortal(); return portalAvailable(); },
   closePortal() { closePortal(); return true; },
 });
+// ---- プラグインパネル（ユーザーパネル追加機構。shared/plugin-panels.js）----
+attachPanelApi(window.kasugaiApi, createPanelHost({
+  nav: document.querySelector("#tabs"),
+  panels: document.querySelector("#panel"),
+  mode: "panes",
+}));
+window.kasugaiApi.renderLayerView = (container, opts = {}) => renderLayerView(container, window.kasugaiApi.listLayers(), { api: window.kasugaiApi, ...opts });
+window.kasugaiApi.bindLayerView = (container, opts = {}) => bindLayerView(container, window.kasugaiApi, opts);
+// ユーザー側設置プラグイン（IndexedDB・CDN でも有効。shared/plugin-storage.js）
+installStoragePluginSupport(window.kasugaiApi);
+// plugin: 行の url= 解決（canvas_data/ 等の相対参照 → プロジェクト基準 URL）に使う
+window.kasugaiApi.resolveProjectUrl = resolveProjectUrl;
 mountEngineSwitcher(document.querySelector("#engines"), "maplibre");
 // ポータル: 🏠ボタンで開始画面を開く / 「地図を開く」・Esc で閉じる / 「ビュー解除」で復元
 kascPortal().bindEvents();
