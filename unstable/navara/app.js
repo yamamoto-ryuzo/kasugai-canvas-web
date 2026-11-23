@@ -13,7 +13,8 @@ import { loadVectorItem, probeQmlSidecar, compileEmbeddedStyle } from "../shared
 import { createAttrWidget, renderAttrContent, attrEntriesFromProps } from "../shared/attr-widget.js";
 import { initAiChat, hasBackendFeature } from "../shared/ai-chat.js";
 import { createPlayerApi } from "../shared/player-api.js";
-import { configureLive, configureFollow, liveUpdate, liveNotifyCamera, liveNotifySelection, liveWritebackEntries } from "../shared/live.js";
+import { configureLive, configureFollow, liveUpdate, liveNotifyCamera, liveNotifySelection, liveWritebackEntries, liveQueryFeatures } from "../shared/live.js";
+import { mountLivePanel, syncLivePanel } from "../shared/live-panel.js";
 import { mountEngineSwitcher } from "../shared/engine-switch.js";
 import { matchSessionState, bindSessionState, applySessionState, sessionBootView, sessionVisChanges, sessionInspectorFor, markSessionKascBase } from "../shared/session-state.js";
 import { initNavTools } from "../shared/nav-tools.js";
@@ -462,6 +463,68 @@ async function maybeLoadEntry(entry) {
   entry.loading = false; syncRowStatus(entry);
 }
 
+// QGIS Live「Add to Canvas」: カタログ title を /live/features から
+// 取得して geojson エントリとして追加する。Navara は viewport クエリを
+// 持たない(loadVectorItem の bounds=null と同じ方針)ため全件取得とし、
+// liveSource は再要求時の差替対象として保持する
+async function addLiveQgisLayer(title) {
+  const t = String(title);
+  const existing = layerEntries.find(e => e.item.liveSource?.title === t);
+  if (existing) {
+    await reloadLiveEntry(existing);
+    return { added: existing.item._geojson?.features?.length ?? 0 };
+  }
+  // 同名レイヤが既に live kasc へ載っているなら二重追加しない
+  // (非表示 | off なら「表示にする」操作として扱う)
+  const inKasc = layerEntries.find(e =>
+    (e.item.sourceTitle || e.item.title) === t);
+  if (inKasc) {
+    if (inKasc.item.visible === false) {
+      inKasc.item.visible = true;
+      navaraSetShow(inKasc, true);
+      void maybeLoadEntry(inKasc);
+      buildLayerList();
+    }
+    return { added: 0, existing: true };
+  }
+  const data = await liveQueryFeatures(t, { limit: 10000 });
+  if (!data?.ok) throw new Error(data?.reason || data?.error || "query failed");
+  const fc = data.geojson || { type: "FeatureCollection", features: [] };
+  const url = URL.createObjectURL(new Blob(
+    [JSON.stringify(fc)], { type: "application/geo+json" }));
+  const item = {
+    type: "geojson",
+    title: t,
+    sourceTitle: t,
+    url,
+    visible: true,
+    liveSource: { title: t },
+    _idx: (layerEntries.at(-1)?.item._idx ?? 0) + 1,
+  };
+  const entry = { item, sid: `liveqgis-${item._idx}`, unsupported: false };
+  layerEntries.push(entry);
+  buildLayerList();
+  await maybeLoadEntry(entry);
+  buildLayerList();
+  return { added: fc.features.length, truncated: !!data.truncated };
+}
+
+// liveSource レイヤーの再取得。_geojson を差し替えて src/layer を再構築
+// する(reloadEntryData と同じ経路・取得元だけ /live/features へ差替)
+async function reloadLiveEntry(entry) {
+  const t = entry.item.liveSource?.title;
+  if (!t) return;
+  const data = await liveQueryFeatures(t, { limit: 10000 });
+  if (!data?.ok) return;
+  entry.item._geojson = data.geojson
+    || { type: "FeatureCollection", features: [] };
+  if (!entry.layer) return;
+  try { entry.layer.delete(); } catch (_) {}
+  try { entry.src?.delete(); } catch (_) {}
+  const r = await addKascLayer(entry.item, lastBaseUrl);
+  if (r) { entry.src = r.src; entry.layer = r.layer; entry.desc = r.desc; }
+}
+
 // 地物単位の凡例フィルタは Navara 側で未実装（レイヤ単位マテリアルのため）
 function applyLegendFilter(_entry) { renderLegendPicker(); }
 
@@ -864,11 +927,12 @@ async function applyBasemap(idx) {
 // 入れ(他エンジンの none と見た目を揃える)、通常タイル選択時は解除する
 panel.basemapSelect?.addEventListener("change", () => {
   const idx = Number(panel.basemapSelect.value);
-  // 「ベースマップなし」は地表を単色で残す none モード(地表透明ではない)。
-  // 手動選択は常に地表透明モードを解除する(.kasc の transparent 指定より優先)
-  setNoBasemap(idx < 0, docBackgroundHex ?? 0xffffff);
-  setGlobeTransparent(false);
-  applyBasemap(idx);
+  // 「ベースマップなし」(-1)は地表を単色で残す none モード、
+  // 「ベースマップ透明」(-2)は地表自体を透明化する transparent モード。
+  // 通常タイル選択時はどちらも解除する
+  setNoBasemap(idx === -1, docBackgroundHex ?? 0xffffff);
+  setGlobeTransparent(idx === -2, docBackgroundHex ?? 0xffffff);
+  applyBasemap(idx < 0 ? -1 : idx);
 });
 
 // ---- 地形・写実 ----
@@ -1240,7 +1304,7 @@ async function addKascLayer(item, baseUrl) {
     const gd = ds.polygon ? resolveDefaultPolygonStyle({}, ds.polygon, ds.line, {}) : null;
     // QML スタイル: 代表地物の spec からレイヤ既定色を取る（Navara はレイヤ単位マテリアル）
     let fillCss = item.opts?.fill, strokeCss = item.opts?.stroke || item.opts?.color, markerCss = item.opts?.marker_color;
-    let lineDash = null, lineCap = null;
+    let lineDash = null, lineCap = null, qmlS = null;
     const embStyle = (loaded.qml || loaded.sld || loaded.mbstyle) ? loaded : null;
     if (item.opts?.style || embStyle || await probeQmlSidecar(item)) {
       try {
@@ -1252,19 +1316,23 @@ async function addKascLayer(item, baseUrl) {
         item._qml = compiled;
         const spec = compiled.evaluate?.(item._geojson?.features?.[0]?.properties || {});
         const s = specToStyle(spec);
-        if (s) { fillCss ||= s.fill; strokeCss ||= s.stroke; markerCss ||= s.markerColor; lineDash = s.dash; lineCap = s.cap; }
+        if (s) { qmlS = s; fillCss ||= s.fill; strokeCss ||= s.stroke; markerCss ||= s.markerColor; lineDash = s.dash; lineCap = s.cap; }
       } catch (_) {}
     }
-    fillCss ||= gd?.fill;
-    strokeCss ||= gd?.stroke ?? ld?.color;
+    // QML が fill/stroke を明示的に持たない(brush=none/pen=none)場合は
+    // default_style や既定色へフォールバックしない(opts 明示指定は優先)
+    const qmlNoFill = qmlS && !qmlS.fill && item.opts?.fill == null;
+    const qmlNoStroke = qmlS && !qmlS.stroke && item.opts?.stroke == null && item.opts?.color == null;
+    fillCss ||= qmlNoFill ? null : gd?.fill;
+    strokeCss ||= qmlNoStroke ? null : (gd?.stroke ?? ld?.color);
     markerCss ||= pd?.color;
     // 不透明度: opts 明示(fill_opacity/stroke_opacity/opacity) > 色のアルファ
     // (QML rgba 含む) > default_style: > 既定。塗りは他エンジンと同じ半透明 0.4 が既定。
     // Navara マテリアルは透過描画に transparent フラグも必要
     const oNum = v => { const n = Number(v); return Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : null; };
     const aOf = css => { const a = cssColorAlpha(css); return a < 1 ? a : null; };
-    const polyFillO = oNum(item.opts?.fill_opacity) ?? oNum(item.opts?.opacity) ?? aOf(fillCss) ?? gd?.fillOpacity ?? 0.4;
-    const polyLineO = oNum(item.opts?.stroke_opacity) ?? oNum(item.opts?.opacity) ?? aOf(strokeCss) ?? gd?.strokeOpacity ?? ld?.opacity ?? 1;
+    const polyFillO = qmlNoFill ? 0 : (oNum(item.opts?.fill_opacity) ?? oNum(item.opts?.opacity) ?? aOf(fillCss) ?? gd?.fillOpacity ?? 0.4);
+    const polyLineO = qmlNoStroke ? 0 : (oNum(item.opts?.stroke_opacity) ?? oNum(item.opts?.opacity) ?? aOf(strokeCss) ?? gd?.strokeOpacity ?? ld?.opacity ?? 1);
     const pointO = oNum(item.opts?.opacity) ?? aOf(markerCss) ?? pd?.opacity ?? 1;
     // extrude=<m>(#60)・QML 2.5D レンダラ → PolygonMaterial.extrudedHeight(m)。
     // 地物別の上書きは FeatureEvaluator の extrudedHeight で同値を返す
@@ -1560,7 +1628,13 @@ async function addKascLayer(item, baseUrl) {
               const solid = spec.fillParts?.find(pt => pt.solid)?.solid || spec.fillParts?.[0]?.hatch?.color || null;
               if (solid) {
                 v.color = new Color().setStyle(rgbaToCss(solid));
-                if (solid.length > 3 && solid[3] < 1) v.opacity = solid[3];
+                // α 未指定(不透明)でもレイヤ既定 0.4 が残らないよう
+                // solid ありでは必ず α を明示する
+                v.opacity = (solid.length > 3) ? solid[3] : 1;
+              } else {
+                // QML で塗り無し(brush=none 等)はレイヤ既定の塗りで
+                // 埋めない(QGIS 準拠)
+                v.opacity = 0;
               }
               if (extrudeH > 0) v.extrudedHeight = extrudeH;
             } else if (gt === "polyline") {
@@ -1580,10 +1654,14 @@ async function addKascLayer(item, baseUrl) {
                 const sPx = specToStyle(spec)?.strokeWidth;
                 const wPx = sPx ?? strokeSrc.widthPx;
                 if (wPx) v.width = Math.max(wPx, 0.5);
-                if (strokeSrc.color?.length > 3 && strokeSrc.color[3] < 1) v.opacity = strokeSrc.color[3];
+                // α 未指定(不透明)でもレイヤ既定が残らないよう明示する
+                v.opacity = strokeSrc.color?.length > 3 ? strokeSrc.color[3] : 1;
                 // ルール別の破線・端帽(dash は px 配列→線幅倍率へ換算)
                 if (strokeSrc.dash?.length) v.dashArray = strokeSrc.dash.map(d => d / Math.max(wPx || polyWidth, 0.5));
                 if (strokeSrc.cap) v.cap = strokeSrc.cap;
+              } else {
+                // QML で線無し(pen=none)はレイヤ既定の線で描かない(QGIS 準拠)
+                v.opacity = 0;
               }
             } else if (gt !== "text") {
               // 点: マーカー canvas を billboard.image へ(dataURL は atlas へ収容)
@@ -1788,11 +1866,14 @@ async function renderDoc(doc, baseUrl, presetBase) {
     if (mapEl) mapEl.style.background = doc.background || "#fff";
   } catch (_) {}
   panel.basemapSelect.replaceChildren();
-  // 「ベースマップなし」を明示選択できるよう先頭に置く(他エンジンとのパリティ)
+  // 「ベースマップなし」「ベースマップ透明」を明示選択できるよう先頭に置く
+  // (他エンジンとのパリティ。値 -1=なし / -2=透明)
   {
     const noneOpt = document.createElement("option");
     noneOpt.value = "-1"; noneOpt.textContent = "ベースマップなし";
-    panel.basemapSelect.append(noneOpt);
+    const transOpt = document.createElement("option");
+    transOpt.value = "-2"; transOpt.textContent = "ベースマップ透明";
+    panel.basemapSelect.append(noneOpt, transOpt);
   }
   appendGroupedTitleOptions(panel.basemapSelect, baseDocs, (b, title, i) => {
     const opt = document.createElement("option"); opt.value = String(i); opt.textContent = title; return opt;
@@ -1811,7 +1892,7 @@ async function renderDoc(doc, baseUrl, presetBase) {
   if (!noneSel && initIdx < 0) initIdx = Math.max(0, baseDocs.findIndex(b => b.visible !== false));
   // base: 行の | none / | transparent モードは初期でベースマップを張らない
   // (Cesium 版の parsedBaseMode → selectedBasemap=null と同じ規則)
-  if (baseModeRow) initIdx = -1;
+  if (baseModeRow) initIdx = baseModeRow.mode === "transparent" ? -2 : -1;
   panel.basemapSelect.value = String(noneSel ? -1 : initIdx);
   syncBasemapList(panel.basemapSelect);
   await applyBasemap(noneSel ? -1 : initIdx);
@@ -1868,7 +1949,9 @@ async function renderDoc(doc, baseUrl, presetBase) {
       };
     },
     applySelection: sel => applyQgisSelection(sel),
+    addLiveLayer: addLiveQgisLayer,
   });
+  syncLivePanel();
 
   // ポータル画面の内容を最新の宣言へ反映する(🏠ボタン表示もここで更新)
   updatePortalUI();
@@ -2131,10 +2214,11 @@ async function applyViewBase(rawName, logPrefix = "data-base") {
     if (idx < 0) console.warn(`${logPrefix}: base= のベースマップが見つかりません`, name);
   }
   if (isNone || idx >= 0) {
-    setNoBasemap(isNone, docBackgroundHex ?? 0xffffff);
-    setGlobeTransparent(false);
-    if (panel.basemapSelect) panel.basemapSelect.value = String(idx);
-    await applyBasemap(idx);
+    setNoBasemap(isNone && !isTransparent, docBackgroundHex ?? 0xffffff);
+    setGlobeTransparent(isTransparent, docBackgroundHex ?? 0xffffff);
+    const selIdx = isTransparent ? -2 : idx;
+    if (panel.basemapSelect) panel.basemapSelect.value = String(selIdx);
+    await applyBasemap(selIdx < 0 ? -1 : selIdx);
     syncBasemapList(panel.basemapSelect);
   }
 }
@@ -2357,6 +2441,9 @@ async function saveToDataDir(name, content) {
 
 // ?follow[=<base>] → geo_webview の /live/state をポーリングして QGIS キャンバスに追従
 // (shared/live.js の live セッションへ統合。pitch は現在値を保持するリンクビュー)
+// QGIS Live 操縦パネル(live: 行検出時にパネル先頭へ表示)
+mountLivePanel(document.querySelector("#panel"));
+
 configureFollow({
   apply: (s, { topdown }) => {
     const height = typeof s.zoom === "number"

@@ -122,28 +122,37 @@ export function applySymbolAlpha(spec) {
 }
 
 // QGIS のサイズ単位を px に変換する。MapUnit/MetersInMapUnits は実用上
-// 度単位データでは意味を持たないため、近似として px 相当に丸める
-function sizeToPx(value, unit) {
+// 度単位データでは意味を持たないため、近似として px 相当に丸める。
+// QGIS4.2 の encodeUnit 実出力は "RenderMetersInMapUnits"(Render 接頭辞)で、
+// 4.0 系や自書 QML は "MetersInMapUnits"。両方受け付ける(Inch/Inches も同様)
+export function sizeToPx(value, unit) {
   const n = Number(value);
   if (!Number.isFinite(n)) return 0;
   switch (unit) {
     case "MM": return n * MM_TO_PX;
     case "Point": return n * PT_TO_PX;
     case "Pixel": return n;
+    case "Inch":
     case "Inches": return n * 96;
     case "Percentage": return n; // 割合値はpx換算不能(近似:数値をそのまま返す)
     case "MapUnit":
     case "MetersInMapUnits":
+    case "RenderMetersInMapUnits":
     default: return n * MM_TO_PX * 0.3; // 近似: 実用サイズに収める
   }
 }
 
 // MapUnit/MetersInMapUnits は px 近似とは別にメートル値も保持し、
 // 対応エンジン(Cesium)が距離連動スケーリングで再現する
+export function isMapUnitString(u) {
+  return u === "MapUnit" || u === "RenderMapUnits"
+    || u === "MetersInMapUnits" || u === "RenderMetersInMapUnits";
+}
+
 function mapUnitMeters(value, unit) {
   const n = Number(value);
   if (!Number.isFinite(n) || n <= 0) return null;
-  return (unit === "MapUnit" || unit === "MetersInMapUnits") ? n : null;
+  return isMapUnitString(unit) ? n : null;
 }
 
 // "*_map_unit_scale"(QgsMapUnitScale)の実値形式(実機確認済み):
@@ -376,6 +385,81 @@ function parseDataDefined(symbolOrLayerEl) {
 }
 
 // DD エントリから値を解決する。expression 優先、なければ field 参照
+// blank_segments 書式パーサ(QgsBlankSegmentUtils::parseBlankSegments 準拠)。
+// 書式: (((s e, s e),(s e)),((s e))) — 3階層で パート→リング→距離ペア。
+// 戻り値 [part][ring] = [[start,end],...](単位は blank_segments_unit 宣言値)。
+// 空 () は空リング/パートを示す。書式不正は null
+export function parseBlankSegments(str) {
+  const parts = [];
+  let level = -1, num = "";
+  const seg = () => parts[parts.length - 1];
+  const rng = () => seg()?.[seg().length - 1];
+  const append = lv => {
+    if (lv === 0) parts.push([]);
+    else if (lv === 1) { if (!parts.length) throw 0; seg().push([]); }
+    else if (lv === 2) { if (!rng()) throw 0; rng().push([-1, -1]); }
+    else throw 0;
+  };
+  const addNumber = () => {
+    const segs = rng();
+    if (!segs?.length) throw 0;
+    const last = segs[segs.length - 1];
+    const v = Number(num);
+    if (num === "" || !Number.isFinite(v)) throw 0;
+    if (last[0] === -1) {
+      if (segs.length > 1 && segs[segs.length - 2][1] > v) throw 0;
+      last[0] = v;
+    } else {
+      if (last[0] > v) throw 0;
+      last[1] = v;
+    }
+    num = "";
+  };
+  try {
+    for (const c of String(str)) {
+      if (num !== "" && (/\s/.test(c) || c === ")" || c === ",")) {
+        if (level < 2) throw 0;
+        addNumber();
+      }
+      if (c === "(") { if (level >= 2) throw 0; append(++level); }
+      else if (c === ")") {
+        if (level < 0) throw 0;
+        const r = rng();
+        if (level === 2 && r?.length === 1 && r[0][0] === -1) r.pop();
+        level--;
+      } else if (c === ",") {
+        if ((level === 0 && !parts.length) || (level === 1 && !seg()?.length)
+          || (level === 2 && !rng()?.length)) throw 0;
+        append(level);
+      } else if (/[\d.]/.test(c)) num += c;
+      else if (!/\s/.test(c)) throw 0;
+    }
+    if (level !== -1 || num !== "") throw 0;
+    // 末尾が始点のみのペアは不正(C++ addNumber が ')' で Missing number を出すのと同等)
+    if (parts.some(p => p.some(r => r.some(s => s[0] !== -1 && s[1] === -1)))) throw 0;
+  } catch (e) { return null; }
+  return parts;
+}
+
+// decor.blankSegments → 線上距離 d が空白内かを返す判定関数。
+// BlankSegmentsWalker 準拠: 距離が [start,end] に入る標点は描画しない。
+// partIdx はマルチパート/リング index(線では part、面リングは ring 相当)。
+// conv(raw) は blank_segments_unit の生値をサンプラー距離単位へ変換する関数
+export function blankCheckForPart(decor, partIdx, conv) {
+  const bs = decor?.blankSegments;
+  if (!bs?.length) return null;
+  // [part][ring]: 線は bs[partIdx][0]、面リング(1パート)は bs[0][partIdx]
+  const segs = bs[partIdx]?.[0]?.length ? bs[partIdx][0]
+    : bs[0]?.[partIdx]?.length ? bs[0][partIdx] : null;
+  if (!segs?.length) return null;
+  const cs = segs.map(([s, e]) => [conv(s), conv(e)]);
+  let i = 0;
+  return d => {
+    while (i < cs.length && d > cs[i][1]) i++;
+    return i < cs.length && d >= cs[i][0];
+  };
+}
+
 function ddValue(dd, names, props, fallback) {
   // 色系 DD プロパティの評価中は QGIS のレンダーコンテキスト変数
   // @symbol_color(=現在のシンボル色、ここではベース色 fallback)を供給する。
@@ -2077,7 +2161,7 @@ function resolveMarkerLayer(layer, props, images, warnings) {
   // MapUnit/MetersInMapUnits のマーカーサイズはメートル値を保持する。
   // 対応エンジンがカメラ距離連動で拡縮し、非対応エンジンは sizePx 近似のまま
   const unit = p.size_unit || "MM";
-  if (unit === "MapUnit" || unit === "MetersInMapUnits") {
+  if (isMapUnitString(unit)) {
     const n = Number(ddValue(layer?.dd, ["size"], props, p.size ?? 2));
     if (Number.isFinite(n) && n > 0) {
       if (sizeMus) {
@@ -2296,17 +2380,19 @@ function resolveMarkerLayerBase(layer, props, images, warnings) {
       }];
     }
     case "MaskMarker": {
-      // マスク形状マーカー(QGIS4): サブシンボル(マーカー)をそのまま描画する。
-      // QGIS ではこの形状がラベル/他シンボルレイヤの「マスク」としても登録される
-      // が、Web エンジンでは真のマスク効果(遮蔽抜き)は実現不能なため形状のみ。
-      // mask_symbollayers(実機名)=マスク対象レイヤ ID リスト。再現不能のため読み捨て+警告
+      // マスク形状マーカー(QGIS4): QgsMaskMarkerSymbolLayer::renderPoint は
+      // 通常ペインタではなく maskPainter()(ラベルマスク画像)へ描くため、
+      // 地図上は可視描画されない(GUI プレビュー/凡例のみ可視)。
+      // また mask_symbollayers 空なら enabled()=false で層自体が無効。
+      // Canvas はラベルマスク系を持たないため地図描画を抑制し、
+      // 凡例(QGIS isGuiPreview 相当)では描くため maskOnly フラグを付ける
       const maskTargets = String(p.mask_symbollayers ?? "");
       warnOnce(warnings, maskTargets
-        ? `MaskMarker のマスク効果(対象: ${maskTargets.slice(0, 60)})は未対応です(形状のみ描画)`
-        : "MaskMarker のマスク効果(ラベル/シンボル遮蔽)は未対応です(形状のみ描画)");
+        ? `MaskMarker(対象: ${maskTargets.slice(0, 60)})はラベルマスク専用のため地図へは描画しません(QGIS準拠)`
+        : "MaskMarker はラベルマスク専用のため地図へは描画しません(QGIS準拠)");
       if (!layer.subSymbol) return [];
       return layer.subSymbol.layers.flatMap(l =>
-        l.enabled ? resolveMarkerLayer(l, props, images, warnings) : []);
+        l.enabled ? resolveMarkerLayer(l, props, images, warnings).map(m => ({ ...m, maskOnly: true })) : []);
     }
     default:
       warnOnce(warnings, `マーカーシンボル ${layer.cls} は未対応です(円で代替)`);
@@ -2748,8 +2834,17 @@ function buildLineDecor(layer, p, props, images, color, widthUnit, warnings) {
       || String(p.place_on_every_part) === "1"
       || String(p.place_on_every_part).toLowerCase() === "true",
     ringFilter: ringFilterOf(p) || undefined,
-    // blank_segments は空白セグメント定義(実名)。間隔パターン近似では未再現
-    blankSegmentsUnit: p.blank_segments_unit || undefined,
+    // blank_segments は DD プロパティ(Property::BlankSegments)由来の書式文字列
+    // (((s e,...),(..)),((..))) を QGIS parseBlankSegments 準拠で [part][ring]
+    // 距離ペアに展開。単位は blank_segments_unit(既定 MM)
+    blankSegments: (() => {
+      const raw = String(ddValue(dd, ["blank_segments", "blankSegments"], props, "") || "");
+      if (!raw.trim()) return null;
+      const parsed = parseBlankSegments(raw);
+      if (!parsed) warnOnce(warnings, `blank_segments の書式が不正です(スキップ): ${raw.slice(0, 40)}`);
+      return parsed;
+    })(),
+    blankSegmentsUnit: p.blank_segments_unit || "MM",
   };
   if (cls === "MarkerLine") {
     const markers = layer.subSymbol
@@ -4031,7 +4126,12 @@ export function compileQmlStyle(xmlText, baseUrl, preloadedImages = new Map(), e
       if (Number.isFinite(resolved.minPass)) {
         out.zRank = Math.min(out.zRank ?? Infinity, resolved.minPass);
       }
-      if (resolved.markers && !out.markers) out.markers = resolved.markers;
+      // maskOnly マーカー(MaskMarker)は地図へ描かないため描画用 markers から除外
+      // (凡例 resolveSymbolLayers は直接呼ぶため preview 可視のまま)
+      if (resolved.markers) {
+        const vis = resolved.markers.filter(m => !m?.maskOnly);
+        if (vis.length && !out.markers) out.markers = vis;
+      }
       if (resolved.line && !out.line) out.line = resolved.line;
       if (resolved.lines && !out.lines) out.lines = resolved.lines;
       if (resolved.fillParts && !out.fillParts) out.fillParts = resolved.fillParts;

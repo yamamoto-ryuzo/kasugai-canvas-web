@@ -20,9 +20,10 @@ import {
   normKascTitle, rewriteKascLineOpt, rewriteKascLineVisibility,
   applyPanelTitle, loadKascBookmarks, downloadKascCamLines, downloadQgisBookmarksXml,
   layerAttribution, loadKascInfoContent,
-  resolveDefaultPointStyle, resolveDefaultLineStyle, resolveDefaultPolygonStyle,
+  resolveDefaultPointStyle, resolveDefaultLineStyle, resolveDefaultPolygonStyle, cssColorAlpha,
   defaultPointRadius, markerSymbolSpec, markerSymbolDivHtml, togeojsonIconSpec, buildWmsTileTemplate, buildWmtsTileTemplate,
   kascScaleZoomRange, setAllLayerGroupsExpanded,
+  appendGroupedTitleOptions, syncBasemapList,
 } from "../shared/kasc.js";
 import { createKascPortal } from "../shared/portal.js";
 import { compileWhereExpression } from "../shared/where-eval.js";
@@ -30,7 +31,7 @@ import { loadVectorItem, isViewportQueryItem } from "../shared/vector-load.js";
 import { diagnoseHubLayerError } from "../shared/hub-diag.js";
 import { createMinimap } from "../shared/minimap.js";
 import { initGeoTools2d, makeLeafletOverlay } from "../shared/geo-tools-2d.js";
-import { qmlLegendSwatchDataUrl, defaultVectorLegendSpec, specToStyle, loadCompiledQml, installExprFeatureResolver, installLayerVisibilityResolver, setMapScaleGetter } from "../shared/qml-2d.js";
+import { qmlLegendSwatchDataUrl, defaultVectorLegendSpec, specToStyle, loadCompiledQml, installExprFeatureResolver, installLayerVisibilityResolver, setMapScaleGetter, qmlLabelElement, resToZoom } from "../shared/qml-2d.js";
 import { renderLayerLegendPicker } from "../shared/legend-tab.js";
 import { createAttrWidget, attrEntriesFromProps, renderAttrContent } from "../shared/attr-widget.js";
 import { createPlayerApi } from "../shared/player-api.js";
@@ -38,7 +39,8 @@ import { mountEngineSwitcher } from "../shared/engine-switch.js";
 import { matchSessionState, bindSessionState, applySessionState, sessionBootView, sessionInspectorFor, markSessionKascBase } from "../shared/session-state.js";
 import { initAiChat } from "../shared/ai-chat.js";
 import { createKascFlyPaths } from "../shared/fly-kasc.js";
-import { configureLive, configureFollow, liveUpdate, liveNotifyCamera, liveNotifySelection } from "../shared/live.js";
+import { configureLive, configureFollow, liveUpdate, liveNotifyCamera, liveNotifySelection, liveWritebackEntries, liveQueryFeatures } from "../shared/live.js";
+import { mountLivePanel, syncLivePanel } from "../shared/live-panel.js";
 import { initUiConfig } from "../shared/ui-config.js";
 
 // 診断: この中間エンジンが iframe 内で読み込まれた場合(ネスト)、
@@ -198,6 +200,7 @@ setMapScaleGetter(() => {
 });
 let baseEntries = [];    // {item, gsiId|null, tileLayer|null}
 let baseHidden = false;
+let baseTransparent = false; // 「ベースマップ透明」選択中(または .kasc の base: | transparent)
 let docBackgroundCss = null;  // .kasc background: 行。ベースマップなし/透過時の下敷き色
 let currentCams = [];
 let currentThemes = [];
@@ -725,6 +728,7 @@ function bindViewSync() {
   gmap.on("moveend", () => {
     // QGIS ライブ連携: カメラ停止で QGIS キャンバスへ逆通知(#62)
     liveNotifyCamera();
+    syncGsiLabelZoom();
     // 親 replaceState と iframe 側 L.Hash の hash 書込が連鎖すると
     // joint session history で iframe が親URLを拾うケースがあるため、
     // 親への書き込みはデバウンスして頻度を下げる
@@ -764,13 +768,25 @@ function styledFeature(item, feature) {
             props._opacity = 0.8;
           }
         } else {
-          props._color = s.stroke || "#2c5ea8";
-          props._weight = s.strokeWidth ?? 1.5;
-          props._opacity = 1;
+          // _opacity を最終 α として渡すため _color は不透明化
+          // (_fillOpacity と同じ理由: 乗算適用と置換適用の両対応)
+          props._color = (s.stroke || "#2c5ea8").replace(/^rgba\(([^,]+),([^,]+),([^,]+),[^)]+\)$/, "rgb($1,$2,$3)");
+          // QML で線無し(pen=none)は描かない: _weight=0・_opacity=0
+          // (styleGlobeEntity は _opacity を α 上書きに使う)
+          props._weight = s.stroke ? (s.strokeWidth ?? 1.5) : 0;
+          props._opacity = s.stroke ? cssColorAlpha(s.stroke) : 0;
           if (/Polygon/.test(gt)) {
-            props._fillColor = s.fill || "#3a7bd5";
-            props._fillOpacity = 0.4;
-            props._fill = true;
+            // QML で塗り無し(brush=none)は青フォールバックせず非表示。
+            // s.fill は α 込み rgba() → _fillOpacity は α を別渡しする
+            props._fill = !!s.fill;
+            if (s.fill) {
+              // _fillOpacity を最終 α として渡し _fillColor は不透明化
+              // (2D sakuzu の乗算適用・Globe の withA 置換の両方で α が一致)
+              props._fillColor = s.fill.replace(/^rgba\(([^,]+),([^,]+),([^,]+),[^)]+\)$/, "rgb($1,$2,$3)");
+              props._fillOpacity = cssColorAlpha(s.fill);
+            } else {
+              props._fillOpacity = 0;
+            }
           }
         }
         return { ...feature, properties: props };
@@ -867,6 +883,25 @@ async function reinjectEntry(entry) {
   }
 }
 
+// QML ラベルの縮尺表示: zoom 範囲外の tooltip を隠す(leaflet 版
+// syncLabelZoomVisibility の軽量版。衝突判定は Leaflet の declutter 非対応
+// なので縮尺ゲートのみ)
+function syncGsiLabelZoom() {
+  if (!gmap) return;
+  const z = gmap.getZoom();
+  for (const entry of layerEntries) {
+    const inner = entry.sakuzu?._layer?.layer || entry.sakuzu?._layer;
+    try {
+      inner?.eachLayer?.(l => {
+        const st = l._kascLabel;
+        if (!st?.zoomRange) return;
+        const tipEl = l.getTooltip?.()?.getElement?.();
+        if (tipEl) tipEl.style.display = (z < st.zoomRange.minZoom || z > st.zoomRange.maxZoom) ? "none" : "";
+      });
+    } catch (_) {}
+  }
+}
+
 // GeoJSON を作図アイテムとして注入。visible=false なら非表示で登録のみ
 function injectSakuzuLayer(item, geojson) {
   const fc = { type: "FeatureCollection", features: (whereFilteredGeoJson(item, geojson)?.features || []).map(f => styledFeature(item, f)) };
@@ -882,6 +917,30 @@ function injectSakuzuLayer(item, geojson) {
         showFeatureAttrs(l.feature?.properties || {}, splitKascTitle(item.title).title || item.title, ev)));
     }
   } catch (_) { /* クリック付与失敗は表示自体を妨げない */ }
+  // QML <labeling>: iframe 内 Leaflet の permanent tooltip でラベル描画
+  // (leaflet エンジンと同じ qmlLabelElement 経路。縮尺範囲は zoomend で切替)
+  if (item._qml?.labelFor) {
+    try {
+      const inner = layer.layer || layer;
+      if (typeof inner.eachLayer === "function") {
+        inner.eachLayer(l => {
+          const el = qmlLabelElement(item._qml, l.feature?.properties || {});
+          if (!el) return;
+          const spec = el._kascLabelSpec || {};
+          const [ox, oy] = spec.pixelOffsetOf ? spec.pixelOffsetOf() : [0, 0];
+          l._kascLabel = {
+            spec,
+            zoomRange: spec.labelScale ? {
+              minZoom: spec.labelScale.maxScale ? resToZoom(spec.labelScale.maxScale * 0.00028, gmap?.getCenter?.().lat ?? 0) : 0,
+              maxZoom: spec.labelScale.minScale ? resToZoom(spec.labelScale.minScale * 0.00028, gmap?.getCenter?.().lat ?? 0) : 99,
+            } : null,
+          };
+          l.bindTooltip(el, { permanent: true, direction: "center", className: "kasc-label", interactive: false, offset: [ox, oy] });
+        });
+      }
+    } catch (_) { /* ラベル付与失敗は表示自体を妨げない */ }
+    syncGsiLabelZoom();
+  }
   const title = item.title || "layer";
   const fileName = /\.[a-z0-9]+$/i.test(title) ? title : `${title}.geojson`;
   const sk = new G.SakuzuListItem(
@@ -1046,6 +1105,8 @@ async function applyEntryQueryFilter(entry, value) {
     if (isSql || item._viewportQuery || isViewportQueryItem(item)) await reloadEntryData(entry);
     else await reinjectEntry(entry);
     attrWidget.refresh();
+    // QGIS ライブ連携: フィルタ変更をプロジェクトへ書き戻す
+    liveWritebackEntries(layerEntries);
   } catch (e) {
     console.warn("フィルタ再読み込み失敗:", item.title, e);
   }
@@ -1086,6 +1147,7 @@ function scheduleViewportReload() {
   clearTimeout(viewportReloadTimer);
   viewportReloadTimer = setTimeout(() => {
     for (const e of layerEntries) {
+      if (e.item.liveSource && effectiveVisible(e)) { void reloadLiveEntry(e); continue; }
       if (e.item._viewportQuery && effectiveVisible(e)) reloadEntryData(e).catch(console.error);
       // bbox=auto / :bbox の初回読込に失敗したレイヤーは移動後の表示範囲で自動リトライする
       else if (e.failed && effectiveVisible(e) && isViewportQueryItem(e.item)) {
@@ -1095,6 +1157,80 @@ function scheduleViewportReload() {
       }
     }
   }, 400);
+}
+
+// 現在の表示範囲を [w,s,e,n] (EPSG:4326) で返す。アンチメリディアン
+// 跨ぎは全経度幅へ畳む(liveQueryFeatures の bbox= 引き渡し用)
+function viewBbox4326() {
+  const b = viewBounds();
+  if (!b) return null;
+  if (b.west > b.east) return [-180, b.south, 180, b.north];
+  return [b.west, b.south, b.east, b.north];
+}
+
+// QGIS Live「Add to Canvas」: カタログ title を表示範囲(bbox)で
+// /live/features から取得して geojson エントリとして追加する。
+// liveSource を付けてカメラ停止ごとの範囲追従再取得対象にする
+async function addLiveQgisLayer(title) {
+  const t = String(title);
+  const existing = layerEntries.find(e => e.item.liveSource?.title === t);
+  if (existing) {
+    await reloadLiveEntry(existing);
+    return { added: existing.item._geojson?.features?.length ?? 0 };
+  }
+  // 同名レイヤが既に live kasc へ載っているなら二重追加しない
+  // (非表示 | off なら「表示にする」操作として扱う)
+  const inKasc = layerEntries.find(e =>
+    (e.item.sourceTitle || e.item.title) === t);
+  if (inKasc) {
+    if (inKasc.item.visible === false) {
+      inKasc.item.visible = true;
+      applyEntryVisibility(inKasc);
+      maybeLoadEntry(inKasc);
+      renderLayerRows();
+    }
+    return { added: 0, existing: true };
+  }
+  const data = await liveQueryFeatures(t, { bbox: viewBbox4326(), limit: 10000 });
+  if (!data?.ok) throw new Error(data?.reason || data?.error || "query failed");
+  const fc = data.geojson || { type: "FeatureCollection", features: [] };
+  const url = URL.createObjectURL(new Blob(
+    [JSON.stringify(fc)], { type: "application/geo+json" }));
+  const item = {
+    type: "geojson",
+    title: t,
+    sourceTitle: t,
+    url,
+    visible: true,
+    liveSource: { title: t },
+    _idx: (layerEntries.at(-1)?.item._idx ?? 0) + 1,
+  };
+  const entry = { item, pending: true };
+  layerEntries.push(entry);
+  renderLayerRows();
+  try {
+    await mountEntry(entry);
+    applyEntryVisibility(entry);
+  } catch (err) {
+    entry.failed = true;
+    entry.error = String(err?.message || err);
+  }
+  entry.pending = false;
+  renderLayerRows();
+  return { added: fc.features.length, truncated: !!data.truncated };
+}
+
+// liveSource レイヤーの表示範囲追従再取得(moveend→scheduleViewportReload
+// から呼ばれる)。_geojson を差し替えて reinjectEntry で再注入する
+async function reloadLiveEntry(entry) {
+  const t = entry.item.liveSource?.title;
+  if (!t) return;
+  const data = await liveQueryFeatures(t, { bbox: viewBbox4326(), limit: 10000 });
+  if (!data?.ok) return;
+  entry.item._geojson = data.geojson
+    || { type: "FeatureCollection", features: [] };
+  entry.item._env = geojsonExtent(entry.item._geojson) || null;
+  await reinjectEntry(entry);
 }
 
 // ---- 属性 ----
@@ -1316,6 +1452,8 @@ function buildLayerRow(entry, exclusive, radioName) {
     applyEntryVisibility(entry);
     if (cb.checked) maybeLoadEntry(entry);
     entry._groupCtl?.sync();
+    // QGIS ライブ連携: 表示切替をプロジェクトへ書き戻す
+    liveWritebackEntries(layerEntries);
   });
   row.append(cb);
 
@@ -1448,6 +1586,8 @@ function renderLayerRows() {
         }
       }
       ctl.sync();
+      // QGIS ライブ連携: グループ表示切替をプロジェクトへ書き戻す
+      liveWritebackEntries(layerEntries);
     });
   }
 
@@ -1473,6 +1613,8 @@ function applyKascTheme(theme) {
   }
   renderLayerRows();
   inspectorInput.value = rewriteKascVisibility(inspectorInput.value, show);
+  // QGIS ライブ連携: テーマ適用をプロジェクトへ書き戻す
+  liveWritebackEntries(layerEntries, { theme: theme?.name });
 }
 themeSelect?.addEventListener("change", () => {
   const theme = currentThemes.find(t => t.name === themeSelect.value);
@@ -1574,8 +1716,9 @@ async function applyKascView(view) {
 function applyViewBase(rawName, logPrefix = "data-base") {
   const name = String(rawName || "").trim();
   const sel = document.getElementById("basemap-select");
-  if (/^(none|off|なし|ベースマップなし|transparent|hide|透明)$/i.test(name)) {
-    if (sel) { sel.value = "-1"; applyBaseSelection(); }
+  const isTrans = /^(transparent|hide|透明)$/i.test(name);
+  if (isTrans || /^(none|off|なし|ベースマップなし)$/i.test(name)) {
+    if (sel) { sel.value = isTrans ? "-2" : "-1"; applyBaseSelection(); }
   } else {
     const idx = baseEntries.findIndex(e =>
       e.gsiId === name || e.item.title === name || splitKascTitle(e.item.title).title === name);
@@ -1744,26 +1887,34 @@ function rebuildBasemapSelect() {
   sel.replaceChildren();
   const none = document.createElement("option");
   none.value = "-1"; none.textContent = "ベースマップなし";
-  sel.append(none);
-  baseEntries.forEach((e, i) => {
+  const trans = document.createElement("option");
+  trans.value = "-2"; trans.textContent = "ベースマップ透明";
+  sel.append(none, trans);
+  // タイトルの "グループ/名前" 階層は optgroup でグループ化表示し、
+  // syncBasemapList で折りたたみ可能な一覧 UI(他エンジンと同一外観)へ置換。
+  // appendGroupedTitleOptions は要素の .title を読むため item をそのまま渡す
+  appendGroupedTitleOptions(sel, baseEntries.map(e => e.item), (it, leafTitle, i) => {
     const o = document.createElement("option");
-    o.value = String(i); o.textContent = e.item.title || `base ${i + 1}`;
-    sel.append(o);
+    o.value = String(i); o.textContent = leafTitle || `base ${i + 1}`;
+    return o;
   });
-  sel.value = baseHidden ? "-1" : "0";
+  sel.value = baseTransparent ? "-2" : baseHidden ? "-1" : "0";
+  syncBasemapList(sel);
 }
 let gsiBaseRetryCount = 0;
 function applyBaseSelection() {
   const sel = document.getElementById("basemap-select");
   const idx = Number(sel?.value ?? -1);
   baseHidden = idx < 0;
+  baseTransparent = idx === -2;
   // 「ベースマップなし/透過」は GSI の blank(白地図)ではベージュの地図が出て
   // 白にならないため、iframe 内のタイルペインごと隠し、コンテナ背景を
   // 下敷き色(background: 行、既定白)にする
   const tilePane = gmap?.getPane?.("tilePane");
   if (tilePane) tilePane.style.visibility = baseHidden ? "hidden" : "";
   const mapContainer = gmap?.getContainer?.();
-  if (mapContainer) mapContainer.style.background = baseHidden ? (docBackgroundCss || "#fff") : "";
+  if (mapContainer) mapContainer.style.background =
+    baseTransparent ? "transparent" : baseHidden ? (docBackgroundCss || "#fff") : "";
   if (globeMode) { applyGlobeBaseSelection(idx); return; }
   // gsimaps 標準ベースマップ: .kasc の先頭 GSI ベース行が選ばれた時だけ使い、
   // それ以外・なし選択時は blank(白地図)にして外部タイルを実質ベースにする
@@ -2000,7 +2151,7 @@ async function buildFromDoc({ doc, baseUrl, noFit = false, sw = null, baseKey = 
     const entry = { item, gsiId, tileLayer: null };
     baseEntries.push(entry);
   }
-  if (baseModeRow) baseHidden = true;
+  if (baseModeRow) { baseHidden = true; baseTransparent = baseModeRow.mode === "transparent"; }
   // base 行の外部タイル分は作成のみ（表示は applyBaseSelection が制御）
   // globe 中は Leaflet が無いため tileLayer は作らず imagery 側へ委ねる
   for (const e of baseEntries) {
@@ -2050,7 +2201,9 @@ async function buildFromDoc({ doc, baseUrl, noFit = false, sw = null, baseKey = 
         height: viewZoomToHeight(c.lat, gmap.getZoom(), gmapH()), pitch: -90, heading: 0 };
     },
     applySelection: sel => applyQgisSelection(sel),
+    addLiveLayer: addLiveQgisLayer,
   });
+  syncLivePanel();
   // 引継ぎセッションの可視性を mount 前に item.visible へ畳み込む。
   // doc の |off は実行時トグルを反映しない(正典は vis マップ)ため、
   // mount 後に隠すと非表示レイヤが一瞬地図へ出る(他エンジンは mount 前適用)
@@ -2905,6 +3058,9 @@ mountEngineSwitcher(document.querySelector("#engines"), "gsimaps");
 // 🏠ボタン・「地図を開く」・Esc・「ビュー解除」の配線(共有ポータルモジュール)
 kascPortal().bindEvents();
 // ?follow[=<base>] → geo_webview の /live/state をポーリングして表示を追従(#62)
+// QGIS Live 操縦パネル(live: 行検出時にパネル先頭へ表示)
+mountLivePanel(document.querySelector("#panel"));
+
 configureFollow({
   apply: s => {
     if (globeMode || !gmap) return;

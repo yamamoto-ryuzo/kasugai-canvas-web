@@ -34,7 +34,8 @@ import { initGeoTools2d } from "../shared/geo-tools-2d.js";
 import { createAttrWidget, renderAttrContent, attrEntriesFromProps } from "../shared/attr-widget.js";
 import { initAiChat, hasBackendFeature } from "../shared/ai-chat.js";
 import { createPlayerApi } from "../shared/player-api.js";
-import { configureLive, configureFollow, liveUpdate, liveNotifyCamera, liveNotifySelection, liveWritebackEntries } from "../shared/live.js";
+import { configureLive, configureFollow, liveUpdate, liveNotifyCamera, liveNotifySelection, liveWritebackEntries, liveQueryFeatures } from "../shared/live.js";
+import { mountLivePanel, syncLivePanel } from "../shared/live-panel.js";
 import { mountEngineSwitcher } from "../shared/engine-switch.js";
 import { matchSessionState, bindSessionState, applySessionState, sessionBootView, sessionInspectorFor, markSessionKascBase } from "../shared/session-state.js";
 import { initPrint, compositeCanvases } from "../shared/print.js";
@@ -127,6 +128,7 @@ const map = new Map({
   view: new View({ center: fromLonLat([139.767, 35.681]), zoom: 10 }),
 });
 window.kascMap = map; // デバッグ/外部連携用参照（他エンジンと同じ公開範囲）
+Object.defineProperty(window, "kascEntries", { get: () => layerEntries }); // デバッグ/外部連携用参照（kascMap と同じ公開範囲）
 
 // 地物の範囲へ移動。属性一覧・属性タブの行クリックで共通使用。
 // GeoJSON Feature(EPSG:4326)と ol/Feature(EPSG:3857)の両方を受け付ける
@@ -1667,15 +1669,37 @@ async function renderProject(loadedId, baseUrl, doc, manifest) {
       opt.value = i; opt.textContent = leafTitle || `base ${i}`;
       return opt;
     });
+    // 「ベースマップなし」「ベースマップ透明」を先頭に明示選択肢として置く
+    // (Cesium 版と同じ構成。値 -1=なし / -2=透明)
+    {
+      const noneOpt = document.createElement("option");
+      noneOpt.value = "-1"; noneOpt.textContent = t("basemap.none");
+      const transOpt = document.createElement("option");
+      transOpt.value = "-2"; transOpt.textContent = t("basemap.transparent");
+      sel.prepend(noneOpt, transOpt);
+    }
     baseEntries.forEach((entry, i) => {
       entry.layer.setVisible(i === active);
     });
-    sel.value = active;
+    // base: 行の | none / | transparent は初期でベースマップを張らない
+    // (Cesium 版と同じ規則)。対応する疑似選択肢を選んだ状態にする
+    const baseModeRow = (doc.bases || []).find(b => b.mode);
+    if (baseModeRow) {
+      baseEntries.forEach(e => e.layer.setVisible(false));
+      sel.value = baseModeRow.mode === "transparent" ? "-2" : "-1";
+    } else {
+      sel.value = active;
+    }
     // 初期表示は選択中の1レイヤのみ示す畳み状態で同期するため、
     // sel.value 確定後にリストを描画する
     syncBasemapList(sel);
     sel.onchange = () => {
-      baseEntries.forEach((e, i) => e.layer.setVisible(i === Number(sel.value)));
+      const v = Number(sel.value);
+      baseEntries.forEach((e, i) => e.layer.setVisible(i === v));
+      // -2「ベースマップ透明」は #map 背景を透過してページ側を見せる。
+      // それ以外では background: 行(未指定なら既定)へ戻す
+      const mapEl = document.querySelector("#map");
+      if (mapEl) mapEl.style.background = v === -2 ? "transparent" : (doc.background || "");
       syncDeckLayers(); // ベースマップのドレープコピーを選択中タイルへ差替える
       updateMapAttribution();
     };
@@ -1725,7 +1749,9 @@ async function renderProject(loadedId, baseUrl, doc, manifest) {
     applyKascText: liveApplyText,
     getView: () => mapViewToUrl(),
     applySelection: sel => applyQgisSelection(sel),
+    addLiveLayer: addLiveQgisLayer,
   });
+  syncLivePanel();
   // group: 行の折りたたみ初期状態(#59)。QGIS レイヤーツリーの展開状態を再現
   applyKascGroupStates(doc.groups, expandedLayerGroups);
   renderLayerRows(entries, unsupported);
@@ -1920,6 +1946,77 @@ async function applyEntryQueryFilter(entry, value) {
 }
 
 // bbox=auto / :bbox 系レイヤーを現在の表示範囲で再クエリする
+// 現在の表示範囲を [w,s,e,n] (EPSG:4326) で返す。アンチメリディアン
+// 跨ぎは全経度幅へ畳む(liveQueryFeatures の bbox= 引き渡し用)
+function viewBbox4326() {
+  const b = getViewBounds();
+  if (!b) return null;
+  const r = b.ranges?.[0];
+  if (!r) return null;
+  const west = b.ranges.length > 1 ? -180 : r.west;
+  const east = b.ranges.length > 1 ? 180 : r.east;
+  return [west, b.south, east, b.north];
+}
+
+// QGIS Live「Add to Canvas」: カタログ title を表示範囲(bbox)で
+// /live/features から取得して geojson エントリとして追加する。
+// liveSource を付けてカメラ停止ごとの範囲追従再取得対象にする
+async function addLiveQgisLayer(title) {
+  const t = String(title);
+  const existing = layerEntries.find(e => e.item.liveSource?.title === t);
+  if (existing) {
+    await reloadLiveEntry(existing);
+    return { added: existing.item._geojson?.features?.length ?? 0 };
+  }
+  // 同名レイヤが既に live kasc へ載っているなら二重追加しない
+  // (非表示 | off なら「表示にする」操作として扱う)
+  const inKasc = layerEntries.find(e =>
+    (e.item.sourceTitle || e.item.title) === t);
+  if (inKasc) {
+    if (inKasc.item.visible === false) {
+      inKasc.item.visible = true;
+      maybeLoadEntry(inKasc);
+      renderLayerRows(layerEntries, currentUnsupported);
+    }
+    return { added: 0, existing: true };
+  }
+  const data = await liveQueryFeatures(t, { bbox: viewBbox4326(), limit: 10000 });
+  if (!data?.ok) throw new Error(data?.reason || data?.error || "query failed");
+  const fc = data.geojson || { type: "FeatureCollection", features: [] };
+  const url = URL.createObjectURL(new Blob(
+    [JSON.stringify(fc)], { type: "application/geo+json" }));
+  const item = {
+    type: "geojson",
+    title: t,
+    sourceTitle: t,
+    url,
+    visible: true,
+    liveSource: { title: t },
+    _idx: (layerEntries.at(-1)?.item._idx ?? 0) + 1,
+  };
+  const entry = { item, layer: null, pending: true, unsupported: false,
+    opa: 1, deferred: true };
+  layerEntries.push(entry);
+  renderLayerRows(layerEntries, currentUnsupported);
+  await ensureEntryLoaded(entry);
+  return { added: fc.features.length, truncated: !!data.truncated };
+}
+
+// liveSource レイヤーの表示範囲追従再取得(moveend から呼ばれる)。
+// _geojson を差し替えて refillEntrySource で描画ソースを再充填する
+async function reloadLiveEntry(entry) {
+  const t = entry.item.liveSource?.title;
+  if (!t) return;
+  const data = await liveQueryFeatures(t, { bbox: viewBbox4326(), limit: 10000 });
+  if (!data?.ok) return;
+  const geojson = data.geojson || { type: "FeatureCollection", features: [] };
+  entry.item._geojson = geojson;
+  const env = geojsonExtent(geojson);
+  if (env) entry.layer?.set?.("kascEnv", env);
+  refillEntrySource(entry);
+  attrWidget.refresh();
+}
+
 function requeryViewportLayers(entries) {
   const bounds = getViewBounds();
   const fmt = new GeoJSON();
@@ -2044,13 +2141,16 @@ map.on("moveend", () => {
   minimap.scheduleUpdate();
   geoTools.scheduleGraticule();
   const targets = layerEntries.filter(e => e.item._viewportQuery && e.item.visible !== false);
+  // QGIS Live「Add to Canvas」由来レイヤーの表示範囲追従再取得
+  const liveTargets = layerEntries.filter(e => e.item.liveSource && e.item.visible !== false);
   // bbox=auto / :bbox の初回読込に失敗したレイヤーは、移動後の表示範囲で自動リトライする
   // （Cesium 版 reloadFailedVectorLayer 相当。失敗 spec は entry.failed が担う）
   const retry = layerEntries.filter(e => e.item.visible !== false && e.failed && !e.pending && !e._loading && isViewportQueryItem(e.item));
-  if (!targets.length && !retry.length) return;
+  if (!targets.length && !liveTargets.length && !retry.length) return;
   clearTimeout(requeryTimer);
   requeryTimer = setTimeout(() => {
     if (targets.length) requeryViewportLayers(targets);
+    for (const e of liveTargets) void reloadLiveEntry(e);
     for (const entry of retry) {
       entry.deferred = true; // ensureEntryLoaded 経路で再マウントする
       entry.failed = false;
@@ -2123,6 +2223,9 @@ void initUiConfig();
 loadProject().catch(err => {
   panel.unsupported.textContent = String(err.message || err);
 });
+
+// QGIS Live 操縦パネル(live: 行検出時にパネル先頭へ表示)
+mountLivePanel(document.querySelector("#panel"));
 
 // ?follow[=<base>] → geo_webview の /live/state をポーリングして表示を追従
 // (shared/live.js の live セッションへ統合)
@@ -2508,12 +2611,17 @@ function syncViewInspectorLines(show) {
 function applyViewBasemap(nameRaw) {
   const name = String(nameRaw || "").trim();
   if (!name) return;
-  if (/^(none|off|なし|ベースマップなし)$/i.test(name)) {
+  if (/^(none|off|なし|ベースマップなし|transparent|hide|透明)$/i.test(name)) {
+    const transparent = /^(transparent|hide|透明)$/i.test(name);
     currentBaseEntries.forEach(e => e.layer?.setVisible?.(false));
-  } else if (/^(transparent|hide|透明)$/i.test(name)) {
-    currentBaseEntries.forEach(e => e.layer?.setVisible?.(false));
-    const mapEl = document.querySelector("#map");
-    if (mapEl) mapEl.style.background = "transparent";
+    if (transparent) {
+      const mapEl = document.querySelector("#map");
+      if (mapEl) mapEl.style.background = "transparent";
+    }
+    if (panel.basemapSelect) {
+      panel.basemapSelect.value = transparent ? "-2" : "-1";
+      syncBasemapList(panel.basemapSelect);
+    }
   } else {
     const idx = currentBaseEntries.findIndex(e =>
       e.item.title === name || e.item.id === name || splitKascTitle(e.item.title).title === name);
