@@ -4,10 +4,6 @@
     "title": "デフォルトプロジェクト"
   },
   {
-    "id": "reinfolib",
-    "title": "不動産情報ライブラリ試験"
-  },
-  {
     "id": "sample_qgis",
     "title": "QGIS プロジェクト（SampleProjectFile）"
   }

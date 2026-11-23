@@ -30,7 +30,7 @@ import { initUiConfig } from "../shared/ui-config.js";
 
 import { groundDeckTileset } from "../shared/deck-ground.js";
 import { buildDeckDrapeLayers, invalidateDeckTerrainCovers, isGoogle3dTilesUrl, withGoogleTileKey, ensureGoogleTileKeyFetch, parseDeckTile3dOpts, ensureI3sLoader, deckWantsI3s } from "../shared/deck-drape.js";
-import { qmlLegendSwatchDataUrl, defaultVectorLegendSpec, installLayerVisibilityResolver, bakeQmlLabels, maplibreApplyQml, setMapScaleGetter } from "../shared/qml-2d.js";
+import { qmlLegendSwatchDataUrl, defaultVectorLegendSpec, installLayerVisibilityResolver, installExprFeatureResolver, bakeQmlLabels, maplibreApplyQml, setMapScaleGetter } from "../shared/qml-2d.js";
 import { renderLayerLegendPicker } from "../shared/legend-tab.js";
 import { createPanelHost, attachPanelApi } from "../shared/plugin-panels.js";
 import { renderLayerView, bindLayerView } from "../shared/layer-view.js";
@@ -167,6 +167,7 @@ let managedSources = [];
 let layerEntries = [];
 // QML 式 is_layer_visible('名前') を item.visible へ解決する(Cesium 版と同規則)
 installLayerVisibilityResolver(() => layerEntries.map(e => e.item));
+installExprFeatureResolver(() => layerEntries.map(e => e.item));
 // QML 式変数 @map_scale → Web メルカトル解像度 ÷ 0.28mm = 縮尺分母。
 // getZoom() は 512px 基準(正典-1)のため +1 して正典(256px 基準)へ換算する
 // (mapViewToUrl の zoom と同規約。生値だと実縮尺の2倍を返してしまう)
@@ -756,20 +757,10 @@ async function installGpkgSymbols(symbols) {
   }
   return registered;
 }
-// mbstyle シートが本レイヤの地物表へ適用されるかを 24-049 sa_reference で判定。
-// 地物表の GeoDataClass(sa_id)とスタイル側の GeoDataClass が一致すれば適用。
-// annotation 未整備の GPKG では誤適用を避け、地物表が1枚だけの時に限り適用
-// する(draft の簡易解釈。複数表では .kasc 行への gpkgstyle= 明示を推奨)
-function gpkgSheetApplies(sh, item, reg) {
-  const table = String(item.opts?.table || "");
-  const refs = reg.annotationRefs || [];
-  if (!refs.length) return (reg.featureTables || []).length <= 1;
-  const tableSas = new Set(refs.filter(r => r.table === table).map(r => r.saId));
-  for (const r of refs) {
-    if (r.table === "gpkgext_styles" && Number(r.key) === Number(sh.styleId) && tableSas.has(r.saId)) return true;
-  }
-  return false;
-}
+// mbstyle シートが本レイヤの地物表へ適用されるかの判定は shared/mbstyle-style.js の
+// selectGpkgMbstyleSheets(24-049 sa_reference で地物表 GeoDataClass とスタイル側
+// GeoDataClass の一致確認 + gpkgstyle= 選択)へ共通化済み。annotation 未整備の
+// GPKG では誤適用を避け、地物表が1枚だけの時に限り適用する簡易解釈を採る
 // mbstyle の sprite (URL文字列 or {id,url}配列,MapLibre v4) を展開して
 // map.addImage へ個別登録する。sprite.json {name:{x,y,width,height,pixelRatio,sdf}}
 // のメタデータで sprite.png を切り出す。戻り値は登録数
@@ -828,17 +819,16 @@ async function applyGpkgPortrayal(item, sid, lids, filters, opas, before, baseUr
     // probe/API から適用完了を待てるよう非同期完了印を付ける
     done: false,
   };
-  const sheets = (reg.sheets || []).filter(sh => String(sh.format).toLowerCase() === "mbstyle" && sh.data);
-  if (!sheets.length) { item._gpkgPortrayal.done = true; return; }
-  const wantName = String(item.opts?.gpkgstyle || "");
-  const styleRows = new Map((reg.styles?.list || []).map(s => [s.id, s]));
+  // 適用シート選択は shared/mbstyle-style.js へ共通化(非 maplibre エンジンの
+  // compiled-spec 経路と同一判定。GeoDataClass 紐付け + gpkgstyle= 選択)
+  const { selectGpkgMbstyleSheets } = await import("../shared/mbstyle-style.js");
+  const matches = selectGpkgMbstyleSheets(reg, {
+    table: String(item.opts?.table || ""),
+    gpkgstyle: item.opts?.gpkgstyle || "",
+  });
+  if (!matches.length) { item._gpkgPortrayal.done = true; return; }
   let applied = 0;
-  for (const sh of sheets) {
-    const style = styleRows.get(sh.styleId);
-    if (wantName && style?.style !== wantName && style?.uri !== wantName) continue;
-    let mbstyle;
-    try { mbstyle = JSON.parse(sh.data); } catch (e) { console.warn("mbstyle 解析失敗:", style?.style, e); continue; }
-    if (!gpkgSheetApplies(sh, item, reg)) continue;
+  for (const { mbstyle } of matches) {
     // sprite.png+sprite.json を切り出して icon-image 名で参照できるよう登録
     if (mbstyle.sprite) {
       const sn = await timed(installMbstyleSprite(mbstyle.sprite, baseUrl), 10000).catch(() => 0);

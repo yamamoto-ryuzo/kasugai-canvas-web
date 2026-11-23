@@ -24,7 +24,7 @@ import { diagnoseHubLayerError } from "../shared/hub-diag.js";
 import { createMinimap } from "../shared/minimap.js";
 import { initGeoTools2d } from "../shared/geo-tools-2d.js";
 import { initPrint } from "../shared/print.js";
-import { loadCompiledQml, specToStyle, qmlLegendSwatchDataUrl, defaultVectorLegendSpec, setMapScaleGetter, applyInvertedMaskGeojson, installLayerVisibilityResolver, linRefSamplesGeojson, QML_POS_CODE_TO_ANCHOR } from "../shared/qml-2d.js";
+import { loadCompiledQml, specToStyle, qmlLegendSwatchDataUrl, defaultVectorLegendSpec, setMapScaleGetter, applyInvertedMaskGeojson, installLayerVisibilityResolver, installExprFeatureResolver, linRefSamplesGeojson, splitInterpolatedGeojson, interpolatedSegmentStyle, QML_POS_CODE_TO_ANCHOR } from "../shared/qml-2d.js";
 import { rgbaToCss, markerLayersToCanvas, linRefFormatText } from "../shared/qml-style.js";
 import { renderLayerLegendPicker } from "../shared/legend-tab.js";
 import { createPanelHost, attachPanelApi } from "../shared/plugin-panels.js";
@@ -125,6 +125,7 @@ const layerEntries = [];   // {item, sid, src, layer, desc}
 window.kascLayerEntries = layerEntries; // デバッグ/検証用参照(kascMap/kascView と同じ公開範囲)
 // QML 式 is_layer_visible('名前') を item.visible へ解決する(Cesium 版と同規則)
 installLayerVisibilityResolver(() => layerEntries.map(e => e.item));
+installExprFeatureResolver(() => layerEntries.map(e => e.item));
 const baseEntries = [];    // 選択中ベースマップ {item, src, layer}
 const themes = [];
 let baseDocs = [], basemapSrc = null, basemapLayer = null;
@@ -1240,7 +1241,7 @@ async function addKascLayer(item, baseUrl) {
     // QML スタイル: 代表地物の spec からレイヤ既定色を取る（Navara はレイヤ単位マテリアル）
     let fillCss = item.opts?.fill, strokeCss = item.opts?.stroke || item.opts?.color, markerCss = item.opts?.marker_color;
     let lineDash = null, lineCap = null;
-    const embStyle = (loaded.qml || loaded.sld) ? loaded : null;
+    const embStyle = (loaded.qml || loaded.sld || loaded.mbstyle) ? loaded : null;
     if (item.opts?.style || embStyle || await probeQmlSidecar(item)) {
       try {
         const compiled = item.opts?.style
@@ -1267,7 +1268,7 @@ async function addKascLayer(item, baseUrl) {
     const pointO = oNum(item.opts?.opacity) ?? aOf(markerCss) ?? pd?.opacity ?? 1;
     // extrude=<m>(#60)・QML 2.5D レンダラ → PolygonMaterial.extrudedHeight(m)。
     // 地物別の上書きは FeatureEvaluator の extrudedHeight で同値を返す
-    const extrudeH = Math.max(Number(item.opts?.extrude) || 0, item._qml?.d25?.height || 0);
+    const extrudeH = Math.max(Number(item.opts?.extrude) || 0, item._qml?.d25?.heightM ?? item._qml?.d25?.height ?? 0);
     // QML マーカー: 形状・画像を含むため markerLayersToCanvas で canvas 化し、
     // billboard の地物別 image(URL/dataURL、atlas 収容)で差し替える
     let markerImageFor = null;
@@ -1375,6 +1376,24 @@ async function addKascLayer(item, baseUrl) {
         }
       }
       if (lrPts.length) geoData.features = [...geoData.features, ...lrPts];
+    }
+    // InterpolatedLine/Lineburst: セグメント分割地物へ展開(Navara も
+    // 1地物1マテリアルのため弧長分割の近似で色・幅を再現)
+    if (item._qml && geoData?.features?.length) {
+      const expanded = [];
+      let changed = false;
+      for (const f of geoData.features) {
+        const fdec = /LineString/.test(f?.geometry?.type || "")
+          ? (() => { try { return item._qml.evaluate(f.properties || {})?.line?.decor; } catch (_) { return null; } })()
+          : null;
+        if (fdec?.kind === "interpolated") {
+          expanded.push(...splitInterpolatedGeojson(f.geometry, f.properties));
+          changed = true;
+        } else {
+          expanded.push(f);
+        }
+      }
+      if (changed) geoData.features = expanded;
     }
     const src = view.addSource({ type: "geojson", data: geoData, tiled: true });
     // 破線は Navara 0.3.x の PolylineMaterial.dashArray（線幅倍率）で実現。
@@ -1546,15 +1565,24 @@ async function addKascLayer(item, baseUrl) {
               if (extrudeH > 0) v.extrudedHeight = extrudeH;
             } else if (gt === "polyline") {
               const strokeSrc = spec.outline || spec.line;
+              const iseg = Number(props.__kasc_iseg);
               if (spec.line?.decor?.kind === "linref" && !spec.outline) {
                 // 里程標は基線を描かない(QGIS 準拠)。標点は生成点が担う
                 v.show = false;
+              } else if (Number.isFinite(iseg) && spec.line?.decor?.kind === "interpolated") {
+                // InterpolatedLine セグメント: 弧長比率で色・幅を補間
+                const ss = interpolatedSegmentStyle(spec.line.decor, iseg);
+                v.color = new Color().setStyle(ss.color);
+                v.width = ss.width;
               } else if (strokeSrc) {
                 v.color = new Color().setStyle(rgbaToCss(strokeSrc.color));
-                if (strokeSrc.widthPx) v.width = Math.max(strokeSrc.widthPx, 0.5);
+                // MapUnit 線幅は specToStyle 経由で現縮尺→px 換算(mus クランプ込み)
+                const sPx = specToStyle(spec)?.strokeWidth;
+                const wPx = sPx ?? strokeSrc.widthPx;
+                if (wPx) v.width = Math.max(wPx, 0.5);
                 if (strokeSrc.color?.length > 3 && strokeSrc.color[3] < 1) v.opacity = strokeSrc.color[3];
                 // ルール別の破線・端帽(dash は px 配列→線幅倍率へ換算)
-                if (strokeSrc.dash?.length) v.dashArray = strokeSrc.dash.map(d => d / Math.max(strokeSrc.widthPx || polyWidth, 0.5));
+                if (strokeSrc.dash?.length) v.dashArray = strokeSrc.dash.map(d => d / Math.max(wPx || polyWidth, 0.5));
                 if (strokeSrc.cap) v.cap = strokeSrc.cap;
               }
             } else if (gt !== "text") {

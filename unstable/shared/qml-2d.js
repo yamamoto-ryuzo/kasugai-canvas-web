@@ -2,7 +2,7 @@
 // shared/qml-style.js の compileQmlStyle が返す spec:
 //   evaluate(props) → { markers, line:{color,widthPx,dash}, fillParts:[{solid|rgba|hatch}],
 //                       outline:{color,widthPx,dash}, centroid, scale, label }
-import { loadQmlStyle, rgbaToCss, markerLayersToCanvas, fillPartsToTile, qmlLabelCanvas, setLayerVisibilityResolver, setMapScaleGetter, setEvalScale, linRefFormatText } from "./qml-style.js";
+import { loadQmlStyle, rgbaToCss, markerLayersToCanvas, fillPartsToTile, qmlLabelCanvas, setLayerVisibilityResolver, setExprFeatureResolver, setMapScaleGetter, setEvalScale, evalScaleDenom, linRefFormatText, clampMapUnitsPerPixel, MUP_PER_SCALE_DENOM, interpolatedColorAt } from "./qml-style.js";
 import { resolveKascUrl } from "./kasc.js";
 
 // qml-style.js の縮尺注入 API を 2D アダプタ経由で各エンジンへ再公開
@@ -24,6 +24,36 @@ export function installLayerVisibilityResolver(getItems) {
       return path.split("/").map(seg => seg.trim()).includes(key);
     });
     return hit ? !!hit.visible : false;
+  });
+}
+
+// QML 式の get_feature(layer,attr,value)/get_feature_by_id(layer,id) を、
+// 読み込み済みレイヤーの GeoJSON(item._geojson または geojsonSource)へ解決する。
+// レイヤー名照合は is_layer_visible と同じ規則。未発見時 null(QGIS でレイヤー無しと同じ)。
+// get_feature は attr=value の先頭一致(C++ QgsExpressionUtils::getFeature 同様)、
+// by_id は feature.id 一致を優先し、無ければ配列 index(OGR FID 相当)を引く
+export function installExprFeatureResolver(getItems) {
+  setExprFeatureResolver((layerName, attrName, value) => {
+    const key = String(layerName ?? "").trim();
+    if (!key) return null;
+    const items = getItems?.() || [];
+    const item = items.find(it => {
+      if (!it) return false;
+      if (it.title === key || it.id === key) return true;
+      const path = (it.group ? `${it.group}/${it.title}` : String(it.title || ""));
+      return path.split("/").map(seg => seg.trim()).includes(key);
+    });
+    const feats = item?._geojson?.features ?? item?.geojsonSource?.features;
+    if (!Array.isArray(feats)) return null;
+    if (attrName == null) {
+      return feats.find(f => f?.id != null && String(f.id) === String(value))
+        ?? feats[Number(value)] ?? null;
+    }
+    const col = String(attrName);
+    return feats.find(f => {
+      const v = f?.properties?.[col];
+      return v === value || (v != null && value != null && String(v) === String(value));
+    }) ?? null;
   });
 }
 
@@ -229,22 +259,51 @@ function markerColorOf(spec) {
 }
 
 // spec → シンプルな描画パラメータ（2D エンジン共通の最小表現）
+// MapUnit/MetersInMapUnits 由来のメートル値を現在縮尺で px へ換算する。
+// mus(QgsMapUnitScale)があれば QGIS 準拠で mup をクランプする。
+// 縮尺未取得時は null(呼び出し側は widthPx/sizePx 近似へフォールバック)
+function metersToPx(meters, mus) {
+  if (!Number.isFinite(meters)) return null;
+  const sd = evalScaleDenom();
+  if (!sd) return null;
+  const mup = clampMapUnitsPerPixel(sd * MUP_PER_SCALE_DENOM, mus);
+  if (!(mup > 0)) return null;
+  return meters / mup;
+}
+
 export function specToStyle(spec) {
   if (!spec) return null;
   const strokeSrc = spec.outline || spec.line || null;
+  // 線幅: MapUnit 系はメートル保持されているため現縮尺で px へ換算
+  // (QGIS QgsRenderContext::convertToPainterUnits の MapUnits 分岐相当)。
+  // 解像度不明時は widthPx 近似のまま
+  let strokeWidth = strokeSrc?.widthPx ?? 1.5;
+  if (Number.isFinite(strokeSrc?.widthMeters)) {
+    const px = metersToPx(strokeSrc.widthMeters, strokeSrc.widthMus);
+    if (px != null) strokeWidth = Math.max(px, 0.25);
+  }
+  let lineOffsetPx = spec.line?.offsetPx || 0;
+  if (Number.isFinite(spec.line?.offsetMeters)) {
+    const px = metersToPx(spec.line.offsetMeters, spec.line.offsetMus);
+    if (px != null) lineOffsetPx = px;
+  }
   return {
     fill: fillColorOf(spec),
     stroke: strokeSrc ? rgbaToCss(strokeSrc.color) : null,
-    strokeWidth: strokeSrc?.widthPx ?? 1.5,
+    strokeWidth,
     dash: strokeSrc?.dash || null,
     dashOffsetPx: strokeSrc?.dashOffsetPx || 0,
     join: strokeSrc?.join || null,
     cap: strokeSrc?.cap || null,
-    lineOffsetPx: spec.line?.offsetPx || 0,
+    lineOffsetPx,
     trimStartPx: strokeSrc?.trimStartPx || 0,
     trimEndPx: strokeSrc?.trimEndPx || 0,
     markerColor: markerColorOf(spec) || "#2c5ea8",
     markerCanvas: spec.markers?.length ? markerLayersToCanvas(spec.markers) : null,
+    // MapUnit マーカー: 現縮尺での目標px(canvas拡縮率の算出用)
+    markerSizePx: spec.markers?.length && Number.isFinite(spec.markers[0]?.sizeMeters)
+      ? metersToPx(spec.markers[0].sizeMeters, spec.markers[0].sizeMetersMus)
+      : null,
   };
 }
 
@@ -338,12 +397,13 @@ function sampleLineGeom(geom, stepMap) {
   return out;
 }
 
-// LinearReferencing(里程標): 平面座標列(単位=m)を intervalM 間隔でサンプル。
-// 戻り値 [{x,y,angle,dist}] — angle は進行方向(y-up 空間の atan2 rad)、
-// dist はパート先頭からの累積距離(m)。skip_multiples はその倍数地点を除外
-export function linRefSamplesPlanar(coordsList, intervalM, { skipMultiples = 0, startMeasure = 0, max = 500 } = {}) {
+// LinearReferencing(里程標): 平面座標列(ソースCRS単位)を interval 間隔で
+// サンプル。戻り値 [{x,y,angle,dist}] — angle は進行方向(y-up 空間の
+// atan2 rad)、dist はパート先頭からの累積距離(ソース単位)。
+// skip_multiples はその倍数地点を除外
+export function linRefSamplesPlanar(coordsList, interval, { skipMultiples = 0, startMeasure = 0, max = 500 } = {}) {
   const out = [];
-  const step = Math.max(intervalM || 1, 1);
+  const step = Math.max(interval || 0, 1e-9);
   const skip = Math.max(skipMultiples || 0, 0);
   const eps = step * 1e-6;
   for (const coords of coordsList || []) {
@@ -369,9 +429,10 @@ export function linRefSamplesPlanar(coordsList, intervalM, { skipMultiples = 0, 
   return out;
 }
 
-// GeoJSON(4326) LineString/MultiLineString → メートル空間で標点サンプルし
-// 4326 座標へ戻す。labelOffsetPx は基準縮尺(TRIM_PX_TO_M=2.8m/px)換算で
-// 座標へ直接焼き込む(回転時は線方向系、非回転時は画面系)
+// GeoJSON(4326) LineString/MultiLineString → QGIS 同様にソース座標単位(度)
+// で標点サンプルして 4326 座標を返す。labelOffsetPx は基準縮尺
+// (TRIM_PX_TO_M=2.8m/px)換算で座標へ直接焼き込む(回転時は線方向系、
+// 非回転時は画面系)。dist ラベルもソース単位(度)の累積距離
 export function linRefSamplesGeojson(geom, decor) {
   const parts = geom?.type === "LineString" ? [geom.coordinates]
     : geom?.type === "MultiLineString" ? geom.coordinates : [];
@@ -380,10 +441,12 @@ export function linRefSamplesGeojson(geom, decor) {
   const rot = !!decor?.rotate;
   const out = [];
   for (const c of parts) {
-    for (const s of linRefSamplesPlanar([c.map(ll2m)], decor?.intervalM, decor || {})) {
+    for (const s of linRefSamplesPlanar([c], decor?.interval, decor || {})) {
+      // オフセット(px→m 換算)はメルカトル m 空間で適用して 4326 へ戻す
+      const [mx, my] = ll2m([s.x, s.y]);
       const ca = Math.cos(s.angle), sa = Math.sin(s.angle);
-      const x = rot ? s.x + dxm * ca + dym * sa : s.x + dxm;
-      const y = rot ? s.y + dxm * sa - dym * ca : s.y - dym;
+      const x = rot ? mx + dxm * ca + dym * sa : mx + dxm;
+      const y = rot ? my + dxm * sa - dym * ca : my - dym;
       const [lon, lat] = m2ll([x, y]);
       out.push({ coord: [lon, lat], angle: s.angle, dist: s.dist });
     }
@@ -391,36 +454,436 @@ export function linRefSamplesGeojson(geom, decor) {
   return out;
 }
 
+// GeoJSON(4326) LineString/MultiLineString を弧長で n 等分したセグメント
+// 地物へ分解する(InterpolatedLine の Leaflet/Navara 近似用)。
+// 各地物の properties には __kasc_iseg={f:弧長中央比率} と元 properties を継承
+export function splitInterpolatedGeojson(geom, baseProps, n = 24) {
+  const parts = geom?.type === "LineString" ? [geom.coordinates]
+    : geom?.type === "MultiLineString" ? geom.coordinates : [];
+  const out = [];
+  for (const c of parts) {
+    const segs = splitLinePlanar(c.map(ll2m), n);
+    for (const s of segs) {
+      out.push({
+        type: "Feature",
+        properties: { ...(baseProps || {}), __kasc_iseg: s.mid },
+        geometry: { type: "LineString", coordinates: s.coords.map(m2ll) },
+      });
+    }
+  }
+  return out;
+}
+
+// InterpolatedLine のセグメント地物(__kasc_iseg)に色・幅を焼き込む。
+// evaluate 済み spec の line.decor を参照する
+export function interpolatedSegmentStyle(decor, f) {
+  return {
+    color: rgbaToCss(interpolatedColorAt(decor, f)),
+    width: Math.max((decor.w1 || 1) + ((decor.w2 || decor.w1 || 1) - (decor.w1 || 1)) * f, 0.5),
+  };
+}
+
+// 平面座標列を弧長で n 等分する。[{coords, mid}] mid=区間中央の弧長比率
+// (InterpolatedLine の線分細分化用)
+function splitLinePlanar(coords, n) {
+  if (!coords || coords.length < 2 || !(n > 0)) return [];
+  const cum = [0];
+  for (let i = 1; i < coords.length; i++) {
+    const dx = coords[i][0] - coords[i - 1][0], dy = coords[i][1] - coords[i - 1][1];
+    cum.push(cum[i - 1] + Math.hypot(dx, dy));
+  }
+  const total = cum[cum.length - 1];
+  if (!(total > 0)) return [];
+  const at = d => {
+    let j = 1;
+    while (j < cum.length - 1 && cum[j] < d) j++;
+    const f = Math.min(1, (d - cum[j - 1]) / Math.max(cum[j] - cum[j - 1], 1e-12));
+    return [coords[j - 1][0] + (coords[j][0] - coords[j - 1][0]) * f,
+      coords[j - 1][1] + (coords[j][1] - coords[j - 1][1]) * f];
+  };
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const d0 = total * i / n, d1 = total * (i + 1) / n;
+    const seg = [at(d0)];
+    for (let j = 1; j < coords.length; j++) {
+      if (cum[j] > d0 && cum[j] < d1) seg.push(coords[j]);
+    }
+    seg.push(at(d1));
+    if (seg.length >= 2) out.push({ coords: seg, mid: (i + 0.5) / n });
+  }
+  return out;
+}
+
+// InterpolatedLine 装飾 → 区間分割 Stroke 群。色は interpolatedColorAt
+// (ramp 優先)、幅は w1→w2 線形補間(OL は data-driven 幅を持てないため
+// セグメント別 Style を生成する近似)
+function interpolatedToOlStyles(decor, geom, resolution, OL) {
+  const { Style, Stroke, LineString, MultiLineString } = OL;
+  if (!LineString || !geom || !Number.isFinite(resolution)) return [];
+  const lines = geom.getType() === "MultiLineString" && MultiLineString
+    ? geom.getCoordinates() : [geom.getCoordinates()];
+  const styles = [];
+  const N = 24;
+  for (const coords of lines) {
+    for (const seg of splitLinePlanar(coords, N)) {
+      const w = decor.w1 + (decor.w2 - decor.w1) * seg.mid;
+      styles.push(new Style({
+        geometry: new LineString(seg.coords),
+        stroke: new Stroke({
+          color: rgbaToCss(interpolatedColorAt(decor, seg.mid)),
+          width: Math.max(w || 1, 0.5),
+        }),
+      }));
+    }
+  }
+  return styles;
+}
+
+// MarkerLine 配置サンプリング。Qgis C++ QgsTemplatedLineSymbolLayerBase の
+// renderPolylineInterval/renderPolylineCentral/renderPolylineVertex/
+// renderOffsetVertexAlongLine/markerAngle に準拠。
+// 戻り値 [{x,y,angle}] — angle は y-up 空間の進行方位(rad)。
+// - interval: 距離 offset_along_line から interval 毎(lengthLeft=interval-offset)
+// - vertex: 全頂点。閉リングは終端(=始端の重複)を除く。curvepoint は近似として同扱い
+// - innervertices: 端点を除く頂点
+// - firstvertex/lastvertex: 端点。offset_along_line>0 時は線に沿って
+//   +offset/-offset の地点(到達不能なら描かない=C++ と同じ)。place_on_every_part=0
+//   なら先頭パートのみ
+// - segmentcenter: 各セグメント中点(セグメント角)
+// - centralpoint: 全長の半分の地点(所在セグメント角)
+// 角度は rotate=1 の場合に適用される: 内点は両隣セグメントの単位ベクトル和
+// (C++ _averageAngle)、端点は最近傍非縮退セグメント。average_angle_length>0 は
+// interval/centralpoint で地点±avg の2点を結ぶ線の角
+export function markerlineDecorSamples(geom, decor, px) {
+  const lines = geom.getType() === "LineString" ? [geom.getCoordinates()]
+    : (geom.getCoordinates?.() || []);
+  const MAX = 500;
+  const out = [];
+  const eq = (a, b) => a && b && a[0] === b[0] && a[1] === b[1];
+  const segAng = (a, b) => Math.atan2(b[1] - a[1], b[0] - a[0]);
+  const totalLen = c => {
+    let l = 0;
+    for (let i = 0; i + 1 < c.length; i++)
+      l += Math.hypot(c[i + 1][0] - c[i][0], c[i + 1][1] - c[i][1]);
+    return l;
+  };
+  // 累積距離 d の点と所在セグメント角(d>total は終点に張り付き)
+  const pointAt = (c, d) => {
+    let acc = 0;
+    for (let i = 0; i + 1 < c.length; i++) {
+      const dx = c[i + 1][0] - c[i][0], dy = c[i + 1][1] - c[i][1];
+      const len = Math.hypot(dx, dy);
+      if (len > 0 && d <= acc + len) {
+        const t = (d - acc) / len;
+        return { x: c[i][0] + dx * t, y: c[i][1] + dy * t, angle: Math.atan2(dy, dx) };
+      }
+      acc += len;
+    }
+    const a = c[c.length - 2], b = c[c.length - 1];
+    return { x: b[0], y: b[1], angle: a ? segAng(a, b) : 0 };
+  };
+  // C++ markerAngle: 内点は前後の非重複頂点を結ぶ2ベクトルの和(_averageAngle)、
+  // リング端点は count-2→1、非リング端点は最近傍非縮退セグメント
+  const vertexAngle = (c, isRing, i) => {
+    const pt = c[i];
+    if (isRing || (i > 0 && i < c.length - 1)) {
+      let pi = i - 1, ni = i + 1;
+      if (isRing && (i === 0 || i === c.length - 1)) { pi = c.length - 2; ni = 1; }
+      let prev, next;
+      while (pi >= 0) { prev = c[pi]; if (!eq(prev, pt)) break; pi--; }
+      while (ni < c.length) { next = c[ni]; if (!eq(next, pt)) break; ni++; }
+      if (pi >= 0 && ni < c.length) {
+        const a1 = segAng(prev, pt), a2 = segAng(pt, next);
+        return Math.atan2(Math.sin(a1) + Math.sin(a2), Math.cos(a1) + Math.cos(a2));
+      }
+      return 0;
+    }
+    if (i === 0) {
+      for (let j = i; j < c.length - 1; j++)
+        if (!eq(c[j], c[j + 1])) return segAng(c[j], c[j + 1]);
+    } else {
+      for (let j = i; j >= 1; j--)
+        if (!eq(c[j - 1], c[j])) return segAng(c[j - 1], c[j]);
+    }
+    return 0;
+  };
+  const flags = new Set(String(decor.placement || "interval").toLowerCase().split(/[|,\s]+/).filter(Boolean));
+  if (!flags.size) flags.add("interval");
+  const off = px(decor.offsetAlongPx || 0) || 0;
+  const avg = px(decor.avgAnglePx || 0) || 0;
+  const everyPart = decor.everyPart !== false;
+  let firstPart = true;
+  for (const c of lines) {
+    if (!c || c.length < 2) continue;
+    const isFirst = firstPart; firstPart = false;
+    if (out.length >= MAX) break;
+    const n = c.length;
+    const isRing = n > 2 && eq(c[0], c[n - 1]);
+    const total = totalLen(c);
+    const windowAngle = d => avg > 0
+      ? segAng(pointAt(c, Math.max(0, d - avg)), pointAt(c, Math.min(total, d + avg)))
+      : undefined;
+    if (flags.has("interval")) {
+      const stepMap = Math.max(px(decor.intervalPx || 30), 1e-6);
+      let d = off;
+      // C++: 閉リングでは offset を全長で fmod する
+      if (isRing && total > 0 && off !== 0) d = ((off % total) + total) % total;
+      for (; d <= total && out.length < MAX; d += stepMap) {
+        const s = pointAt(c, Math.min(d, total));
+        const wa = windowAngle(d);
+        out.push({ x: s.x, y: s.y, angle: wa !== undefined ? wa : s.angle });
+      }
+    }
+    if (flags.has("vertex") || flags.has("curvepoint")) {
+      const m = isRing ? n - 1 : n;
+      for (let i = 0; i < m && out.length < MAX; i++)
+        out.push({ x: c[i][0], y: c[i][1], angle: vertexAngle(c, isRing, i) });
+    }
+    if (flags.has("innervertices")) {
+      const m = isRing ? n - 1 : n;
+      for (let i = 1; i < m - 1 && out.length < MAX; i++)
+        out.push({ x: c[i][0], y: c[i][1], angle: vertexAngle(c, isRing, i) });
+    }
+    if (flags.has("segmentcenter")) {
+      for (let i = 0; i + 1 < n && out.length < MAX; i++) {
+        if (eq(c[i], c[i + 1])) continue;
+        out.push({ x: (c[i][0] + c[i + 1][0]) / 2, y: (c[i][1] + c[i + 1][1]) / 2,
+          angle: segAng(c[i], c[i + 1]) });
+      }
+    }
+    // offset_along_line は C++ 同様 First/LastVertex にのみ適用される
+    if (flags.has("firstvertex") && (everyPart || isFirst)) {
+      if (off > 0 && off <= total)
+        out.push(pointAt(c, off));
+      else if (off <= 0)
+        out.push({ x: c[0][0], y: c[0][1], angle: vertexAngle(c, isRing, 0) });
+    }
+    if (flags.has("lastvertex") && (everyPart || isFirst)) {
+      if (off > 0 && off <= total)
+        out.push(pointAt(c, total - off));
+      else if (off <= 0)
+        out.push({ x: c[n - 1][0], y: c[n - 1][1], angle: vertexAngle(c, isRing, n - 1) });
+    }
+    if (flags.has("centralpoint")) {
+      const d = total / 2;
+      const s = pointAt(c, d);
+      const wa = windowAngle(d);
+      out.push({ x: s.x, y: s.y, angle: wa !== undefined ? wa : s.angle });
+    }
+  }
+  return out;
+}
+
+// --- ArrowLine: QGIS C++ QgsArrowSymbolLayer の straightArrow/curvedArrow/
+// renderPolyline を y-up 平面座標へ移植。
+// lines: [[x,y]...] (地図単位), px: px→地図単位変換, 戻り値: 外周リング配列
+// [[ [x,y],... ]...] (未閉合)。C++ は矢印全体(始点→終点)を1ポリゴンとして
+// Fill サブシンボルで塗る。head_length=線方向の矢頭長、head_thickness=
+// ±垂直方向への張出し(全幅は2倍)、arrow_width=胴体幅、arrow_start_width=尾幅。
+// head_type: 0=末尾(HeadSingle) 1=反転(HeadReversed) 2=両端(HeadDouble)
+// arrow_type: 0=両側(ArrowPlain) 1=左半(ArrowLeftHalf) 2=右半(ArrowRightHalf)
+// is_curved=1: 3点外接円弧に沿った矢印(2点なら直線フォールバック)
+// is_repeated=1: curved は2頂点おきの3連、直線は全セグメントごとに描く
+// spiralArcTo は半径線形補間のアルキメデス螺旋で近似(C++ 自体も円弧近似)
+export function arrowLinePolygonRings(lines, decor, px) {
+  const HL = px(decor.headLenPx || 0) || px(9);   // 矢頭の線方向長(head_length)
+  const HT = px(decor.headWidthPx || 0) || px(9); // 矢頭の半幅(head_thickness)
+  const W = px(decor.tailWidthPx || 0);           // 胴体幅(arrow_width)
+  const SW = px(decor.startWidthPx ?? W) || 0;    // 尾幅(arrow_start_width)
+  const OFF = px(decor.offsetPx || 0);
+  const headType = decor.headType | 0;
+  const arrowType = decor.arrowType | 0;
+  const drawR = arrowType === 0 || arrowType === 2; // ArrowRightHalf=右側のみ
+  const drawL = arrowType === 0 || arrowType === 1; // ArrowLeftHalf=左側のみ
+  const dist = (a, b) => Math.hypot(b[0] - a[0], b[1] - a[1]);
+
+  // ---- C++ straightArrow そのまま
+  const straight = (po0, pd0) => {
+    let po = [...po0], pd = [...pd0];
+    let len = dist(po, pd);
+    if (len < 1e-12) return null;
+    // 矢頭が入らない短さなら C++ と同じく端点をずらして矢頭だけ描く
+    if (headType === 0 && len < HL) {
+      po = [pd[0] - (pd[0] - po[0]) / len * HL, pd[1] - (pd[1] - po[1]) / len * HL];
+      len = HL;
+    } else if (headType === 1 && len < HL) {
+      pd = [po[0] + (pd[0] - po[0]) / len * HL, po[1] + (pd[1] - po[1]) / len * HL];
+      len = HL;
+    } else if (headType === 2 && len < 2 * HL) {
+      const vx = (pd[0] - po[0]) / len * HL, vy = (pd[1] - po[1]) / len * HL;
+      const mx = (po[0] + pd[0]) / 2, my = (po[1] + pd[1]) / 2;
+      po = [mx - vx, my - vy]; pd = [mx + vx, my + vy]; len = 2 * HL;
+    }
+    const body = len - HL;
+    const ux = (pd[0] - po[0]) / len, uy = (pd[1] - po[1]) / len;
+    const vx = -uy, vy = ux;
+    po = [po[0] + vx * OFF, po[1] + vy * OFF];
+    pd = [pd[0] + vx * OFF, pd[1] + vy * OFF];
+    const at = (t, s) => [po[0] + ux * t + vx * s, po[1] + uy * t + vy * s];
+    const ring = [];
+    if (headType === 2) {
+      ring.push(po);
+      if (drawR) ring.push(at(HL, HT), at(HL, W / 2), at(body, W / 2), at(body, HT));
+      ring.push(pd);
+      if (drawL) ring.push(at(body, -HT), at(body, -W / 2), at(HL, -W / 2), at(HL, -HT));
+    } else if (headType === 0) {
+      if (drawR) ring.push(at(0, SW / 2), at(body, W / 2), at(body, HT));
+      else ring.push(po);
+      ring.push(pd);
+      if (drawL) ring.push(at(body, -HT), at(body, -W / 2), at(0, -SW / 2));
+      else ring.push(po);
+    } else { // HeadReversed: 矢頭は po 側
+      ring.push(po);
+      if (drawR) ring.push(at(HL, HT), at(HL, W / 2), [pd[0] + vx * SW / 2, pd[1] + vy * SW / 2]);
+      else ring.push(pd);
+      if (drawL) ring.push([pd[0] - vx * SW / 2, pd[1] - vy * SW / 2], at(HL, -W / 2), at(HL, -HT));
+      else ring.push(pd);
+    }
+    return ring;
+  };
+
+  // ---- C++ pointsToCircle/clampAngle/circlePoint の移植
+  const circleOf = (a, b, c) => {
+    const abx = b[0] - a[0], aby = b[1] - a[1], bcx = c[0] - b[0], bcy = c[1] - b[1];
+    if (Math.abs(abx * bcy - aby * bcx) < 0.001) return null;
+    const ab2x = (a[0] + b[0]) / 2, ab2y = (a[1] + b[1]) / 2;
+    const bc2x = (b[0] + c[0]) / 2, bc2y = (b[1] + c[1]) / 2;
+    let cx, cy;
+    if (aby === 0) { cx = ab2x; cy = bc2y - (cx - bc2x) * bcx / bcy; }
+    else if (bcy === 0) { cx = bc2x; cy = ab2y - (cx - ab2x) * abx / aby; }
+    else {
+      cx = (ab2y - bc2y + bcx * bc2x / bcy - abx * ab2x / aby) / (bcx / bcy - abx / aby);
+      cy = ab2y - (cx - ab2x) * abx / aby;
+    }
+    return { cx, cy, r: Math.hypot(a[0] - cx, a[1] - cy) };
+  };
+  const clampA = a => a > 2 * Math.PI ? a - 2 * Math.PI : (a < 0 ? a + 2 * Math.PI : a);
+
+  // ---- C++ curvedArrow。pathArcTo/spiralArcTo は角度・半径とも線形補間で
+  // サンプリング(spiralArcTo 自体も中間点を経由する円弧2本の近似)
+  const curved = (po0, pm0, pd0) => {
+    const c = circleOf(po0, pm0, pd0);
+    if (!c) return straight(po0, pd0);
+    let { cx, cy, r: R } = c;
+    const angleOf = p => clampA(Math.atan2(cy - p[1], p[0] - cx));
+    const ao = angleOf(po0), am = angleOf(pm0), ad = angleOf(pd0);
+    const dir = clampA(am - ao) < clampA(am - ad) ? 1 : -1;
+    const aType = arrowType === 2 ? dir : (arrowType === 1 ? -dir : 0);
+    let delta = ad - ao;
+    if (dir * delta < 0) delta += dir * 2 * Math.PI;
+    const len = dist(po0, pd0);
+    if (Math.abs(delta) < Math.PI &&
+      ((headType === 0 && len < HL) || (headType === 1 && len < HL) ||
+       (headType === 2 && len < 2 * HL))) {
+      return straight(po0, pd0);
+    }
+    R += OFF;
+    const cPt = (r, a) => [cx + r * Math.cos(a), cy - r * Math.sin(a)];
+    const po = cPt(R, ao), pd = cPt(R, ad);
+    const headAngle = dir * Math.atan(HL / R);
+    const arc = (ring, r, a0, a1, d, n = 16) => {
+      let dd = a1 - a0;
+      if (d * dd < 0) dd += d * 2 * Math.PI;
+      for (let i = 1; i <= n; i++) ring.push(cPt(r, a0 + dd * i / n));
+    };
+    const spiral = (ring, a0, r0, a1, r1, d, n = 16) => {
+      let dd = a1 - a0;
+      if (d * dd < 0) dd += d * 2 * Math.PI;
+      for (let i = 1; i <= n; i++) {
+        const f = i / n;
+        ring.push(cPt(r0 + (r1 - r0) * f, a0 + dd * f));
+      }
+    };
+    const ring = [];
+    if (headType === 2) {
+      ring.push(po);
+      if (aType <= 0) {
+        ring.push(cPt(R + dir * HT, ao + headAngle));
+        arc(ring, R + dir * W / 2, ao + headAngle, ad - headAngle, dir);
+        ring.push(cPt(R + dir * HT, ad - headAngle), pd);
+      } else arc(ring, R, ao, ad, dir);
+      if (aType >= 0) {
+        ring.push(cPt(R - dir * HT, ad - headAngle));
+        arc(ring, R - dir * W / 2, ad - headAngle, ao + headAngle, -dir);
+        ring.push(cPt(R - dir * HT, ao + headAngle), po);
+      } else arc(ring, R, ad, ao, -dir);
+    } else if (headType === 0) {
+      if (aType <= 0) {
+        ring.push(cPt(R + dir * SW / 2, ao));
+        spiral(ring, ao, R + dir * SW / 2, ad - headAngle, R + dir * W / 2, dir);
+        ring.push(cPt(R + dir * HT, ad - headAngle), pd);
+      } else { ring.push(po); arc(ring, R, ao, ad, dir); }
+      if (aType >= 0) {
+        ring.push(cPt(R - dir * HT, ad - headAngle));
+        spiral(ring, ad - headAngle, R - dir * W / 2, ao, R - dir * SW / 2, -dir);
+        ring.push(cPt(R + dir * SW / 2, ao));
+      } else { arc(ring, R, ad, ao, -dir); ring.push(cPt(R + dir * SW / 2, ao)); }
+    } else { // HeadReversed
+      ring.push(po);
+      if (aType <= 0) {
+        ring.push(cPt(R + dir * HT, ao + headAngle), cPt(R + dir * W / 2, ao + headAngle));
+        spiral(ring, ao + headAngle, R + dir * W / 2, ad, R + dir * SW / 2, dir);
+      } else arc(ring, R, ao, ad, dir);
+      if (aType >= 0) {
+        ring.push(cPt(R - dir * SW / 2, ad));
+        spiral(ring, ad, R - dir * SW / 2, ao + headAngle, R - dir * W / 2, -dir);
+        ring.push(cPt(R - dir * HT, ao + headAngle), po);
+      } else { ring.push(pd); arc(ring, R, ad, ao, -dir); }
+    }
+    return ring;
+  };
+
+  // ---- C++ renderPolyline: curved 非反復は先端/中央頂点/終端の3点、
+  // 反復は2頂点おき。直線反復は全セグメント
+  const rings = [];
+  const push = r => { if (r && r.length >= 3) rings.push(r); };
+  for (const c of lines) {
+    if (!c || c.length < 2) continue;
+    if (decor.curved) {
+      if (!decor.repeated) {
+        if (c.length >= 3) push(curved(c[0], c[Math.floor(c.length / 2)], c[c.length - 1]));
+        else push(straight(c[0], c[1]));
+      } else {
+        for (let i = 0; i < c.length - 1; i += 2) {
+          if (c.length - i >= 3) push(curved(c[i], c[i + 1], c[i + 2]));
+          else push(straight(c[i], c[i + 1]));
+        }
+      }
+    } else if (!decor.repeated) {
+      push(straight(c[0], c[c.length - 1]));
+    } else {
+      for (let i = 0; i + 1 < c.length; i++) push(straight(c[i], c[i + 1]));
+    }
+  }
+  return rings;
+}
+
 // MarkerLine/HashLine/ArrowLine の spec.line.decor → OL Style 配列
 function decorToOlStyles(decor, geom, resolution, OL) {
-  const { Style, Fill, Stroke, Icon, Point, MultiPoint, MultiLineString, Polygon, Text } = OL;
+  const { Style, Fill, Stroke, Icon, Point, MultiPoint, MultiLineString, Polygon, MultiPolygon, Text } = OL;
   if (!MultiPoint || !MultiLineString || !Polygon || !geom || !Number.isFinite(resolution)) return [];
   const px = v => v * resolution; // 画面px → マップ単位
+  // InterpolatedLine/Lineburst: 区間分割 Stroke 群(本体 stroke は抑制される)
+  if (decor.kind === "interpolated") {
+    return interpolatedToOlStyles(decor, geom, resolution, OL);
+  }
   const step = Math.max(px(decor.intervalPx || 30), resolution * 2);
   if (decor.kind === "markerline" && decor.markers?.length) {
-    let samples;
-    if (decor.placement === "vertex" || decor.placement === "firstvertex" || decor.placement === "lastvertex") {
-      const lines = geom.getType() === "LineString" ? [geom.getCoordinates()] : geom.getCoordinates();
-      const pts = [];
-      for (const c of lines) {
-        if (decor.placement === "firstvertex") pts.push(c[0]);
-        else if (decor.placement === "lastvertex") pts.push(c[c.length - 1]);
-        else pts.push(...c);
-      }
-      samples = pts;
-    } else if (decor.placement === "centralpoint") {
-      const all = sampleLineGeom(geom, Number.MAX_VALUE);
-      const mid = all[Math.floor(all.length / 2)];
-      samples = mid ? [mid] : [];
-    } else {
-      samples = sampleLineGeom(geom, step).map(s => [s[0], s[1]]);
-    }
+    const samples = markerlineDecorSamples(geom, decor, px);
     if (!samples.length) return [];
     const canvas = markerLayersToCanvas(decor.markers);
-    return [new Style({
-      geometry: new MultiPoint(samples.map(s => s.slice(0, 2))),
-      image: new Icon({ img: canvas, anchor: [0.5, 0.5], scale: 1 }),
-    })];
+    // rotate=1(QGIS 既定)は各マーカーを線の局所角で回転させる。
+    // OL の Icon.rotation は Style 単位なので点ごとの Style を生成する
+    if (decor.rotateMarker === false) {
+      return [new Style({
+        geometry: new MultiPoint(samples.map(s => [s.x, s.y])),
+        image: new Icon({ img: canvas, anchor: [0.5, 0.5], scale: 1 }),
+      })];
+    }
+    return samples.map(s => new Style({
+      geometry: new Point([s.x, s.y]),
+      image: new Icon({ img: canvas, anchor: [0.5, 0.5], scale: 1, rotation: -s.angle }),
+    }));
   }
   if (decor.kind === "hashline" && decor.tick) {
     const t = decor.tick;
@@ -438,20 +901,13 @@ function decorToOlStyles(decor, geom, resolution, OL) {
     })];
   }
   if (decor.kind === "arrowline") {
+    // C++ straightArrow/curvedArrow 移植の全ポリゴン(本体+矢頭)を塗る
     const lines = geom.getType() === "LineString" ? [geom.getCoordinates()] : geom.getCoordinates();
-    const polys = [];
-    const hlen = px(decor.headLenPx || 9), hwid = px(decor.headWidthPx || 9) / 2;
-    for (const c of lines) {
-      if (c.length < 2) continue;
-      const [x1, y1] = c[c.length - 2], [x2, y2] = c[c.length - 1];
-      const ang = Math.atan2(y2 - y1, x2 - x1);
-      const bx = x2 - Math.cos(ang) * hlen, by = y2 - Math.sin(ang) * hlen;
-      const px_ = -Math.sin(ang) * hwid, py_ = Math.cos(ang) * hwid;
-      polys.push([[x2, y2], [bx + px_, by + py_], [bx - px_, by - py_], [x2, y2]]);
-    }
-    if (!polys.length) return [];
+    const rings = arrowLinePolygonRings(lines, decor, px).map(r => [...r, r[0]]);
+    if (!rings.length) return [];
     return [new Style({
-      geometry: new Polygon(polys),
+      geometry: MultiPolygon ? new MultiPolygon(rings.map(r => [r]))
+        : new Polygon(rings[0] ? [rings[0]] : []),
       fill: new Fill({ color: rgbaToCss(decor.color || [0, 0, 0, 1]) }),
       stroke: null,
     })];
@@ -460,7 +916,11 @@ function decorToOlStyles(decor, geom, resolution, OL) {
     // 里程標: 等間隔の標点へ距離ラベル(+任意マーカー)を置く。
     // resolution でオフセット px→地図単位を正確換算する
     const lines = geom.getType() === "LineString" ? [geom.getCoordinates()] : geom.getCoordinates();
-    const samples = linRefSamplesPlanar(lines, decor.intervalM, decor);
+    // QGIS は interval をソース座標系(4326=度)で計測するため、3857 ビュー
+    // 座標を 4326 へ逆変換してサンプルし、標点をビュー座標へ戻す。
+    // dist ラベルもソース単位(度)の累積距離
+    const linesDeg = lines.map(l => l.map(m2ll));
+    const samples = linRefSamplesPlanar(linesDeg, decor.interval, decor);
     if (!samples.length) return [];
     const tf = decor.text || {};
     const [lox, loy] = decor.labelOffsetPx || [0, 0];
@@ -469,10 +929,11 @@ function decorToOlStyles(decor, geom, resolution, OL) {
       ? markerLayersToCanvas(decor.markers) : null;
     const styles = [];
     for (const s of samples) {
+      const [vx, vy] = ll2m([s.x, s.y]);
       const ca = Math.cos(s.angle), sa = Math.sin(s.angle);
       // オフセットを線方向系へ回転(rotate 時)または画面系のまま適用(y-up→y-down 反転)
-      const px_ = decor.rotate ? s.x + dxm * ca + dym * sa : s.x + dxm;
-      const py_ = decor.rotate ? s.y + dxm * sa - dym * ca : s.y - dym;
+      const px_ = decor.rotate ? vx + dxm * ca + dym * sa : vx + dxm;
+      const py_ = decor.rotate ? vy + dxm * sa - dym * ca : vy - dym;
       if (mkCv) styles.push(new Style({
         geometry: new Point([px_, py_]),
         image: new Icon({ img: mkCv, anchor: [0.5, 0.5],
@@ -576,7 +1037,15 @@ export function olQmlStyleFunction(compiled, OL) {
     // LinearReferencing(里程標)は基線を描かず標点ラベル/マーカーのみ。
     // 実線ストロークを抑える(QGIS 準拠)
     const linrefOnly = spec.line?.decor?.kind === "linref" && !spec.outline;
-    if (s.stroke && !linrefOnly) {
+    // InterpolatedLine はセグメント分割 Stroke に置き換えるため本体 stroke を抑える
+    const interpOnly = spec.line?.decor?.kind === "interpolated";
+    // MarkerLine/HashLine/RasterLine/ArrowLine は QGIS では装飾のみを描き
+    // 実線は引かない(C++ 各 SymbolLayer は templated 描画で線を引かない)。
+    // 最上位レイヤがこれらなら本体 stroke を抑制。下位の実線レイヤは
+    // spec.lines の extra で描かれるため単独時のみ消える=QGIS と同じ。
+    // filledline は OL 側が corridor 描画未対応のため fallback 線を残す
+    const decorOnly = /^(markerline|hashline|rasterline|arrowline)$/.test(spec.line?.decor?.kind || "");
+    if (s.stroke && !linrefOnly && !interpOnly && !decorOnly) {
       styleOpts.stroke = new Stroke({
         color: s.stroke, width: s.strokeWidth, lineDash: s.dash || undefined,
         lineDashOffset: s.dashOffsetPx || undefined,
@@ -609,8 +1078,13 @@ export function olQmlStyleFunction(compiled, OL) {
     const topTrim = trimGeomOf(spec.line ?? spec.outline);
     if (topTrim) styleOpts.geometry = topTrim;
     if (/Point|MultiPoint/.test(geomType)) {
+      // MapUnit マーカーは現 resolution で拡縮(markerSizePx = m/px 換算の
+      // 目標直径。canvas は compile 時 px で焼かれているため比率で scale)
+      const mScale = s.markerCanvas && Number.isFinite(s.markerSizePx)
+        ? Math.min(Math.max(s.markerSizePx / Math.max(s.markerCanvas.height || 1, 1), 0.02), 100)
+        : null;
       styleOpts.image = s.markerCanvas
-        ? new Icon({ img: s.markerCanvas, anchor: [0.5, 0.5] })
+        ? new Icon({ img: s.markerCanvas, anchor: [0.5, 0.5], ...(mScale ? { scale: mScale } : {}) })
         : new CircleStyle({ radius: 5, fill: new Fill({ color: s.markerColor }), stroke: s.stroke ? new Stroke({ color: s.stroke, width: 1 }) : null });
     }
     // <labeling>: ラベルspec があれば Text を付ける(描画ごとに再評価されるため
@@ -795,10 +1269,29 @@ export function defaultVectorLegendSpec(geomType, { fill = [58 / 255, 123 / 255,
 const KASC_PROPS = ["__kasc_fill", "__kasc_stroke", "__kasc_width", "__kasc_color", "__kasc_symbol",
   "__kasc_icon", "__kasc_fillpat", "__kasc_dash", "__kasc_fopa", "__kasc_lopa", "__kasc_copa",
   "__kasc_cr", "__kasc_csw", "__kasc_csc", "__kasc_cicon",
+  "__kasc_cmf", "__kasc_cmlo", "__kasc_cmhi",
   "__kasc_lgrp", "__kasc_lblend", "__kasc_fblend", "__kasc_lggrp", "__kasc_fillx",
   "__kasc_lblur", "__kasc_mgrp", "__kasc_hgrp", "__kasc_lpat", "__kasc_lpatw",
+  "__kasc_wf", "__kasc_wlo", "__kasc_whi",
   "__kasc_loff", "__kasc_join", "__kasc_cap", "__kasc_heat", "__kasc_zkey",
   "__kasc_lronly", "__kasc_lrt", "__kasc_lrr", "__kasc_lrg"];
+
+// MapUnit 線幅対応の line-width 式。MapLibre は zoom を top-level の
+// interpolate/step でしか使えない制約があるため、両端ストップ側で case 分岐:
+// __kasc_wf(zoom0 時 px)=widthMeters/(156543.03392*cos(lat)) が焼かれた地物は
+// zoom 連動(px = wf*2^z)し、__kasc_wlo/whi(mus 由来の px 上下限)でクランプ。
+// 無ければ従来の固定 px(両端同値 = 定数のまま)
+const KASC_LINE_WIDTH_EXPR = [
+  "interpolate", ["exponential", 2], ["zoom"],
+  0, ["case", ["has", "__kasc_wf"],
+    ["min", ["coalesce", ["get", "__kasc_whi"], 1e6],
+      ["max", ["coalesce", ["get", "__kasc_wlo"], 0], ["get", "__kasc_wf"]]],
+    ["coalesce", ["get", "__kasc_width"], 1.5]],
+  1, ["case", ["has", "__kasc_wf"],
+    ["min", ["coalesce", ["get", "__kasc_whi"], 1e6],
+      ["max", ["coalesce", ["get", "__kasc_wlo"], 0], ["*", 2, ["get", "__kasc_wf"]]]],
+    ["coalesce", ["get", "__kasc_width"], 1.5]],
+];
 
 // HashLine の刻みを icon-image 用 canvas へ。刻み方向は
 // QGIS と同じく「線方向 + hash_angle − 90°」(hash_angle=0 が線直交)
@@ -926,6 +1419,25 @@ export function maplibreApplyQml(geojson, compiled) {
     }
     if (s.stroke) feature.properties.__kasc_stroke = s.stroke;
     feature.properties.__kasc_width = s.strokeWidth;
+    // MapUnit 線幅: 地物緯度で m→px 係数を焼き、line-width を zoom 補間式に
+    // する(QGIS の MapUnit 描画相当)。mus があれば px 上下限も保持
+    {
+      const strokeSrc = spec.outline || spec.line;
+      if (strokeSrc && Number.isFinite(strokeSrc.widthMeters)) {
+        const c0 = feature.geometry?.coordinates;
+        const flat = Array.isArray(c0) ? c0.flat(Infinity) : [];
+        const lat = Number(flat[1]) || 0;
+        feature.properties.__kasc_wf = strokeSrc.widthMeters
+          / (156543.03392 * Math.max(Math.cos(lat * Math.PI / 180), 0.01));
+        const mus = strokeSrc.widthMus;
+        // mus のクランプは mup(=scaleDenom×0.00028)への上限/下限なので、
+        // px 幅に換算すると: minScale→拡大側上限 px、maxScale→縮小側下限 px
+        feature.properties.__kasc_wlo = mus?.maxScale
+          ? Math.max(strokeSrc.widthMeters / (mus.maxScale * 0.00028), 0) : 0;
+        feature.properties.__kasc_whi = mus?.minScale
+          ? Math.max(strokeSrc.widthMeters / (mus.minScale * 0.00028), 0) : 1e6;
+      }
+    }
     feature.properties.__kasc_color = s.markerColor;
     if (s.join) feature.properties.__kasc_join = s.join;
     if (s.cap) feature.properties.__kasc_cap = s.cap;
@@ -937,6 +1449,19 @@ export function maplibreApplyQml(geojson, compiled) {
     const mk = spec.markers?.[0];
     if (mk) {
       feature.properties.__kasc_cr = Math.max((mk.sizePx || 8) / 2, 1);
+      // MapUnit マーカー: 線幅と同じく m→px 係数と mus 境界を焼く
+      if (Number.isFinite(mk.sizeMeters)) {
+        const c0 = feature.geometry?.coordinates;
+        const flat = Array.isArray(c0) ? c0.flat(Infinity) : [];
+        const lat = Number(flat[1]) || 0;
+        feature.properties.__kasc_cmf = (mk.sizeMeters / 2)
+          / (156543.03392 * Math.max(Math.cos(lat * Math.PI / 180), 0.01));
+        const mus = mk.sizeMetersMus;
+        feature.properties.__kasc_cmlo = mus?.maxScale
+          ? Math.max((mk.sizeMeters / 2) / (mus.maxScale * 0.00028), 0) : 0;
+        feature.properties.__kasc_cmhi = mus?.minScale
+          ? Math.max((mk.sizeMeters / 2) / (mus.minScale * 0.00028), 0) : 1e6;
+      }
       feature.properties.__kasc_copa = alphaOf(mk.fill);
       if (mk.stroke) feature.properties.__kasc_csc = rgbaToCss(mk.stroke);
       if (mk.strokeWidthPx) feature.properties.__kasc_csw = mk.strokeWidthPx;
@@ -973,7 +1498,15 @@ export function maplibreApplyQml(geojson, compiled) {
     // レイヤ別に出す(幅補間は line-progress 非対応のため __kasc_width で近似)
     const dec = spec.line?.decor ?? spec.outline?.decor;
     if (dec?.kind === "interpolated") {
-      feature.properties.__kasc_lggrp = `${rgbaToCss(dec.c1)}|${rgbaToCss(dec.c2)}`;
+      // color_ramp_shader(items/stops)があれば中間色もストップ化して
+      // line-gradient に反映する(QGIS のランプ補間近似)。無い場合は両端のみ
+      if (dec.ramp && (dec.ramp.items?.length || dec.ramp.stops?.length)) {
+        const cols = [];
+        for (let i = 0; i <= 8; i++) cols.push(rgbaToCss(interpolatedColorAt(dec, i / 8)));
+        feature.properties.__kasc_lggrp = cols.join("|");
+      } else {
+        feature.properties.__kasc_lggrp = `${rgbaToCss(dec.c1)}|${rgbaToCss(dec.c2)}`;
+      }
       hasGrad = true;
     }
     // MarkerLine/HashLine/RasterLine: icon-image(symbol-placement:line)・
@@ -1096,7 +1629,7 @@ export function maplibreApplyQml(geojson, compiled) {
   }
   const linePaint = blend => ({
     "line-color": ["coalesce", ["get", "__kasc_stroke"], "#2c5ea8"],
-    "line-width": ["coalesce", ["get", "__kasc_width"], 1.5],
+    "line-width": KASC_LINE_WIDTH_EXPR,
     "line-offset": ["coalesce", ["get", "__kasc_loff"], 0],
     "line-opacity": ["coalesce", ["get", "__kasc_lopa"], 1],
     ...(blend ? { "line-layer-blend": blend } : {}),
@@ -1129,12 +1662,15 @@ export function maplibreApplyQml(geojson, compiled) {
       if (g) pairs.add(g);
     }
     for (const g of pairs) {
-      const [c1, c2] = g.split("|");
+      // g = "c1|c2|c3|..." — ramp 利用時は中間ストップも列に含める
+      const cols = g.split("|").filter(Boolean);
+      const stops = ["interpolate", ["linear"], ["line-progress"]];
+      cols.forEach((c, i) => { stops.push(cols.length > 1 ? i / (cols.length - 1) : 0, c); });
       kinds.push(["line", ["all", nonPoint, ["==", ["get", "__kasc_lggrp"], g]], {
-        "line-width": ["coalesce", ["get", "__kasc_width"], 1.5],
+        "line-width": KASC_LINE_WIDTH_EXPR,
         "line-offset": ["coalesce", ["get", "__kasc_loff"], 0],
         "line-opacity": ["coalesce", ["get", "__kasc_lopa"], 1],
-        "line-gradient": ["interpolate", ["linear"], ["line-progress"], 0, c1, 1, c2],
+        "line-gradient": stops,
       }, lineLayout]);
     }
   }
@@ -1226,7 +1762,19 @@ export function maplibreApplyQml(geojson, compiled) {
     ...zlay("symbol-sort-key"),
   }]);
   kinds.push(["circle", ["all", pointOnly, ["!", ["has", "__kasc_icon"]]], {
-    "circle-radius": ["coalesce", ["get", "__kasc_cr"], 5],
+    // MapUnit マーカーは __kasc_cmf(zoom0 半径 px)で zoom 連動、mus 境界でクランプ
+    // (zoom は top-level interpolate/step のみ許可のため両端ストップ側で case)
+    "circle-radius": [
+      "interpolate", ["exponential", 2], ["zoom"],
+      0, ["case", ["has", "__kasc_cmf"],
+        ["min", ["coalesce", ["get", "__kasc_cmhi"], 1e6],
+          ["max", ["coalesce", ["get", "__kasc_cmlo"], 0], ["get", "__kasc_cmf"]]],
+        ["coalesce", ["get", "__kasc_cr"], 5]],
+      1, ["case", ["has", "__kasc_cmf"],
+        ["min", ["coalesce", ["get", "__kasc_cmhi"], 1e6],
+          ["max", ["coalesce", ["get", "__kasc_cmlo"], 0], ["*", 2, ["get", "__kasc_cmf"]]]],
+        ["coalesce", ["get", "__kasc_cr"], 5]],
+    ],
     "circle-color": ["coalesce", ["get", "__kasc_color"], "#2c5ea8"],
     "circle-opacity": ["coalesce", ["get", "__kasc_copa"], 1],
     "circle-stroke-color": ["coalesce", ["get", "__kasc_csc"], ["get", "__kasc_stroke"], "#ffffff"],

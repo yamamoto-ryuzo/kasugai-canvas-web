@@ -17,9 +17,9 @@ let session = null;
 export function configureLive(doc, hooks = {}) {
   const liveUrl = doc?.live?.url || "";
   if (!/^https?:\/\//i.test(liveUrl)) { stopLive(); return; }
-  // live: 行の | follow オプションは一度有効化したら維持する
-  // (インスペクタ再適用でユーザーの手動解除を上書きしない)
-  if (doc?.live?.follow) liveFollowEnabled = true;
+  // live: 行の | follow オプションは規定で有効化するが、ユーザーがパネルで
+  // 手動切替した後は再適用(kasc 差分適用→liveConfigureFromSpec)で上書きしない
+  if (doc?.live?.follow && !followUserSet) liveFollowEnabled = true;
   if (!session) session = new LiveSession();
   session.configure({ liveUrl, ...hooks });
 }
@@ -65,7 +65,11 @@ export async function liveWritebackEntries(entries, { theme } = {}) {
 // ---- live セッションの追加操作(QGIS → Canvas の状態・取得系) ----
 export function liveBase() { return session?.cfg?.liveUrl || null; }
 // live: 行の follow / UI トグルで有効化する QGIS キャンバス追従
-export function liveSetFollow(on) { liveFollowEnabled = !!on; return liveFollowEnabled; }
+export function liveSetFollow(on) {
+  liveFollowEnabled = !!on;
+  followUserSet = true;
+  return liveFollowEnabled;
+}
 export function liveIsFollowing() { return liveFollowEnabled; }
 export function liveFollowAvailable() { return typeof engineFollowApply === "function"; }
 // QGIS 側選択ハイライトの表示切替(OFF で受信適用を止め表示を消す)
@@ -127,6 +131,21 @@ let followLegacy = false;   // /live/state 未対応の旧サーバ → /present
 // 記憶しておき、live セッション確立時は ?follow 無しでも追従できる
 let engineFollowApply = null;
 let liveFollowEnabled = false;
+let followUserSet = false;
+// ユーザー入力起点のカメラ操作判定窓。ポインタ/ホイール/タッチ/キー入力の
+// あった直後だけ /live/camera 送信を許可し、follow 適用や flyTo 等の
+// プログラム移動が QGIS へエコーされるのを防ぐ(入力起点ルール)
+let userCamInputUntil = 0;
+function markUserCamInput() { userCamInputUntil = Date.now() + 2500; }
+if (typeof document !== "undefined") {
+  const _io = { capture: true, passive: true };
+  for (const ev of ["pointerdown", "wheel", "touchstart", "keydown"]) {
+    document.addEventListener(ev, markUserCamInput, _io);
+  }
+  // ドラグ継続中(ボタン押下中の移動)も入力中として窓を延ばす
+  document.addEventListener("pointermove",
+    e => { if (e.buttons) markUserCamInput(); }, _io);
+}
 // QGIS 側選択の Canvas ハイライト表示フラグ(OFF で受信適用を止めて消す)
 let selVisible = true;
 
@@ -155,16 +174,44 @@ function followKeyOf(s) {
 
 function applyFollowCanvas(canvas, sess = null) {
   if (!canvas || typeof canvas.lon !== "number" || typeof canvas.lat !== "number") return;
+  // QGIS が送る mpp3857(EPSG:3857 面の m/px)があれば、それから
+  // Web Mercator ズームを直接導く。QGIS 側の zoom は縮尺→近似テーブルの
+  // 推定値で誤差があるため、追従表示の見た目が QGIS とずれる原因になる。
+  // mpp3857 経由なら QGIS キャンバスと同じ m/px が再現され全エンジン共通で一致する
+  if (Number.isFinite(canvas.mpp3857) && canvas.mpp3857 > 0) {
+    canvas = { ...canvas, zoom: Math.log2(156543.03392 / canvas.mpp3857) };
+  }
   const key = followKeyOf(canvas);
+  // 自分が /live/camera で送った位置のエコーは適用しない。適用すると
+  // moveEnd→(入力窓が残っていれば)再POST→再変換の往復で微振動する。
+  // 位置が違えば「ユーザーが QGIS を動かした」実変更なので通常適用する。
+  // スキップ時も lastFollowKey を進めて、同状態の継続ポーリングで
+  // 再適用が発生しないようにする
+  const pe = sess?.pushedEcho;
+  if (pe && Date.now() < pe.until) {
+    sess.pushedEcho = null;
+    const dLon = Math.abs(canvas.lon - (pe.lon ?? NaN));
+    const dLat = Math.abs(canvas.lat - (pe.lat ?? NaN));
+    // zoom は照合しない: QGIS(縮尺由来)とエンジン(カメラ高さ由来)で
+    // 換算式が根本的に違い、常に数レベルずれ得るため。エコー判定は
+    // lon/lat(=実際に送った値がそのまま返る)のみで行う
+    if (dLon < 5e-4 && dLat < 5e-4) {
+      lastFollowKey = key;
+      return;
+    }
+  }
   if (key === lastFollowKey) return;
   lastFollowKey = key;
-  if (sess) sess.camHoldUntil = Date.now() + 1300;
+  // 起動直後の初期抑止(configure の +10s)を follow 適用で縮めないよう max を取る
+  if (sess) sess.camHoldUntil = Math.max(sess.camHoldUntil || 0, Date.now() + 1300);
   for (const f of followReg) {
     try { f.apply(canvas); } catch (_) { /* エンジン側適用失敗は無視 */ }
   }
   // live: 行の follow オプション(?follow 登録が無い場合のみ重複適用を避けて呼ぶ)
+  // apply のシグネチャは (canvasState, {topdown}) — 第2引数を渡さないと
+  // 分割代入で TypeError になり follow が無言で死ぬ(pitch 保持の既定)
   if (!followReg.length && liveFollowEnabled && engineFollowApply) {
-    try { engineFollowApply(canvas); } catch (_) { /* 同上 */ }
+    try { engineFollowApply(canvas, { topdown: false }); } catch (_) { /* 同上 */ }
   }
 }
 
@@ -197,7 +244,12 @@ function applyLiveState(data, sess = null) {
       })();
     }
   }
-  if (followReg.length) applyFollowCanvas(data?.canvas, sess);
+  // ?follow 登録がある場合だけでなく live: 行の | follow でも
+  // QGIS キャンバス位置を適用する(従来は followReg 必須で、
+  // live: 行経由では /live/state を読んでもカメラ追従が起きなかった)
+  if (followReg.length || (liveFollowEnabled && engineFollowApply)) {
+    applyFollowCanvas(data?.canvas, sess);
+  }
 }
 
 // live セッションが無い環境(standalone ?follow=)専用のポーラ。
@@ -232,12 +284,14 @@ class LiveSession {
     this.rev = 0;
     this.selSig = "";
     this.timer = null;
+    this.stateTimer = null;
     this.camTimer = null;
     this.sendDisabled = false;
     this.sendRetryAt = 0;
     this.busy = false;
     this.stateDisabled = false;
     this.camHoldUntil = 0;
+    this.pushedEcho = null;
   }
   configure(cfg) {
     const changed = !this.cfg || this.cfg.baseUrl !== cfg.baseUrl
@@ -249,15 +303,26 @@ class LiveSession {
       this.stateDisabled = false;
       this.sendDisabled = false;
       this.sendRetryAt = 0;
+      // 起動直後の初期カメラ位置(デフォルト/復元位置)の逆送は、
+      // 入力起点ゲート(userCamInputUntil)側で既に遮断されるため
+      // ここでの初期 hold は不要(残すと起動直後の正当なユーザードラッグを
+      // 誤って抑制する)。follow 適用後のエコー抑止は applyFollowCanvas 側で行う
       // 既存 live.json を即読みして現在 rev を掴む(初回適用は行わない)
       void this.tick(true);
     }
     if (!this.timer) this.timer = setInterval(() => void this.tick(), 1500);
+    // /live/state は follow/選択のリアルタイム反映用に 1.5s タイマーとは
+    // 分離して速く回す(ローカルループバックなので 400ms でも負荷は僅か。
+    // 内部で follow/applySelection 有無・document.hidden を判定して早期 return)
+    if (!this.stateTimer) {
+      this.stateTimer = setInterval(() => void this.tickState(), 400);
+    }
     // セッション確立後は standalone ポーラへ任せずこちらで処理する
     if (followPoller) followPoller.stop();
   }
   stop() {
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
+    if (this.stateTimer) { clearInterval(this.stateTimer); this.stateTimer = null; }
     this.cfg = null;
   }
   status() {
@@ -295,6 +360,7 @@ class LiveSession {
   // QGIS 側選択(qgis_selection)と QGIS キャンバス位置(follow)を反映する
   async tickState() {
     if (!this.cfg || this.stateDisabled) return;
+    if (typeof document !== "undefined" && document.hidden) return;
     if (!this.cfg.applySelection && !followReg.length
         && !(liveFollowEnabled && engineFollowApply)) return;
     const url = this.cfg.liveUrl.replace(/\/$/, "") + "/live/state";
@@ -347,12 +413,24 @@ class LiveSession {
   }
   notifyCamera() {
     if (!this.cfg || !this.cfg.getView) return;
+    // ユーザー入力起点のカメラ移動のみ送信する。マウス/タッチ/キー操作=
+    // 発信側、follow 適用・flyTo・初期カメラ等の API 移動=受信側として
+    // 振り分け、双方向性を保ったまま QGIS→Canvas→QGIS ループを断つ
+    if (Date.now() > userCamInputUntil) return;
     // フォロー適用直後の moveEnd エコーを抑制(QGIS→Canvas→QGIS の往復防止)
     if (Date.now() < this.camHoldUntil) return;
     if (this.camTimer) return;
     this.camTimer = setTimeout(() => {
       this.camTimer = null;
       const view = this.cfg?.getView?.() || {};
+      // 自分が送った view が /live/state 経由でエコーとして帰ってくるのを
+      // 識別するため記録(次の applyFollowCanvas で近似一致したら適用しない)
+      this.pushedEcho = {
+        lon: view.longitude ?? view.lon,
+        lat: view.latitude ?? view.lat,
+        zoom: view.zoom,
+        until: Date.now() + 5000,
+      };
       void this.post("/live/camera", view);
     }, 400);
   }
