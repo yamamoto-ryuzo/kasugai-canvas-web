@@ -17,7 +17,7 @@ import { scaleNiceFloor } from "../shared/scale-nice.js";
 import { createAttrWidget, renderAttrContent, attrEntriesFromProps } from "../shared/attr-widget.js";
 import { initAiChat, hasBackendFeature } from "../shared/ai-chat.js";
 import { createPlayerApi } from "../shared/player-api.js";
-import { configureLive, configureFollow, liveUpdate, liveNotifyCamera, liveNotifySelection, liveWritebackEntries, liveIsActive, liveRenderUrl } from "../shared/live.js";
+import { configureLive, configureFollow, liveUpdate, liveNotifyCamera, liveNotifySelection, liveWritebackEntries, liveQueryFeatures } from "../shared/live.js";
 import { mountLivePanel, syncLivePanel } from "../shared/live-panel.js";
 import { mountEngineSwitcher } from "../shared/engine-switch.js";
 import { matchSessionState, bindSessionState, applySessionState, sessionBootView, sessionInspectorFor, markSessionKascBase } from "../shared/session-state.js";
@@ -2064,16 +2064,38 @@ async function renderProject(loadedId, baseUrl, doc, manifest) {
       opt.value = i; opt.textContent = leafTitle || `base ${i}`;
       return opt;
     });
+    // 「ベースマップなし」「ベースマップ透明」を先頭に明示選択肢として置く
+    // (Cesium 版と同じ構成。値 -1=なし / -2=透明)
+    {
+      const noneOpt = document.createElement("option");
+      noneOpt.value = "-1"; noneOpt.textContent = t("basemap.none");
+      const transOpt = document.createElement("option");
+      transOpt.value = "-2"; transOpt.textContent = t("basemap.transparent");
+      sel.prepend(noneOpt, transOpt);
+    }
     baseEntries.forEach((entry, i) => {
       entry.lids.forEach(lid => map.getLayer(lid) && map.setLayoutProperty(lid, "visibility", i === active ? "visible" : "none"));
     });
-    sel.value = active;
+    // base: 行の | none / | transparent は初期でベースマップを張らない
+    // (Cesium 版と同じ規則)。対応する疑似選択肢を選んだ状態にする
+    const baseModeRow = (doc.bases || []).find(b => b.mode);
+    if (baseModeRow) {
+      baseEntries.forEach(e => e.lids.forEach(lid => map.getLayer(lid) && map.setLayoutProperty(lid, "visibility", "none")));
+      sel.value = baseModeRow.mode === "transparent" ? "-2" : "-1";
+    } else {
+      sel.value = active;
+    }
     // 初期表示は選択中の1レイヤのみ示す畳み状態で同期するため、
     // sel.value 確定後にリストを描画する
     syncBasemapList(sel);
     sel.onchange = () => {
+      const v = Number(sel.value);
       baseEntries.forEach((e, i) =>
-        e.lids.forEach(lid => map.getLayer(lid) && map.setLayoutProperty(lid, "visibility", i === Number(sel.value) ? "visible" : "none")));
+        e.lids.forEach(lid => map.getLayer(lid) && map.setLayoutProperty(lid, "visibility", i === v ? "visible" : "none")));
+      // -2「ベースマップ透明」は #map 背景を透過してページ側を見せる。
+      // それ以外では background: 行(未指定なら既定)へ戻す
+      const mapEl = document.querySelector("#map");
+      if (mapEl) mapEl.style.background = v === -2 ? "transparent" : (doc.background || "");
       syncDeckLayers(); // ベースマップのドレープコピーを選択中タイルへ差替える
       updateMapAttribution();
     };
@@ -2114,6 +2136,7 @@ async function renderProject(loadedId, baseUrl, doc, manifest) {
     applyKascText: liveApplyText,
     getView: () => mapViewToUrl(),
     applySelection: sel => applyQgisSelection(sel),
+    addLiveLayer: addLiveQgisLayer,
   });
   syncLivePanel();
   // group: 行の折りたたみ初期状態(#59)。QGIS レイヤーツリーの展開状態を再現
@@ -2409,6 +2432,81 @@ async function applyEntryQueryFilter(entry, value) {
   }
 }
 
+// 現在の表示範囲を [w,s,e,n] (EPSG:4326) で返す。アンチメリディアン
+// 跨ぎは全経度幅へ畳む(liveQueryFeatures の bbox= 引き渡し用)
+function viewBbox4326() {
+  const b = getViewBounds();
+  if (!b) return null;
+  const r = b.ranges?.[0];
+  if (!r) return null;
+  const west = b.ranges.length > 1 ? -180 : r.west;
+  const east = b.ranges.length > 1 ? 180 : r.east;
+  return [west, b.south, east, b.north];
+}
+
+// QGIS Live「Add to Canvas」: カタログ title を表示範囲(bbox)で
+// /live/features から取得して geojson エントリとして追加する。
+// liveSource を付けてカメラ停止ごとの範囲追従再取得対象にする
+async function addLiveQgisLayer(title) {
+  const t = String(title);
+  const existing = layerEntries.find(e => e.item.liveSource?.title === t);
+  if (existing) {
+    await reloadLiveEntry(existing);
+    return { added: existing.item._geojson?.features?.length ?? 0 };
+  }
+  // 同名レイヤが既に live kasc へ載っているなら二重追加しない
+  // (非表示 | off なら「表示にする」操作として扱う)
+  const inKasc = layerEntries.find(e =>
+    (e.item.sourceTitle || e.item.title) === t);
+  if (inKasc) {
+    if (inKasc.item.visible === false) {
+      inKasc.item.visible = true;
+      maybeLoadEntry(inKasc);
+      renderLayerRows(layerEntries, currentUnsupported);
+    }
+    return { added: 0, existing: true };
+  }
+  const data = await liveQueryFeatures(t, { bbox: viewBbox4326(), limit: 10000 });
+  if (!data?.ok) throw new Error(data?.reason || data?.error || "query failed");
+  const fc = data.geojson || { type: "FeatureCollection", features: [] };
+  const url = URL.createObjectURL(new Blob(
+    [JSON.stringify(fc)], { type: "application/geo+json" }));
+  const item = {
+    type: "geojson",
+    title: t,
+    sourceTitle: t,
+    url,
+    visible: true,
+    liveSource: { title: t },
+    _idx: (layerEntries.at(-1)?.item._idx ?? 0) + 1,
+  };
+  const entry = { item, lids: [], sid: null, filters: null, opas: null,
+    pending: true, deferred: true };
+  layerEntries.push(entry);
+  renderLayerRows(layerEntries, currentUnsupported);
+  await ensureEntryLoaded(entry);
+  return { added: fc.features.length, truncated: !!data.truncated };
+}
+
+// liveSource レイヤーの表示範囲追従再取得(moveend から呼ばれる)。
+// 取得した FC で _geojson を差し替え、QML 焼き込みを再適用して
+// 既存ソースへ setData する(requeryViewportLayers と同じ反映経路)
+async function reloadLiveEntry(entry) {
+  const t = entry.item.liveSource?.title;
+  if (!t || !entry.sid) return;
+  const data = await liveQueryFeatures(t, { bbox: viewBbox4326(), limit: 10000 });
+  if (!data?.ok) return;
+  const geojson = data.geojson || { type: "FeatureCollection", features: [] };
+  entry.item._geojson = geojson;
+  bakeEntryQml(entry.item, geojson);
+  const env = geojsonExtent(geojson);
+  if (env) entry.item._env = env;
+  const src = map.getSource(entry.sid);
+  if (src?.setData) src.setData(applyClientWhere(entry.item, geojson));
+  syncDeckLayers();
+  attrWidget.refresh();
+}
+
 // bbox=auto / :bbox 系レイヤーを現在の表示範囲で再クエリする
 function requeryViewportLayers(entries) {
   const bounds = getViewBounds();
@@ -2535,13 +2633,16 @@ map.on("moveend", () => {
   minimap.scheduleUpdate();
   geoTools.scheduleGraticule();
   const targets = layerEntries.filter(e => e.item._viewportQuery && e.item.visible !== false);
+  // QGIS Live「Add to Canvas」由来レイヤーの表示範囲追従再取得
+  const liveTargets = layerEntries.filter(e => e.item.liveSource && e.item.visible !== false);
   // bbox=auto / :bbox の初回読込に失敗したレイヤーは、移動後の表示範囲で自動リトライする
   // （Cesium 版 reloadFailedVectorLayer 相当。失敗 spec は entry.failed が担う）
   const retry = layerEntries.filter(e => e.item.visible !== false && e.failed && !e.pending && !e._loading && isViewportQueryItem(e.item));
-  if (!targets.length && !retry.length) return;
+  if (!targets.length && !liveTargets.length && !retry.length) return;
   clearTimeout(requeryTimer);
   requeryTimer = setTimeout(() => {
     if (targets.length) requeryViewportLayers(targets);
+    for (const e of liveTargets) void reloadLiveEntry(e);
     for (const entry of retry) {
       entry.deferred = true; // ensureEntryLoaded 経路で再マウントする
       entry.failed = false;
@@ -2601,64 +2702,8 @@ map.on("load", () => {
   })();
 });
 
-// ---- QGIS 描画フォールバック・オーバーレイ(#62) ----
-// /live/render の透過PNGを image source として重ねる
-// (Canvas で描けないレイヤーを QGIS レンダリングで表示)
-let qgisRenderOn = false;
-let qgisRenderTimer = null;
-function setQgisRender(on) {
-  qgisRenderOn = !!on;
-  if (!qgisRenderOn) {
-    try { if (map.getLayer("qgis-render")) map.removeLayer("qgis-render"); } catch (_) {}
-    try { if (map.getSource("qgis-render")) map.removeSource("qgis-render"); } catch (_) {}
-    return;
-  }
-  refreshQgisRender();
-}
-function qgisViewBbox() {
-  const b = map.getBounds();
-  return [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()];
-}
-function adjustBboxAspect(bbox, w, h) {
-  const [x0, y0, x1, y1] = bbox;
-  const cur = (x1 - x0) / (y1 - y0);
-  const tgt = w / h;
-  if (!(cur > 0) || !(tgt > 0) || Math.abs(cur - tgt) < 1e-9) return bbox;
-  if (cur > tgt) {
-    const dh = (x1 - x0) / tgt - (y1 - y0);
-    return [x0, y0 - dh / 2, x1, y1 + dh / 2];
-  }
-  const dw = (y1 - y0) * tgt - (x1 - x0);
-  return [x0 - dw / 2, y0, x1 + dw / 2, y1];
-}
-function refreshQgisRender() {
-  if (!qgisRenderOn || !liveIsActive()) return;
-  const bbox = qgisViewBbox();
-  if (!bbox) return;
-  const w = Math.max(1, map.getContainer().clientWidth || 800);
-  const h = Math.max(1, map.getContainer().clientHeight || 600);
-  const adj = adjustBboxAspect(bbox, w, h);
-  const url = liveRenderUrl({ bbox: adj, w, h });
-  if (!url) return;
-  const coordinates = [
-    [adj[0], adj[3]], [adj[2], adj[3]], [adj[2], adj[1]], [adj[0], adj[1]],
-  ];
-  const src = map.getSource("qgis-render");
-  if (src) {
-    src.updateImage({ url, coordinates });
-    return;
-  }
-  map.addSource("qgis-render", { type: "image", url, coordinates });
-  map.addLayer({ id: "qgis-render", type: "raster", source: "qgis-render",
-    paint: { "raster-opacity": 0.9 } });
-}
-map.on("moveend", () => {
-  if (!qgisRenderOn) return;
-  clearTimeout(qgisRenderTimer);
-  qgisRenderTimer = setTimeout(refreshQgisRender, 700);
-});
 // QGIS Live 操縦パネル(live: 行検出時にパネル先頭へ表示)
-mountLivePanel(document.querySelector("#panel"), { setRender: setQgisRender });
+mountLivePanel(document.querySelector("#panel"));
 
 // ?follow[=<base>] → geo_webview の /live/state をポーリングして表示を追従
 // (shared/live.js の live セッションへ統合。pitch は保持される)
@@ -3246,10 +3291,18 @@ async function applyKascView(view) {
 function applyViewBase(rawName) {
   const name = String(rawName || "").trim();
   if (/^(none|off|なし|ベースマップなし|transparent|hide|透明)$/i.test(name)) {
+    const transparent = /^(transparent|hide|透明)$/i.test(name);
     for (const e of currentBaseEntries) {
       e.lids.forEach(lid => map.getLayer(lid) && map.setLayoutProperty(lid, "visibility", "none"));
     }
-    if (panel.basemapSelect) panel.basemapSelect.value = "";
+    if (transparent) {
+      const mapEl = document.querySelector("#map");
+      if (mapEl) mapEl.style.background = "transparent";
+    }
+    if (panel.basemapSelect) {
+      panel.basemapSelect.value = transparent ? "-2" : "-1";
+      syncBasemapList(panel.basemapSelect);
+    }
   } else {
     const idx = currentBaseEntries.findIndex(e => {
       const title = e.item.title || "";
