@@ -1,8 +1,8 @@
 // QML スタイル(.qml)の Cesium への適用（描画側バインディング）
 // パース・式評価・シンボルコンパイルは /shared/qml-style.js を参照。
 // 本ファイルは Cesium 固有の entity/primitive 適用部のみを持つ。
-import { toCesiumColor, dashPattern, markerLayersToCanvas, fillPartsToTile, scaleFillPartsAlpha, rgbaToCss, qmlLabelCanvas, evalGeomExpr, diagramCanvas, linRefFormatText } from "../shared/qml-style.js";
-import { trimCoordsPlanar, TRIM_PX_TO_M } from "../shared/qml-2d.js";
+import { toCesiumColor, dashPattern, markerLayersToCanvas, fillPartsToTile, scaleFillPartsAlpha, rgbaToCss, qmlLabelCanvas, evalGeomExpr, diagramCanvas, linRefFormatText, clampMapUnitsPerPixel, interpolatedColorAt } from "../shared/qml-style.js";
+import { trimCoordsPlanar, TRIM_PX_TO_M, arrowLinePolygonRings } from "../shared/qml-2d.js";
 
 const Cesium = window.Cesium;
 
@@ -395,7 +395,7 @@ function _applyQmlStyleToDataSourceInner(ds, style, { clamp = false, clampRef = 
         // MapUnit/MetersInMapUnits: メートル実寸のためカメラ距離で拡縮する
         // (installMapUnitScaler が _qmlMapUnits を参照して更新)
         const mu = spec.markers.find(m => m?.sizeMeters);
-        if (mu) (entity._qmlMapUnits ||= {}).billboard = { meters: mu.sizeMeters, refPx: Math.max(canvas.height || 1, 1) };
+        if (mu) (entity._qmlMapUnits ||= {}).billboard = { meters: mu.sizeMeters, refPx: Math.max(canvas.height || 1, 1), mus: mu.sizeMetersMus || null };
         else if (entity._qmlMapUnits) delete entity._qmlMapUnits.billboard;
         entity.billboard.verticalOrigin = new Cesium.ConstantProperty(Cesium.VerticalOrigin.CENTER);
         entity.billboard.horizontalOrigin = new Cesium.ConstantProperty(Cesium.HorizontalOrigin.CENTER);
@@ -447,6 +447,25 @@ function _applyQmlStyleToDataSourceInner(ds, style, { clamp = false, clampRef = 
           entity.polyline.material = dashMaterialProperty(mulAlpha(spec.line.color, opacity), spec.line.dash);
         }
         entity.polyline.width = new Cesium.ConstantProperty(spec.line.widthPx);
+        // MapUnit/MetersInMapUnits の線幅: Cesium polyline は画面 px 幅しか
+        // 持てないため CorridorGraphics(実幅 m の帯)へ置き換える
+        // (QgsRenderContext の MapUnits 分岐相当。mus は実距離描画へ移るため不要)
+        if (Number.isFinite(spec.line.widthMeters) && !spec.line.dash?.length
+            && !spec.line.decor) {
+          const pos0 = entity.polyline.positions?.getValue?.(t);
+          if (pos0?.length >= 2) {
+            entity.polyline.show = new Cesium.ConstantProperty(false);
+            addAux({
+              corridor: {
+                positions: pos0,
+                width: new Cesium.ConstantProperty(spec.line.widthMeters),
+                cornerType: { bevel: Cesium.CornerType.BEVEL, miter: Cesium.CornerType.MITERED, round: Cesium.CornerType.ROUNDED }[spec.line.join] ?? Cesium.CornerType.ROUNDED,
+                material: new Cesium.ColorMaterialProperty(toCesiumColor(mulAlpha(spec.line.color, opacity))),
+                ...(clamp ? { height: new Cesium.ConstantProperty(0) } : {}),
+              },
+            });
+          }
+        }
         // symbollevels 近似: 地物最小 pass を ground プリミティブの zIndex へ
         // (非クランプの 3D 空間では深度ソートが優先されるため無効)
         if (Number.isFinite(spec.zRank)) {
@@ -539,7 +558,7 @@ function _applyQmlStyleToDataSourceInner(ds, style, { clamp = false, clampRef = 
         } else if (solidBase) {
           entity.polygon.material = new Cesium.ColorMaterialProperty(toCesiumColor(solidBase));
           // 2.5D レンダラ近似: 非ドレープ時のみ立体押出し(クランプと両立しない)(#64)
-          if (style?.d25 && !clamp) entity.polygon.extrudedHeight = new Cesium.ConstantProperty(style.d25.height ?? 10);
+          if (style?.d25 && !clamp) entity.polygon.extrudedHeight = new Cesium.ConstantProperty(style.d25.heightM ?? style.d25.height ?? 10);
         } else {
           entity.polygon.material = new Cesium.ColorMaterialProperty(Cesium.Color.TRANSPARENT);
         }
@@ -987,6 +1006,139 @@ function samplePolylinePositions(entity, t, stepM, { skipMultiples = 0 } = {}) {
   return out;
 }
 
+// LinearReferencing 用: QGIS は interval をソース座標系の地図単位
+// (4326=度)でユークリッド計測するため cartographic 度空間でサンプルする。
+// 戻り値 [{position,angle,dist}] — angle は北基準方位 rad、dist は
+// ソース単位(度)の累積距離。skipMultiples はその倍数地点を除外
+function linRefSamples3D(pos, interval, { skipMultiples = 0, max = 500 } = {}) {
+  const step = Math.max(interval || 0, 1e-9);
+  const skip = Math.max(skipMultiples || 0, 0);
+  const eps = step * 1e-6;
+  const ll = (pos || []).map(p => {
+    const c = Cesium.Cartographic.fromCartesian(p);
+    return [Cesium.Math.toDegrees(c.longitude), Cesium.Math.toDegrees(c.latitude)];
+  });
+  const out = [];
+  let acc = 0, next = step;
+  for (let i = 0; i + 1 < ll.length && out.length < max; i++) {
+    const [x1, y1] = ll[i], [x2, y2] = ll[i + 1];
+    const dx = x2 - x1, dy = y2 - y1, len = Math.hypot(dx, dy);
+    if (!len) continue;
+    const ang = Math.atan2(dx, dy);
+    while (next <= acc + len + eps && out.length < max) {
+      const t = Math.min(Math.max((next - acc) / len, 0), 1);
+      if (!(skip > 0 && Math.abs(next % skip) < Math.max(eps, skip * 1e-6))) {
+        out.push({ position: Cesium.Cartesian3.fromDegrees(x1 + dx * t, y1 + dy * t),
+          angle: ang, dist: next });
+      }
+      next += step;
+    }
+    acc += len;
+  }
+  return out;
+}
+
+// MarkerLine 配置サンプリング(Cesium 版)。Qgis C++
+// QgsTemplatedLineSymbolLayerBase(renderPolylineInterval/renderPolylineCentral/
+// renderPolylineVertex/renderOffsetVertexAlongLine/markerAngle)準拠で
+// qml-2d.js markerlineDecorSamples と同じ規約を Cartesian 空間で実装。
+// 戻り値 [{position,angle}] — angle は北基準方位 rad(既存 s.angle 規約)
+function markerlineDecorSamples3D(pos, decor) {
+  const MAX = 500;
+  const out = [];
+  if (!pos || pos.length < 2) return out;
+  const ll = pos.map(p => Cesium.Cartographic.fromCartesian(p));
+  const segAng = (i, j) => Math.atan2(ll[j].longitude - ll[i].longitude,
+    ll[j].latitude - ll[i].latitude);
+  const eq = (i, j) => ll[i].longitude === ll[j].longitude && ll[i].latitude === ll[j].latitude;
+  const cum = [0];
+  for (let i = 1; i < pos.length; i++)
+    cum.push(cum[i - 1] + Cesium.Cartesian3.distance(pos[i - 1], pos[i]));
+  const total = cum[cum.length - 1];
+  const pointAt = d => {
+    let i = 1;
+    while (i < cum.length - 1 && cum[i] < d) i++;
+    const segLen = cum[i] - cum[i - 1];
+    const t = segLen > 0 ? Math.min(Math.max((d - cum[i - 1]) / segLen, 0), 1) : 0;
+    return { position: Cesium.Cartesian3.lerp(pos[i - 1], pos[i], t, new Cesium.Cartesian3()),
+      angle: segAng(i - 1, i) };
+  };
+  // C++ markerAngle 相当(頂点 index 基準)
+  const vertexAngle = (isRing, i) => {
+    const n = pos.length;
+    if (isRing || (i > 0 && i < n - 1)) {
+      let pi = i - 1, ni = i + 1;
+      if (isRing && (i === 0 || i === n - 1)) { pi = n - 2; ni = 1; }
+      while (pi >= 0 && eq(pi, i)) pi--;
+      while (ni < n && eq(ni, i)) ni++;
+      if (pi >= 0 && ni < n) {
+        const a1 = segAng(pi, i), a2 = segAng(i, ni);
+        return Math.atan2(Math.sin(a1) + Math.sin(a2), Math.cos(a1) + Math.cos(a2));
+      }
+      return 0;
+    }
+    if (i === 0) {
+      for (let j = i; j < n - 1; j++) if (!eq(j, j + 1)) return segAng(j, j + 1);
+    } else {
+      for (let j = i; j >= 1; j--) if (!eq(j - 1, j)) return segAng(j - 1, j);
+    }
+    return 0;
+  };
+  const flags = new Set(String(decor.placement || "interval").split(/[|,\s]+/).filter(Boolean));
+  if (!flags.size) flags.add("interval");
+  const off = (decor.offsetAlongPx || 0) * LABEL_M_PER_PX;
+  const avg = (decor.avgAnglePx || 0) * LABEL_M_PER_PX;
+  const n = pos.length;
+  const isRing = n > 2 && eq(0, n - 1);
+  const windowAngle = d => avg > 0 ? (() => {
+    const a = pointAt(Math.max(0, d - avg)).position;
+    const b = pointAt(Math.min(total, d + avg)).position;
+    const ca = Cesium.Cartographic.fromCartesian(a), cb = Cesium.Cartographic.fromCartesian(b);
+    return Math.atan2(cb.longitude - ca.longitude, cb.latitude - ca.latitude);
+  })() : undefined;
+  if (flags.has("interval")) {
+    const step = Math.max((decor.intervalPx || 30), 5) * LABEL_M_PER_PX;
+    let d = off;
+    if (isRing && total > 0 && off !== 0) d = ((off % total) + total) % total;
+    for (; d <= total && out.length < MAX; d += step) {
+      const s = pointAt(Math.min(d, total));
+      const wa = windowAngle(d);
+      out.push({ position: s.position, angle: wa !== undefined ? wa : s.angle });
+    }
+  }
+  if (flags.has("vertex") || flags.has("curvepoint")) {
+    const m = isRing ? n - 1 : n;
+    for (let i = 0; i < m && out.length < MAX; i++)
+      out.push({ position: pos[i], angle: vertexAngle(isRing, i) });
+  }
+  if (flags.has("innervertices")) {
+    const m = isRing ? n - 1 : n;
+    for (let i = 1; i < m - 1 && out.length < MAX; i++)
+      out.push({ position: pos[i], angle: vertexAngle(isRing, i) });
+  }
+  if (flags.has("segmentcenter")) {
+    for (let i = 0; i + 1 < n && out.length < MAX; i++) {
+      if (eq(i, i + 1)) continue;
+      out.push({ position: Cesium.Cartesian3.midpoint(pos[i], pos[i + 1], new Cesium.Cartesian3()),
+        angle: segAng(i, i + 1) });
+    }
+  }
+  if (flags.has("firstvertex") && decor.everyPart !== false) {
+    if (off > 0 && off <= total) out.push(pointAt(off));
+    else if (off <= 0) out.push({ position: pos[0], angle: vertexAngle(isRing, 0) });
+  }
+  if (flags.has("lastvertex") && decor.everyPart !== false) {
+    if (off > 0 && off <= total) out.push(pointAt(total - off));
+    else if (off <= 0) out.push({ position: pos[n - 1], angle: vertexAngle(isRing, n - 1) });
+  }
+  if (flags.has("centralpoint")) {
+    const s = pointAt(total / 2);
+    const wa = windowAngle(total / 2);
+    out.push({ position: s.position, angle: wa !== undefined ? wa : s.angle });
+  }
+  return out;
+}
+
 // 画面上方向(線分方位 rad)から hash_angle 度の刻みを地図上に作る
 function offsetPos(pos, azimuthRad, distM) {
   const c = Cesium.Cartographic.fromCartesian(pos);
@@ -1007,7 +1159,8 @@ function renderInterpolatedLine(entity, decor, t, { addAux, clamp, opacity }) {
   // 本体の単色ラインは補間セグメントで置き換える
   entity.polyline.show = new Cesium.ConstantProperty(false);
   const N = Math.min(32, Math.max(8, Math.round(total / 500)));
-  const lerpC = f => decor.c1.map((v, i) => v + (decor.c2[i] - v) * f);
+  // color_ramp_shader(items/stops)があればそちら優先、無ければ c1→c2 線形
+  const lerpC = f => interpolatedColorAt(decor, f);
   const clampToGround = entity.polyline.clampToGround?.getValue?.(t) ?? clamp;
   const arcType = entity.polyline.arcType?.getValue?.(t) ?? Cesium.ArcType.GEODESIC;
   let prev = pos[0];
@@ -1090,8 +1243,8 @@ function renderLineDecor(entity, decor, t, { addAux, clamp, opacity }) {
     const tf = decor.text || {};
     const offM = (decor.labelOffsetPx || [0, 0]).map(v => (v || 0) * LABEL_M_PER_PX);
     const mkCv = decor.showMarker && decor.markers?.length ? markerLayersToCanvas(decor.markers) : null;
-    for (const s of samplePolylinePositions(entity, t, Math.max(decor.intervalM || 1, 1), decor)) {
-      if (s.dist <= 1e-9) continue; // 先頭(0m)は QGIS 同様ラベル無し
+    for (const s of linRefSamples3D(pos, decor.interval, decor)) {
+      if (s.dist <= 1e-9) continue; // 先頭(0)は QGIS 同様ラベル無し
       let p = s.position;
       if (offM[0] || offM[1]) {
         // label_offset: rotate 時は線方向系(北=0 時計回りの方位)、
@@ -1139,23 +1292,17 @@ function renderLineDecor(entity, decor, t, { addAux, clamp, opacity }) {
   const pos = entity.polyline?.positions?.getValue?.(t);
   if (!pos || pos.length < 2) return;
   if (decor.kind === "markerline" && decor.markers?.length) {
+    // QGIS C++ の MarkerLine はマーカーのみ描き基線は引かない
+    entity.polyline.show = new Cesium.ConstantProperty(false);
     const cv = markerLayersToCanvas(decor.markers);
-    let pts = [];
-    if (decor.placement === "vertex") pts = pos.map(p => ({ position: p }));
-    else if (decor.placement === "firstvertex") pts = [{ position: pos[0] }];
-    else if (decor.placement === "lastvertex") pts = [{ position: pos[pos.length - 1] }];
-    else if (decor.placement === "centralpoint") {
-      const samples = samplePolylinePositions(entity, t, Number.MAX_VALUE);
-      pts = samples.length ? [samples[Math.floor(samples.length / 2)]] : [];
-    } else {
-      pts = samplePolylinePositions(entity, t, Math.max(decor.intervalPx || 30, 5) * LABEL_M_PER_PX);
-    }
+    const pts = markerlineDecorSamples3D(pos, decor);
     for (const s of pts) {
       const bb = { position: s.position, billboard: { image: cv, verticalOrigin: Cesium.VerticalOrigin.CENTER, horizontalOrigin: Cesium.HorizontalOrigin.CENTER } };
       if (decor.rotateMarker !== false && s.angle !== undefined) bb.billboard.rotation = -(s.angle - Math.PI / 2);
       addAux(bb);
     }
   } else if (decor.kind === "hashline" && decor.tick) {
+    entity.polyline.show = new Cesium.ConstantProperty(false);
     const tick = decor.tick;
     const half = (tick.lengthPx || 4) * LABEL_M_PER_PX / 2;
     const tickAng = (tick.angleDeg ?? 90) * Math.PI / 180;
@@ -1173,23 +1320,27 @@ function renderLineDecor(entity, decor, t, { addAux, clamp, opacity }) {
       });
     }
   } else if (decor.kind === "arrowline") {
-    const [a, b] = [pos[pos.length - 2], pos[pos.length - 1]];
-    const ca = Cesium.Cartographic.fromCartesian(a), cb = Cesium.Cartographic.fromCartesian(b);
-    const az = Math.atan2(cb.longitude - ca.longitude, cb.latitude - ca.latitude);
-    const headLen = (decor.headLenPx || 9) * LABEL_M_PER_PX;
-    const headWid = (decor.headWidthPx || 9) * LABEL_M_PER_PX / 2;
-    const base = offsetPos(b, az, -headLen);
-    const l = offsetPos(base, az + Math.PI / 2, headWid);
-    const r = offsetPos(base, az - Math.PI / 2, headWid);
-    // 矢羽はポリゴンではなく2本の折れ線で近似(補助ポリゴンの
-    // プリミティブ混在による属性不整合を避ける)
-    for (const tip of [l, r]) {
+    entity.polyline.show = new Cesium.ConstantProperty(false);
+    // C++ QgsArrowSymbolLayer 準拠の全ポリゴン(本体+矢頭)。
+    // qml-2d.js の移植関数を始点基準の局所メートル座標で呼び、
+    // offsetPos と同じ簡易換算(111320*cos緯度 / 110540)で緯度経度へ戻す
+    const carts = pos.map(p => Cesium.Cartographic.fromCartesian(p));
+    const c0 = carts[0];
+    const kx = 111320 * Math.cos(c0.latitude), ky = 110540;
+    const pts = carts.map(cg => [
+      (cg.longitude - c0.longitude) * kx,
+      (cg.latitude - c0.latitude) * ky,
+      cg.height,
+    ]);
+    const rings = arrowLinePolygonRings([pts], decor, v => v * LABEL_M_PER_PX);
+    for (const ring of rings) {
+      const ps = ring.map(([mx, my, h]) =>
+        Cesium.Cartesian3.fromRadians(c0.longitude + mx / kx, c0.latitude + my / ky, h || 0));
       addAux({
-        polyline: {
-          positions: [tip, b],
-          width: new Cesium.ConstantProperty(Math.max(decor.widthPx || 2, 1)),
-          material: new Cesium.ColorMaterialProperty(toCesiumColor(mulAlpha(decor.color, opacity))),
-          clampToGround: new Cesium.ConstantProperty(clamp),
+        polygon: {
+          hierarchy: new Cesium.PolygonHierarchy(ps),
+          material: toCesiumColor(mulAlpha(decor.color || [0, 0, 0, 1], opacity)),
+          ...(clamp ? { classificationType: Cesium.ClassificationType.TERRAIN } : {}),
         },
       });
     }
@@ -1452,7 +1603,10 @@ export function installMapUnitScaler(scene, getSources) {
           if (!(mpp > 0)) continue;
           const setScale = (gfx, m) => {
             if (!gfx || !m) return;
-            const scale = Math.min(Math.max((m.meters / mpp) / (m.refPx || 1), 0.01), 100);
+            // size_map_unit_scale(QgsMapUnitScale)が付く場合は QGIS 準拠で
+            // mup をクランプする(縮尺縮尺範囲外の拡縮を止める)
+            const mup = m.mus ? clampMapUnitsPerPixel(mpp, m.mus) : mpp;
+            const scale = Math.min(Math.max((m.meters / mup) / (m.refPx || 1), 0.01), 100);
             const cur = gfx.scale?.getValue?.() ?? 1;
             if (Math.abs(cur - scale) > 0.02) {
               gfx.scale = new Cesium.ConstantProperty(scale);
@@ -1570,7 +1724,9 @@ export function applyQmlStyleToPrimitive(primitive, style, hiddenSymbols = null,
   };
 
   applyTo(primitive.points, Cesium.BufferPoint, "point", s => s.markers?.length);
-  applyTo(primitive.polylines, Cesium.BufferPolyline, "line", s => !!s.line);
+  // spec.line.decor 系(MarkerLine/HashLine/ArrowLine 等)は QGIS が基線を引かない
+  // ため透明マテリアルに畳む(装飾自体は buildLineDecorForGeojson の補助 entity が描く)
+  applyTo(primitive.polylines, Cesium.BufferPolyline, "line", s => !!s.line && !s.line.decor);
   applyTo(primitive.polygons, Cesium.BufferPolygon, "fill", s => !!s.fillParts?.length);
 }
 
@@ -1579,4 +1735,62 @@ function transparentMaterial(kind) {
   if (kind === "point") return new Cesium.BufferPointMaterial({ color: t, size: 1 });
   if (kind === "line") return new Cesium.BufferPolylineMaterial({ color: t, width: 1 });
   return new Cesium.BufferPolygonMaterial({ color: t });
+}
+
+// GeoJsonPrimitive 経路用: GeoJSON 地物の LineString から decor
+// (MarkerLine/HashLine/ArrowLine/LinearReferencing/InterpolatedLine/FilledLine)
+// 補助エンティティを生成し ds.entities へ追加する。
+// バッチ primitive では装飾幾何を焼き込めないため、entity 経路と同じ
+// renderLineDecor をポリライン shim 経由で再利用する。
+// clamp=true(ドレープ)は billboard/label/point を地表クランプへ揃える
+// (applyQmlStyleToDataSource 内 addAux と同じ規則)。
+// hiddenSymbols は applyQmlStyleToPrimitive と同じ凡例非表示判定。
+// 戻り値: 追加した補助エンティティ数
+export function buildLineDecorForGeojson(geojson, style, ds, { clamp = false, clampRef = null, opacity = 1, hiddenSymbols = null, time } = {}) {
+  if (!geojson || !style || !ds) return 0;
+  const t = time || Cesium.JulianDate.now();
+  // clampRef 未指定のクランプは従来どおり CLAMP_TO_GROUND(entity 経路と同じ規則)
+  const hRef = clamp ? (clampRef ?? Cesium.HeightReference.CLAMP_TO_GROUND) : null;
+  const hasHidden = !!(hiddenSymbols && hiddenSymbols.size);
+  let added = 0;
+  const addAux = ent => {
+    try {
+      if (hRef != null) {
+        if (ent.billboard) ent.billboard.heightReference = hRef;
+        if (ent.label) ent.label.heightReference = hRef;
+        if (ent.point) ent.point.heightReference = hRef;
+      }
+      const e = ds.entities.add(ent);
+      added++;
+      return e;
+    } catch (_) { return null; }
+  };
+  for (const f of geojson.features || []) {
+    const geom = f?.geometry;
+    if (!geom || !/LineString/.test(geom.type || "")) continue;
+    const props = { ...(f.properties || {}), __geometry: geom };
+    const hiddenByLegend = hasHidden && style.namesFor
+      && (() => { const names = style.namesFor(props); return names.length > 0 && names.every(name => hiddenSymbols.has(name)); })();
+    if (hiddenByLegend) continue;
+    let spec = null;
+    try { spec = style.evaluate(props); } catch (_) { continue; }
+    const decor = spec?.line?.decor;
+    if (!decor) continue;
+    const parts = geom.type === "MultiLineString" ? geom.coordinates : [geom.coordinates];
+    for (const c of parts) {
+      if (!Array.isArray(c) || c.length < 2) continue;
+      const flat = [];
+      for (const p of c) { if (p) flat.push(p[0], p[1], p[2] || 0); }
+      if (flat.length < 6) continue;
+      const pos = Cesium.Cartesian3.fromDegreesArrayHeights(flat);
+      // renderLineDecor が触るのは polyline.positions/getValue・show のみ。
+      // show は非表示化のため代入されるだけなので素のオブジェクトで足りる
+      const shim = { polyline: {
+        positions: { getValue: () => pos },
+        show: new Cesium.ConstantProperty(true),
+      } };
+      try { renderLineDecor(shim, decor, t, { addAux, clamp, opacity }); } catch (_) {}
+    }
+  }
+  return added;
 }
