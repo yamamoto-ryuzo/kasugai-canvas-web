@@ -1,8 +1,15 @@
 {
-  "generated_at": "2026-11-21T09:47:44.469730+00:00",
+  "generated_at": "2026-11-23T01:47:04.860248+00:00",
   "repo": "yamamoto-ryuzo/kasugai-canvas-web",
   "channels": {
     "stable": [
+      {
+        "version": "7.1.0",
+        "deployed_at": "2026-11-23T10:46:39+09:00",
+        "commit": "d4db3fd",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/d4db3fd",
+        "message": "Sync web/ to stable (v7.1.0)"
+      },
       {
         "version": "7.1.0",
         "deployed_at": "2026-11-21T18:47:21+09:00",
@@ -740,6 +747,13 @@
       }
     ],
     "unstable": [
+      {
+        "version": "7.1.0",
+        "deployed_at": "2026-11-23T10:46:13+09:00",
+        "commit": "8b56f24",
+        "commit_url": "https://github.com/yamamoto-ryuzo/kasugai-canvas-web/commit/8b56f24",
+        "message": "Sync web/ to unstable (v7.1.0)"
+      },
       {
         "version": "7.1.0",
         "deployed_at": "2026-11-21T18:47:03+09:00",
